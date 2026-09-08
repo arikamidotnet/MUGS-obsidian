@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Local build artifacts (commit main.js so BRAT works out of the box;
+# run `npm run build` before pushing if you change source).
+*.log
+.DS_Store
+
+# Do NOT commit vault-local secrets. The plugin stores credentials inside
+# the Obsidian vault at runtime — that is a separate concern from this repo.
