@@ -24,6 +24,9 @@ const context = await esbuild.context({
     "@lezer/common",
     "@lezer/highlight",
     "@lezer/lr",
+    // node:-prefixed built-ins (e.g. node:child_process) resolve from the
+    // Electron/Node runtime at load time; leave them external.
+    "node:*",
     ...builtins,
   ],
   format: "cjs",

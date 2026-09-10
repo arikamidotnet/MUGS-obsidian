@@ -1,0 +1,69 @@
+/**
+ * MUGS — view data-source seams (pure).
+ *
+ * The Map/Diff views never touch the store or git directly; they ask an injected
+ * data source for already-shaped rows. This keeps the views thin and the logic
+ * here unit-testable without Obsidian. `main.ts` installs concrete
+ * implementations via {@link setMugsContext} before any view opens.
+ */
+import type { FolderMapping, SyncStatus } from "../types";
+import type { AuthorRef, AuthorsByFile } from "./diffModel";
+
+/** One row of the Map view: a mapping plus runtime enrichment. */
+export interface MapRow {
+  mapping: FolderMapping;
+  status: SyncStatus;
+  /** Owning user (recent git author) when the clone is available. */
+  owner?: string;
+}
+
+/** Supplies the data the Map view renders. */
+export interface MapDataSource {
+  getRows(): Promise<MapRow[]>;
+}
+
+/** What the Diff view asks for: a diff plus per-file authors for attribution. */
+export interface DiffQuery {
+  mappingId: string;
+  /** Optional explicit "to" ref (defaults to HEAD). */
+  ref?: string;
+}
+
+export interface DiffResult {
+  diffText: string;
+  authorsByFile: AuthorsByFile;
+}
+
+/** Supplies the data the Diff view renders. */
+export interface DiffDataSource {
+  getDiff(query: DiffQuery): Promise<DiffResult>;
+}
+
+/** The runtime context the views depend on. */
+export interface MugsContext {
+  map: MapDataSource;
+  diff: DiffDataSource;
+}
+
+let context: MugsContext | null = null;
+
+/** Install the data sources the views will use (called once from main.ts). */
+export function setMugsContext(ctx: MugsContext): void {
+  context = ctx;
+}
+
+/** Retrieve the installed context. Throws if main.ts has not initialized it. */
+export function getMugsContext(): MugsContext {
+  if (!context) {
+    throw new Error("MUGS UI context is not initialized — views must be registered by the plugin.");
+  }
+  return context;
+}
+
+/** Test seam: clear the installed context. Not used in production. */
+export function __resetMugsContextForTests(): void {
+  context = null;
+}
+
+// Re-exported for convenience so callers import types from one place.
+export type { AuthorRef };
