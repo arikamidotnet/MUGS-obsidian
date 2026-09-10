@@ -14,6 +14,17 @@ export interface Author {
   email: string;
 }
 
+/** An author aggregated over a log range: commit count + latest author timestamp. */
+export interface AuthorActivity {
+  name: string;
+  /** Git author email, when known. */
+  email?: string;
+  /** Number of commits authored in the queried range. */
+  commitCount: number;
+  /** Latest author timestamp (epoch seconds) in the range, if any. */
+  lastActivityAt?: number;
+}
+
 export class GitClient {
   constructor(private runner: GitRunner, private cwd?: string) {}
 
@@ -96,6 +107,38 @@ export class GitClient {
     const r = await this.run(["log", "--oneline", range]);
     if (r.code !== 0) throw new Error(`git log ${range} failed (${r.code}): ${r.stderr.trim()}`);
     return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
+  /**
+   * Recent committers for a ref range, aggregated by author name. Parses
+   * `git log --format=%an%x1f%ae%x1f%at%x1e` — unit separators keep names/emails
+   * containing spaces or commas intact. Commit count and latest timestamp are
+   * summed/per-author so the result feeds the membership view's activity signal.
+   * Sorted newest-first; `limit` caps total commits scanned.
+   */
+  async recentAuthors(range: string, limit = 100): Promise<AuthorActivity[]> {
+    const fmt = "%an%x1f%ae%x1f%at";
+    const r = await this.run(["log", `--limit=${limit}`, `--format=${fmt}`, range]);
+    if (r.code !== 0) throw new Error(`git log ${range} failed (${r.code}): ${r.stderr.trim()}`);
+    const byName = new Map<string, AuthorActivity>();
+    for (const rec of r.stdout.split("\u001e").filter((l) => l.length > 0)) {
+      const [name, email, ts] = rec.split("\u001f");
+      if (!name) continue;
+      const epoch = ts ? Number.parseInt(ts, 10) : NaN;
+      const prev = byName.get(name);
+      if (prev) {
+        prev.commitCount += 1;
+        if (!Number.isNaN(epoch) && (prev.lastActivityAt ?? 0) < epoch) prev.lastActivityAt = epoch;
+      } else {
+        byName.set(name, {
+          name,
+          email: email || undefined,
+          commitCount: 1,
+          lastActivityAt: Number.isNaN(epoch) ? undefined : epoch,
+        });
+      }
+    }
+    return [...byName.values()].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
   }
 
   /** Unified diff between two refs (empty string when identical). */

@@ -102,3 +102,35 @@ describe("GitClient — query parsing and errors", () => {
     expect(last(r).args).toEqual(["diff", "base...HEAD"]);
   });
 });
+
+describe("GitClient — recentAuthors", () => {
+  const US = "\u001f"; // field separator (git %x1f)
+  const RS = "\u001e"; // record separator (git %x1e)
+
+  it("logs with the limit, format, and range, then aggregates by author name", async () => {
+    const out = [
+      ["Grace Hopper", "grace@example.com", "1000"],
+      ["Ada Lovelace", "ada@example.com", "2000"],
+      ["Grace Hopper", "grace@work.example", "3000"], // same name -> count 2, latest ts 3000
+      ["Bob", "bob@example.com", "1500"],
+    ]
+      .map((f) => f.join(US))
+      .join(RS);
+    const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
+    const authors = await client(r).recentAuthors("base..HEAD", 50);
+    expect(last(r).args).toEqual(["log", "--limit=50", "--format=%an%x1f%ae%x1f%at", "base..HEAD"]);
+    expect(authors).toEqual([
+      { name: "Grace Hopper", email: "grace@example.com", commitCount: 2, lastActivityAt: 3000 },
+      { name: "Ada Lovelace", email: "ada@example.com", commitCount: 1, lastActivityAt: 2000 },
+      { name: "Bob", email: "bob@example.com", commitCount: 1, lastActivityAt: 1500 },
+    ]);
+  });
+
+  it("returns an empty list for an empty range and throws on failure", async () => {
+    const empty = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    expect(await client(empty).recentAuthors("nope..HEAD")).toEqual([]);
+
+    const bad = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad revision" }));
+    await expect(client(bad).recentAuthors("bad")).rejects.toThrow(/bad revision/);
+  });
+});
