@@ -15,7 +15,7 @@ import type {
   SyncStatus,
 } from "./types";
 
-export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "local"]);
+export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "gitea", "forgejo", "local"]);
 export const syncDirectionSchema = z.enum(["push-pull", "pull-only", "push-only"]);
 export const syncStatusSchema = z.enum(["ok", "conflict", "error", "up-to-date", "pending"]);
 

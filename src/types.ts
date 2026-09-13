@@ -8,7 +8,7 @@
  */
 
 /** Supported git backends. All are git-native; GitLab gets first-class REST support. */
-export type ProviderKind = "github" | "gitlab" | "bitbucket" | "local";
+export type ProviderKind = "github" | "gitlab" | "bitbucket" | "gitea" | "forgejo" | "local";
 
 /** How a mapping interacts with the remote. */
 export type SyncDirection = "push-pull" | "pull-only" | "push-only";
