@@ -39,7 +39,7 @@ export class FetchTransport implements HttpTransport {
 }
 
 /** Build a path with query params appended (values are stringified; null/undefined skipped). */
-export function withQuery(path: string, params?: Record<string, string | number | boolean>): string {
+export function withQuery(path: string, params?: Record<string, string | number | boolean | null | undefined>): string {
   if (!params) return path;
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
@@ -70,7 +70,7 @@ export async function paginateAll(
 }
 
 /** Extract the `rel="next"` URL from a raw `Link` header value. */
-function extractNextLink(link: string | null | undefined): string | null {
+export function extractNextLink(link: string | null | undefined): string | null {
   if (!link) return null;
   for (const part of link.split(",")) {
     // Standard Link header format: `<https://host/page>; rel="next"`

@@ -45,7 +45,9 @@ export class MugsStore {
   private runtimeTokens = new Map<string, string>();
 
   constructor(private io: SettingsIO = new MemoryIO()) {
-    this.settings = DEFAULT_SETTINGS;
+    // Clone the shared default so each store has its own mutable settings
+    // (assigning by reference would let stores clobber one another's lastSync).
+    this.settings = structuredClone(DEFAULT_SETTINGS);
   }
 
   async load(): Promise<MugsSettings> {

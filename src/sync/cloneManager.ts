@@ -67,7 +67,8 @@ const defaultSlug = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, "_");
 
 /** Stable on-disk path for a mapping's clone, grouped by provider. */
 export function cloneDir(layout: CloneLayout, providerId: string, id: string): string {
-  return `${layout.root}/${defaultSlug(providerId)}/${defaultSlug(id)}`;
+  const slug = layout.slug ?? defaultSlug;
+  return `${layout.root}/${slug(providerId)}/${slug(id)}`;
 }
 
 /** Result of one sync pass for a mapping. */
