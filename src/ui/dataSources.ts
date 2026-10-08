@@ -8,6 +8,7 @@
  */
 import type { FolderMapping, SyncStatus } from "../types";
 import type { AuthorRef, AuthorsByFile } from "./diffModel";
+import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
 /** One row of the Map view: a mapping plus runtime enrichment. */
 export interface MapRow {
@@ -39,10 +40,38 @@ export interface DiffDataSource {
   getDiff(query: DiffQuery): Promise<DiffResult>;
 }
 
+/** Which mapping's conflicts to read. */
+export interface ConflictQuery {
+  mappingId: string;
+}
+
+/** Resolve one file of a mapping's conflict with a chosen winner. */
+export interface ConflictResolutionQuery {
+  mappingId: string;
+  /** Repo-relative path of the conflicting file. */
+  path: string;
+  /** "ours" / "theirs" / "both" (auto-merge when possible). */
+  choice: ResolveChoice;
+}
+
+/** Outcome of resolving one file: how many unresolved conflicts remain for the mapping. */
+export interface ConflictResolutionResult {
+  remaining: number;
+}
+
+/** Supplies the conflicts a mapping still needs resolved, and applies resolutions. */
+export interface ConflictDataSource {
+  /** Unresolved conflicts for a mapping (empty when none). */
+  getConflicts(query: ConflictQuery): Promise<FileConflict[]>;
+  /** Resolve one file; persists the working-tree write + store update. */
+  resolveConflict(query: ConflictResolutionQuery): Promise<ConflictResolutionResult>;
+}
+
 /** The runtime context the views depend on. */
 export interface MugsContext {
   map: MapDataSource;
   diff: DiffDataSource;
+  conflicts: ConflictDataSource;
 }
 
 let context: MugsContext | null = null;

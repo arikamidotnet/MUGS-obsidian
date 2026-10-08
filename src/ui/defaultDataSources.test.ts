@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { StoreMapDataSource, StoreDiffDataSource } from "./defaultDataSources";
+import { StoreMapDataSource, StoreDiffDataSource, StoreConflictDataSource } from "./defaultDataSources";
 import { MugsStore, MemoryIO } from "../store";
 import type { GitRunner, GitResult } from "../git/types";
 import type { FolderMapping } from "../types";
@@ -147,5 +147,83 @@ describe("StoreDiffDataSource.getDiff — graceful degradation", () => {
     expect(res.diffText).toBe("@@ diff @@");
     // The fallback rev-parse origin/branch was consulted.
     expect(runner.calls.some((a) => a.includes("--verify") && a.includes("origin/main"))).toBe(true);
+  });
+});
+
+// --- StoreConflictDataSource -------------------------------------------------
+
+class FakeWorkingTree {
+  readonly writes: Array<[string, string]> = [];
+  async writeFile(p: string, c: string): Promise<void> { this.writes.push([p, c]); }
+}
+
+const conflict = (over: Partial<Parameters<MugsStore["setConflicts"]>[1][number]> = {}): Parameters<MugsStore["setConflicts"]>[1][number] => ({
+  path: "a.md",
+  ours: "OURS",
+  theirs: "THEIRS",
+  ...over,
+});
+
+describe("StoreConflictDataSource", () => {
+  it("lists only unresolved conflicts (drops resolved entries)", async () => {
+    const store = storeWith([mapping()]);
+    store.setConflicts("m1", [
+      conflict({ path: "open.md" }),
+      conflict({ path: "done.md", resolved: true, resolvedContent: "OURS" }),
+    ]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones");
+    expect((await ds.getConflicts({ mappingId: "m1" })).map((c) => c.path)).toEqual(["open.md"]);
+  });
+
+  it("returns an empty list for an unknown mapping id", async () => {
+    const store = storeWith([mapping()]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones");
+    await expect(ds.getConflicts({ mappingId: "nope" })).resolves.toEqual([]);
+  });
+
+  it("writes the chosen content into the working tree and clears status when last resolved", async () => {
+    const wt = new FakeWorkingTree();
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "conflict" } });
+    store.setConflicts("m1", [conflict({ ours: "OURS", theirs: "THEIRS" })]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones", wt);
+
+    const res = await ds.resolveConflict({ mappingId: "m1", path: "a.md", choice: "theirs" });
+
+    expect(res).toEqual({ remaining: 0 });
+    // Written to <cloneRoot>/<providerId>/<id>/<path>.
+    expect(wt.writes).toEqual([[".mugs-clones/c1/m1/a.md", "THEIRS"]]);
+    expect(store.getConflicts("m1")).toEqual([]); // entry dropped when the list is empty
+    expect(store.getSettings().lastSync.m1.status).toBe("up-to-date"); // conflict status cleared
+  });
+
+  it("keeps the mapping in conflict status while files remain", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "conflict" } });
+    store.setConflicts("m1", [conflict({ path: "a.md" }), conflict({ path: "b.md" })]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones");
+
+    const res = await ds.resolveConflict({ mappingId: "m1", path: "a.md", choice: "ours" });
+
+    expect(res.remaining).toBe(1);
+    expect((await ds.getConflicts({ mappingId: "m1" })).map((c) => c.path)).toEqual(["b.md"]);
+    expect(store.getSettings().lastSync.m1.status).toBe("conflict"); // still blocked
+  });
+
+  it("treats an unknown path as a no-op and reports the pre-existing count", async () => {
+    const store = storeWith([mapping()]);
+    store.setConflicts("m1", [conflict()]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones");
+    await expect(ds.resolveConflict({ mappingId: "m1", path: "missing.md", choice: "ours" })).resolves.toEqual({ remaining: 1 });
+    expect(store.getConflicts("m1")).toHaveLength(1); // untouched
+  });
+
+  it("updates the store even without a working-tree writer", async () => {
+    const store = storeWith([mapping()]);
+    store.setConflicts("m1", [conflict()]);
+    const ds = new StoreConflictDataSource(store, ".mugs-clones"); // no workingTree
+
+    const res = await ds.resolveConflict({ mappingId: "m1", path: "a.md", choice: "both" });
+
+    expect(res.remaining).toBe(0);
+    expect(store.getConflicts("m1")).toEqual([]);
   });
 });

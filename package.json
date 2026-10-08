@@ -30,7 +30,6 @@
     "vitest": "^2.1.4"
   },
   "dependencies": {
-    "simple-git": "^3.27.0",
     "zod": "^3.24.1"
   }
 }

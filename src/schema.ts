@@ -47,6 +47,15 @@ export const lastSyncStateSchema = z.object({
   status: syncStatusSchema.default("pending"),
 });
 
+export const conflictSchema = z.object({
+  path: z.string().min(1),
+  base: z.string().optional(),
+  ours: z.string(),
+  theirs: z.string(),
+  resolved: z.boolean().optional(),
+  resolvedContent: z.string().optional(),
+});
+
 export const securitySchema = z.object({
   encryptCredentials: z.boolean().default(false),
   encryptionKeyHint: z.string().optional(),
@@ -57,6 +66,7 @@ export const mugsSettingsSchema = z.object({
   credentials: z.array(credentialSchema).default([]),
   mappings: z.array(folderMappingSchema).default([]),
   lastSync: z.record(z.string(), lastSyncStateSchema).default({}),
+  conflicts: z.record(z.string(), z.array(conflictSchema)).default({}),
   security: securitySchema.default({ encryptCredentials: false }),
 });
 
@@ -65,6 +75,7 @@ export type Settings = z.infer<typeof mugsSettingsSchema>;
 export type CredentialType = z.infer<typeof credentialSchema>;
 export type MappingType = z.infer<typeof folderMappingSchema>;
 export type LastSyncType = z.infer<typeof lastSyncStateSchema>;
+export type ConflictType = z.infer<typeof conflictSchema>;
 
 /**
  * Parse arbitrary persisted JSON into a validated MugsSettings, applying

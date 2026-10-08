@@ -1,0 +1,263 @@
+/*
+ * MUGS — Multi-User Git Sync
+ * Stylesheet for the Map view, Diff view and settings UI.
+ *
+ * Uses Obsidian's built-in theme CSS variables (--text-normal,
+ * --background-modifier-border, --interactive-accent, …) so the plugin adapts to
+ * whatever theme the user has selected (light/dark/custom). This file is embedded
+ * into main.js at build time via addStyleTag() in main.ts, so no separate copy is
+ * required when installing the plugin.
+ */
+
+/* --- Shared ---------------------------------------------------------------- */
+
+.mugs-muted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* --- Map view -------------------------------------------------------------- */
+
+.mugs-maps-view {
+  padding: 12px 16px;
+}
+
+.mugs-map-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.mugs-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.mugs-map-legend-label {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.mugs-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.mugs-map-legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* --- Settings -------------------------------------------------------------- */
+
+.mugs-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 10px 18px 18px;
+  margin-bottom: 18px;
+  background: var(--background-modifier-hover);
+}
+
+.mugs-section h3 {
+  margin: 6px 0 4px;
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+}
+
+.mugs-desc {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-divider {
+  height: 1px;
+  background: var(--background-modifier-border);
+  margin: 14px 0;
+}
+
+/* Multi-field add forms: responsive two-column grid. */
+.mugs-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 16px;
+}
+
+@media (max-width: 720px) {
+  .mugs-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mugs-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mugs-field label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.mugs-field input,
+.mugs-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+.mugs-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* --- Diff view ------------------------------------------------------------- */
+
+.mugs-diff-view {
+  padding: 8px 4px 16px;
+}
+
+.mugs-diff-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 12px;
+}
+
+.mugs-diff-output {
+  width: 100%;
+}
+
+/* Conflict resolution banner */
+.mugs-conflicts {
+  background: var(--background-modifier-error-hover);
+  border: 1px solid var(--text-error);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.mugs-conflicts-title {
+  margin: 0 0 8px;
+  font-weight: 600;
+  color: var(--text-error);
+}
+
+.mugs-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.mugs-conflict-path {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+/* Diff file blocks */
+.mugs-diff-file {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.mugs-diff-filename {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mugs-diff-author {
+  padding: 4px 12px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-diff-author-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--background-modifier-form-field);
+  color: var(--text-accent);
+}
+
+.mugs-diff-hunk {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-diff-hunk td {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.mugs-diff-sign {
+  width: 1%;
+  min-width: 20px;
+  text-align: center;
+  user-select: none;
+  color: var(--text-muted);
+}
+
+/* Diff line-number gutter + added/removed row highlighting */
+.mugs-diff-hunk td.mugs-diff-lineno {
+  width: 1%;
+  min-width: 34px;
+  text-align: right;
+  user-select: none;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  padding-right: 10px;
+}
+
+.mugs-diff-hunk tr.mugs-diff-row-added td.mugs-diff-content {
+  background: var(--background-modifier-success-hover);
+}
+
+.mugs-diff-hunk tr.mugs-diff-row-removed td.mugs-diff-content {
+  background: var(--background-modifier-error-hover);
+}
+
+.mugs-diff-added {
+  color: var(--text-on-emphasis, #3fb950);
+}
+
+.mugs-diff-removed {
+  color: var(--text-error, #f85149);
+}
+
+.mugs-diff-content {
+  padding-left: 8px;
+}

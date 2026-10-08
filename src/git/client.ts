@@ -141,6 +141,31 @@ export class GitClient {
     return [...byName.values()].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
   }
 
+  /**
+   * Read file content at a ref (`REF:PATH`). Resolves undefined when the path is
+   * absent at that ref (deleted, or never existed) so callers can treat it as a
+   * deletion in a 3-way merge.
+   */
+  async show(ref: string, path: string): Promise<string | undefined> {
+    const r = await this.run(["show", `${ref}:${path}`]);
+    if (r.code !== 0) return undefined;
+    return r.stdout;
+  }
+
+  /** Lowest common ancestor SHA of two refs (`git merge-base`). */
+  async mergeBase(a: string, b: string): Promise<string> {
+    const r = await this.run(["merge-base", a, b]);
+    if (r.code !== 0) throw new Error(`merge-base ${a} ${b} failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout.trim();
+  }
+
+  /** Paths changed across a `base...HEAD`-style range, one per line. */
+  async changedPaths(range: string): Promise<string[]> {
+    const r = await this.run(["diff", "--name-only", range]);
+    if (r.code !== 0) throw new Error(`git diff --name-only ${range} failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
   /** Unified diff between two refs (empty string when identical). */
   async diff(from: string, to: string): Promise<string> {
     const r = await this.run(["diff", `${from}...${to}`]);

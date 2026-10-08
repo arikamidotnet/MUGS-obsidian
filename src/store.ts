@@ -17,7 +17,7 @@ import {
   normalizeVaultPath,
   type Settings,
 } from "./schema";
-import type { MugsSettings, FolderMapping, Credential } from "./types";
+import type { MugsSettings, FolderMapping, Credential, FileConflict } from "./types";
 
 /** Minimal IO seam — matches Obsidian's loadData/saveData shape. */
 export interface SettingsIO {
@@ -105,6 +105,22 @@ export class MugsStore {
 
   setLastSync(state: MugsSettings["lastSync"][string]): void {
     this.settings.lastSync[state.mappingId] = state;
+  }
+
+  /** Conflicts recorded for a mapping (empty list when none). */
+  getConflicts(mappingId: string): FileConflict[] {
+    return this.settings.conflicts[mappingId] ?? [];
+  }
+
+  /** Replace the conflict list for a mapping; drops the entry entirely when empty. */
+  setConflicts(mappingId: string, conflicts: FileConflict[]): void {
+    if (conflicts.length === 0) delete this.settings.conflicts[mappingId];
+    else this.settings.conflicts[mappingId] = conflicts;
+  }
+
+  /** Drop all recorded conflicts for a mapping. */
+  clearConflicts(mappingId: string): void {
+    delete this.settings.conflicts[mappingId];
   }
 
   setSecurity(partial: Partial<MugsSettings["security"]>): void {

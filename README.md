@@ -20,7 +20,7 @@ purely git-native.
   schema (`src/schema.ts`) — the single source of truth. TS types are derived from it.
 - **jj-inspired conflict/rebase workflow.** Local changes rebase onto the fetched remote history;
   conflicts surface per-file via an attributed diff view, with file-level merge + durable,
-  resolvable conflict state landing in Phase 5.
+  resolvable conflict state (implemented in Phase 5).
 
 ## Layout
 
@@ -30,10 +30,10 @@ src/
   store.ts            persistence + credential redaction + blocked-folder validation
   schema.ts           Zod data-plane (single source of truth) + redaction helpers
   types.ts            domain interfaces + DEFAULT_SETTINGS
-  settingsTab.ts      settings UI shell
+  settingsTab.ts      settings UI: add/delete credentials + folder mappings
   git/                thin git client over the system `git` binary + child-process runner
-  providers/          backend adapters: contract, GitLab v4, HTTP transport, schema
-  sync/               sync contract: classifier, rebase policy, exclusion, (Phase 5) merge/conflict
+  providers/          backend adapters: contract, GitLab v4, HTTP transport, schema + provider factory
+  sync/               sync driver (syncAllMappings orchestration), clone manager, and contract: classifier, rebase policy, exclusion, (Phase 5) merge/conflict
   membership/         multi-user membership merge (roster + local activity -> summary)
   ui/                 Obsidian views (Map graph, attributed Diff) + pure models + data seams
 bench/              performance benchmarks (npm run bench)
@@ -59,8 +59,11 @@ Feature work is delivered in phases (see below). Implemented so far:
 - **Multi-user visibility.** Merge a backend's member roster with local git activity into a membership summary — access and activity, not enforcement. (`src/membership/`)
 - **Map view** (`mugs-map`). A folder->repo graph color-coded by sync status and direction, showing owning users. (`src/ui/mapView.ts`)
 - **Diff view** (`mugs-diff`). Compare a mapping against a ref and attribute each changed hunk to its committing author. (`src/ui/diffView.ts`, `src/ui/diffModel.ts`)
+- **Conflict resolution.** On divergence, files auto-merge via pure 3-way merge; anything left over surfaces in the Diff view with Take ours / theirs / both, writing the choice back into the working tree and clearing conflict status once all are resolved. (`src/sync/conflict.ts`, `src/ui/defaultDataSources.ts`)
+- **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon and the *Run sync* command; each mapping reports ok / push+pull / conflict / skip as a Notice. (`src/providers/factory.ts`, `src/main.ts`)
+- **Settings controls.** Add or delete credentials (provider picker + token) and folder mappings (provider/branch/direction) directly from Settings, with `.obsidian/` targets rejected outright. (`src/settingsTab.ts`)
 
-Coming next: file-level 3-way merge with durable, resolvable conflicts (Phase 5), then additional backends and real encryption at rest.
+End-to-end sync across all mappings is now wired from the UI, and Phase 5's file-level 3-way merge + durable, resolvable conflicts is implemented — divergent files auto-merge where possible and the remainder surface in the Diff view for per-file resolution. Remaining work is real AES-GCM encryption at rest and expanded backend testing.
 
 ## Installing into Obsidian
 
@@ -77,8 +80,8 @@ Coming next: file-level 3-way merge with durable, resolvable conflicts (Phase 5)
 - **Phase 2a:** sync-contract logic — 3-way classifier, rebase/pull policy, gitignore-style exclusion, commit messages. `✅`
 - **Phase 2b:** thin git client wrapper + per-mapping clone manager (fetch/ff/rebase/push driver). `✅`
 - **Phase 3:** multi-user membership view data layer (roster + local activity -> summary), visibility only. `✅`
-- **Phase 4 (current):** Map & Diff Obsidian views — folder->repo graph and per-author attributed diff, with store/git-backed data seams. `🚧`
-- **Phase 5:** file-level 3-way merge + durable, resolvable conflicts. Planned.
+- **Phase 4:** Map & Diff Obsidian views — folder->repo graph and per-author attributed diff, with store/git-backed data seams; sync driver wired to the ribbon + *Run sync* command; add/delete credentials and mappings in Settings. `✅`
+- **Phase 5:** file-level 3-way merge + durable, resolvable conflicts. `✅` Pure three-way auto-merge (`sync/merge.ts`), conflict record model (`sync/conflict.ts`), durable store state (get/set/clearConflicts), merge wired into the sync driver on divergence, and a Diff-view seam to surface + resolve per-file conflicts.
 - **Later:** remaining backends (GitHub/Forgejo/Gitea/Bitbucket/local), real encryption at rest (AES-GCM), device-flow auth, multi-device sync loop testing.
 
 ## Security notes

@@ -4,18 +4,20 @@
  * Orchestrates a single mapping's sync against its local git clone: ensure the
  * clone exists, fetch, read the commit topology, decide pull/push via the pure
  * `planSync` (which reuses decideSyncAction from the sync contract), then execute
- * it through the GitClient. File-level 3-way content merge is layered on top of
- * this topology decision in later work; conflict detection here is at commit
- * granularity (diverged histories with unpushed local work).
+ * it through the GitClient. On divergence (rebase pull over unpushed local work)
+ * file-level 3-way content merge is layered on top of this topology decision: clean
+ * changes are merged into the working tree and only genuine conflicts are surfaced.
  *
- * The driver depends on injected seams (GitClient, a last-sync accessor) so the
- * pure decision logic stays unit-testable and the runtime path compiles/bundles.
+ * The driver depends on injected seams (GitClient, a last-sync accessor, optional
+ * WorkingTreeWriter + ConflictStore) so the pure decision logic stays unit-testable
+ * and the runtime path compiles/bundles.
  */
 import type { GitClient } from "../git/client";
-import type { FolderMapping } from "../types";
+import type { FolderMapping, FileConflict } from "../types";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
+import { applyMerge, type AppliedFile } from "./conflict";
 
 /** Pull action, mirrored from the sync contract. */
 export type SyncPull = SyncAction;
@@ -52,9 +54,23 @@ export function planSync(p: PlanInput): SyncDecision {
 
 /** Narrow view of the persisted last-sync state the manager needs. */
 export interface LastSyncAccessor {
+  /** Persisted remote SHA this mapping was last synced to ("" when never). */
   lastRemoteSha(mappingId: string): string | undefined;
   recordPull(mappingId: string, remoteSha: string): void;
   recordPush(mappingId: string, localSha: string): void;
+/** Optional: mark a mapping's persisted status as needing conflict resolution. */
+  recordConflict?(mappingId: string): void;
+}
+
+/** Writes merged file content into a clone's working tree. Injected so the manager stays testable. */
+export interface WorkingTreeWriter {
+  writeFile(absPath: string, content: string): Promise<void>;
+}
+
+/** Durable per-mapping conflict store. Optional; when omitted conflicts are computed but not persisted. */
+export interface ConflictStore {
+  getConflicts(mappingId: string): FileConflict[];
+  setConflicts(mappingId: string, conflicts: FileConflict[]): void;
 }
 
 /** Where on-disk clones live and how to slugify ids into folder names. */
@@ -78,6 +94,8 @@ export interface SyncResult {
   push: boolean;
   needsConflictResolution: boolean;
   newRemoteSha?: string;
+  /** Files that diverged and need manual resolution (empty when none). */
+  conflicts: FileConflict[];
 }
 
 export class CloneManager {
@@ -85,7 +103,16 @@ export class CloneManager {
     private client: GitClient,
     private layout: CloneLayout,
     private syncs: LastSyncAccessor,
+    private readonly seams: { workingTree?: WorkingTreeWriter; conflicts?: ConflictStore } = {},
   ) {}
+
+  get workingTree(): WorkingTreeWriter | undefined {
+    return this.seams.workingTree;
+  }
+
+  get conflicts(): ConflictStore | undefined {
+    return this.seams.conflicts;
+  }
 
   /** True when `dir` is already a checked-out git work tree. */
   async isCloned(dir: string): Promise<boolean> {
@@ -125,13 +152,18 @@ export class CloneManager {
       localHasUnpushed: localSha !== base,
     });
 
-    if (decision.needsConflictResolution) {
-      return { mappingId: mapping.id, pull: decision.pull, push: false, needsConflictResolution: true };
-    }
-
-    // Pull first so a rebase lands local work on top of the remote tip.
-    if (decision.pull !== "none") {
-      await this.client.pull("origin", branch, decision.pull === "fast-forward" ? "ff" : "rebase");
+    // Diverged histories with unpushed local work. Merge file contents ourselves so
+    // clean changes apply and only genuine conflicts are surfaced for resolution.
+    if (decision.pull === "rebase") {
+      const merged = await this.mergeContents(mapping, repo, branch);
+      if (merged.conflicts.length > 0) {
+        const all = [...(this.conflicts?.getConflicts(mapping.id) ?? []), ...merged.conflicts];
+        this.conflicts?.setConflicts(mapping.id, all);
+        return { mappingId: mapping.id, pull: "rebase", push: false, needsConflictResolution: true, conflicts: merged.conflicts };
+      }
+      // Clean merge is now in the working tree; fall through to commit + push below.
+    } else if (decision.pull !== "none") {
+      await this.client.pull("origin", branch, "ff");
     }
 
     if (decision.push) {
@@ -143,6 +175,41 @@ export class CloneManager {
     }
 
     this.syncs.recordPull(mapping.id, remoteSha);
-    return { mappingId: mapping.id, pull: decision.pull, push: decision.push, needsConflictResolution: false, newRemoteSha: remoteSha };
+    return { mappingId: mapping.id, pull: decision.pull, push: decision.push, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [] };
+  }
+
+  /**
+   * Gather files that differ between local and remote since their merge-base, merge
+   * each with a 3-way merge, write clean results into the working tree, and return
+   * divergent files as conflicts. Local content is read from HEAD (committed state).
+   */
+  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedFile[]; conflicts: FileConflict[] }> {
+    const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
+    const remoteRef = `origin/${branch}`;
+    const baseSha = await this.client.mergeBase("HEAD", remoteRef);
+    const localPaths = new Set(await this.client.changedPaths(`${baseSha}...HEAD`));
+    const remotePaths = new Set(await this.client.changedPaths(`${baseSha}...${remoteRef}`));
+
+    // Union both sides into one Set so a file changed on local AND remote is merged once.
+    const entries = Array.from(new Set<string>([...localPaths, ...remotePaths]))
+      .filter((path) => this.inScope(mapping, path))
+      .map(async (path) => ({
+        path,
+        base: await this.client.show(baseSha, path),
+        ours: (await this.client.show("HEAD", path)) ?? "",
+        theirs: (await this.client.show(remoteRef, path)) ?? "",
+      }));
+    const resolved = await Promise.all(entries);
+
+    const { applied, conflicts } = applyMerge(resolved);
+    await Promise.all(applied.map((a) => this.workingTree?.writeFile(`${dir}/${a.path}`, a.content)));
+    return { applied, conflicts };
+  }
+
+  /** True when `path` is under the mapping's remotePath subtree (or unscoped). */
+  private inScope(mapping: FolderMapping, path: string): boolean {
+    const rp = mapping.remotePath;
+    if (!rp) return true;
+    return path === rp || path.startsWith(`${rp}/`);
   }
 }

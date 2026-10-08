@@ -57,6 +57,22 @@ export interface LastSyncState {
   status: SyncStatus;
 }
 
+/** One diverged file awaiting (or having undergone) resolution. Persisted per mapping so conflicts survive across sessions. */
+export interface FileConflict {
+  /** Repo-relative path of the conflicting file. */
+  path: string;
+  /** Last-synced baseline content, or undefined when new since last sync. */
+  base?: string;
+  /** Current local ("ours") content. */
+  ours: string;
+  /** Current remote ("theirs") content. */
+  theirs: string;
+  /** True once the user has resolved this file. */
+  resolved?: boolean;
+  /** Resolved content written back to the working tree once `resolved`. */
+  resolvedContent?: string;
+}
+
 /** Top-level persisted settings (the MUGS data plane). */
 export interface MugsSettings {
   version: number;
@@ -64,6 +80,8 @@ export interface MugsSettings {
   mappings: FolderMapping[];
   /** Keyed by mappingId. */
   lastSync: Record<string, LastSyncState>;
+  /** Per-mapping file-level conflicts awaiting resolution, keyed by mappingId. */
+  conflicts: Record<string, FileConflict[]>;
   security: {
     /** When true, token field is encrypted at rest in data.json. */
     encryptCredentials: boolean;
@@ -77,6 +95,7 @@ export const DEFAULT_SETTINGS: MugsSettings = {
   credentials: [],
   mappings: [],
   lastSync: {},
+  conflicts: {},
   security: {
     encryptCredentials: false,
   },

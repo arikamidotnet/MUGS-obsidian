@@ -4,6 +4,7 @@ import { setMugsContext, getMugsContext, __resetMugsContextForTests, type MugsCo
 const ctx: MugsContext = {
   map: { getRows: async () => [] },
   diff: { getDiff: async () => ({ diffText: "", authorsByFile: {} }) },
+  conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
 };
 
 describe("MugsContext seam", () => {

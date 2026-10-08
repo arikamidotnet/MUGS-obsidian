@@ -91,3 +91,48 @@ describe("MugsStore persistence + redaction", () => {
     expect(store2.getToken("c1")).toBe("glpat-SECRETKEY");
   });
 });
+
+describe("MugsStore conflict persistence", () => {
+  const conflict = (over: Partial<{ path: string; ours: string; theirs: string; resolved?: boolean; resolvedContent?: string }> = {}) => ({
+    path: "notes/day.md",
+    base: "base",
+    ours: "ours",
+    theirs: "theirs",
+    ...over,
+  });
+
+  it("returns an empty list when no conflicts are recorded", () => {
+    const store = new MugsStore(new MemoryIO(null));
+    expect(store.getConflicts("m1")).toEqual([]);
+  });
+
+  it("stores and clears per-mapping conflicts", () => {
+    const store = new MugsStore(new MemoryIO(null));
+    store.setConflicts("m1", [conflict()]);
+    expect(store.getConflicts("m1").map((c) => c.path)).toEqual(["notes/day.md"]);
+    store.clearConflicts("m1");
+    expect(store.getConflicts("m1")).toEqual([]);
+  });
+
+  it("drops the mapping entry when set to empty", () => {
+    const store = new MugsStore(new MemoryIO(null));
+    store.setConflicts("m1", [conflict()]);
+    store.setConflicts("m1", []);
+    expect(store.getSettings().conflicts.m1).toBeUndefined();
+  });
+
+  it("round-trips conflicts through IO", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io);
+    await store.load();
+    store.setConflicts("m1", [conflict({ resolved: true, resolvedContent: "resolved" })]);
+    await store.save();
+
+    const onDisk = (await io.read()) as { conflicts: Record<string, Array<{ path: string }>> };
+    expect(onDisk.conflicts.m1[0].path).toBe("notes/day.md");
+
+    const store2 = new MugsStore(io);
+    await store2.load();
+    expect(store2.getConflicts("m1").map((c) => c.path)).toEqual(["notes/day.md"]);
+  });
+});

@@ -105,7 +105,8 @@ export class MapView extends ItemView {
     if (!folder || !repo) return;
 
     const y = PAD_TOP + index * ROW_H;
-    const accent = edge.status === "conflict" ? "#e45b3d" : edge.status === "error" ? "#f85149" : "#58a6ff";
+    // Repo node color is the single source of truth (mapModel: status-then-direction).
+    const accent = repo.color;
 
     // Connecting edge (colored by status) with a direction glyph.
     setAttrs(svgChild(svg, "line"), {
@@ -123,26 +124,29 @@ export class MapView extends ItemView {
       y: String(y + NODE_H / 2 - 4),
       "text-anchor": "middle",
       "font-size": "16",
-      fill: "#8b949e",
+      fill: "var(--text-faint)",
     });
     glyph.textContent = DIRECTION_GLYPH[edge.direction] ?? "↔";
 
-    this.renderNode(svg, folder, LEFT_X, y, accent);
+    this.renderNode(svg, folder, LEFT_X, y, "var(--border-color)");
     this.renderNode(svg, repo, RIGHT_X, y, accent);
   }
 
   private renderNode(svg: SVGElement, node: MapNode, centerX: number, y: number, accent: string): void {
     const x = centerX - NODE_W / 2;
-    setAttrs(svgChild(svg, "rect"), {
+    const rect = svgChild(svg, "rect");
+    setAttrs(rect, {
       x: String(x),
       y: String(y),
       width: String(NODE_W),
       height: String(NODE_H),
       rx: "8",
-      fill: "#161b22",
-      stroke: node.kind === "repo" ? accent : "#30363d",
+      fill: "var(--background-secondary)",
+      stroke: node.kind === "repo" ? accent : "var(--border-color)",
       "stroke-width": "1.5",
     });
+    // Hover tooltip reveals the full (untruncated) label and owner.
+    svgChild(rect, "title").textContent = node.owner ? `${node.label} · ${node.owner}` : node.label;
 
     const title = svgChild(svg, "text");
     setAttrs(title, {
@@ -150,7 +154,7 @@ export class MapView extends ItemView {
       y: String(y + 18),
       "text-anchor": "middle",
       "font-weight": "600",
-      fill: "#e6edf3",
+      fill: "var(--text-normal)",
     });
     title.textContent = truncate(node.label, 20);
 
@@ -161,7 +165,7 @@ export class MapView extends ItemView {
       y: String(y + 35),
       "text-anchor": "middle",
       "font-size": "11",
-      fill: node.owner ? "#8b949e" : "#6e7681",
+      fill: node.owner ? "var(--text-muted)" : "var(--text-faint)",
     });
     sub.textContent = truncate(detail, 26);
   }
