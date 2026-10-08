@@ -23,10 +23,27 @@ describe("collectConflicts", () => {
     expect(collectConflicts(diffs)).toEqual([{ path: "bad", base: "base", ours: "L", theirs: "R" }]);
   });
 
-  it("captures undefined sides as empty strings", () => {
-    const diffs: FileDiff[] = [{ path: "del", local: undefined, remote: "R", base: "base" }];
-    // local undefined + remote changed vs base -> divergent (both changed relative to base)
-    expect(collectConflicts(diffs)).toEqual([{ path: "del", base: "base", ours: "", theirs: "R" }]);
+  describe("delete-aware classification", () => {
+    it("does NOT surface a modify/delete (local deletes, remote modifies) — resolved cleanly", () => {
+      const diffs: FileDiff[] = [{ path: "del", local: undefined, remote: "R", base: "base" }];
+      expect(collectConflicts(diffs)).toEqual([]);
+    });
+
+    it("does NOT surface a delete/delete — both sides removed the file", () => {
+      const diffs: FileDiff[] = [{ path: "del", local: undefined, remote: undefined, base: "base" }];
+      expect(collectConflicts(diffs)).toEqual([]);
+    });
+
+    it("surfaces a genuine add/add conflict (new file, both different) with absent flags omitted", () => {
+      const diffs: FileDiff[] = [{ path: "new", local: "L", remote: "R", base: undefined }];
+      expect(collectConflicts(diffs)).toEqual([{ path: "new", base: undefined, ours: "L", theirs: "R" }]);
+    });
+
+    it("records absent flags on a genuine conflict where one side deleted a new file", () => {
+      // base absent + local deleted + remote has it -> keep theirs (no conflict)
+      const diffs: FileDiff[] = [{ path: "new", local: undefined, remote: "R", base: undefined }];
+      expect(collectConflicts(diffs)).toEqual([]);
+    });
   });
 });
 
@@ -89,5 +106,43 @@ describe("applyMerge — clean vs divergent per file", () => {
     const { applied, conflicts } = applyMerge(entries);
     expect(applied).toEqual([{ path: "both.md", content: J(["A", "b", "C"]) }]);
     expect(conflicts).toEqual([]);
+  });
+
+  describe("deletions and absent flags", () => {
+    it("records a deletion when both sides deleted the file", () => {
+      const entries: FileVersions[] = [
+        { path: "gone.md", base: J(["a"]), ours: undefined, theirs: undefined },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(applied).toEqual([{ path: "gone.md" }]);
+      expect(conflicts).toEqual([]);
+    });
+
+    it("keeps the surviving side on a modify/delete (local deleted, remote modified)", () => {
+      const entries: FileVersions[] = [
+        { path: "m.md", base: J(["a", "b"]), ours: undefined, theirs: J(["a", "B"]) },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(applied).toEqual([{ path: "m.md", content: J(["a", "B"]) }]);
+      expect(conflicts).toEqual([]);
+    });
+
+    it("keeps theirs when a new file is deleted on one side and present on the other", () => {
+      const entries: FileVersions[] = [
+        { path: "new.md", base: undefined, ours: undefined, theirs: "R" },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(applied).toEqual([{ path: "new.md", content: "R" }]);
+      expect(conflicts).toEqual([]);
+    });
+
+    it("surfaces a genuine add/add conflict with absent flags omitted", () => {
+      const entries: FileVersions[] = [
+        { path: "c.md", base: undefined, ours: "L", theirs: "R" },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(applied).toEqual([]);
+      expect(conflicts).toEqual([{ path: "c.md", base: undefined, ours: "L", theirs: "R" }]);
+    });
   });
 });

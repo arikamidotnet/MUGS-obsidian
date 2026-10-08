@@ -17,7 +17,7 @@ import type { FolderMapping, FileConflict } from "../types";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
-import { applyMerge, type AppliedFile } from "./conflict";
+import { applyMerge, type AppliedChange } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 
 /** Pull action, mirrored from the sync contract. */
@@ -63,9 +63,11 @@ export interface LastSyncAccessor {
   recordConflict?(mappingId: string): void;
 }
 
-/** Writes merged file content into a clone's working tree. Injected so the manager stays testable. */
+/** Writes merged file content (and removes deleted files) into a clone's working tree. */
 export interface WorkingTreeWriter {
   writeFile(absPath: string, content: string): Promise<void>;
+  /** Optional: remove a file from the working tree when both sides deleted it. */
+  deleteFile?(absPath: string): Promise<void> | void;
 }
 
 /** Durable per-mapping conflict store. Optional; when omitted conflicts are computed but not persisted. */
@@ -190,7 +192,7 @@ export class CloneManager {
    * each with a 3-way merge, write clean results into the working tree, and return
    * divergent files as conflicts. Local content is read from HEAD (committed state).
    */
-  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedFile[]; conflicts: FileConflict[]; renames: Rename[] }> {
+  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[] }> {
     const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
     const remoteRef = `origin/${branch}`;
     const baseSha = await this.client.mergeBase("HEAD", remoteRef);
@@ -203,8 +205,9 @@ export class CloneManager {
     const entries = inScopePaths.map(async (path) => ({
       path,
       base: await this.client.show(baseSha, path),
-      ours: (await this.client.show("HEAD", path)) ?? "",
-      theirs: (await this.client.show(remoteRef, path)) ?? "",
+      // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
+      ours: await this.client.show("HEAD", path),
+      theirs: await this.client.show(remoteRef, path),
     }));
     const resolved = await Promise.all(entries);
 
@@ -217,7 +220,13 @@ export class CloneManager {
     );
 
     const { applied, conflicts } = applyMerge(resolved);
-    await Promise.all(applied.map((a) => this.workingTree?.writeFile(`${dir}/${a.path}`, a.content)));
+    await Promise.all(
+      applied.map(async (a) => {
+        const absPath = `${dir}/${a.path}`;
+        if ("content" in a) await this.workingTree?.writeFile(absPath, a.content);
+        else await this.workingTree?.deleteFile?.(absPath); // both sides deleted -> remove it
+      }),
+    );
     return { applied, conflicts, renames };
   }
 }

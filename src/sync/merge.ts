@@ -10,18 +10,26 @@
  * file do not spuriously conflict.
  *
  * Written as an executable spec independent of the git CLI (like classifier.ts)
- * so the intended behavior is pinned by tests. `undefined` content represents a
- * deletion on that side; this module treats content as strings, so callers pass
- * "" for a deleted file's content.
+ * so the intended behavior is pinned by tests. Content is `string | undefined`;
+ * `undefined` is a deletion (jj `None`), strictly distinct from an empty file (`""`).
+ * {@link threeWayMerge} resolves every delete case deterministically; the line-level
+ * {@link textMerge}/diff3 walk only ever sees present contents.
  */
 import { classifyFile, type FileDiff } from "./classifier";
 
 /** Outcome of merging one file: the merged text plus whether it needs resolution. */
 export interface MergeResult {
-  /** Merged text; contains conflict markers when `conflict` is true. */
+  /** Merged text; contains conflict markers when `conflict` is true. An empty string
+   *  means "no content" — distinguish it from a deletion using the absent flags below. */
   content: string;
   /** True when local and remote diverged on overlapping lines (needs manual resolve). */
   conflict: boolean;
+  /** True when the baseline was absent (file new since last sync). */
+  baseAbsent?: boolean;
+  /** True when the local side is a deletion — distinct from an empty file, which is "". */
+  oursAbsent?: boolean;
+  /** True when the remote side is a deletion. */
+  theirsAbsent?: boolean;
 }
 
 /** A single merged region emitted by the diff3 walk. */
@@ -178,8 +186,12 @@ function renderChunks(chunks: Chunk[]): string {
   return joinLines(out);
 }
 
-/** Merge one file's contents (baseline + local + remote) into a single text. */
-export function threeWayMerge(base: string, ours: string, theirs: string): MergeResult {
+/**
+ * Pure line-level diff3 over three present contents. `base` may be "" (used as the
+ * empty baseline when both sides add a brand-new file). This never sees deletions —
+ * {@link threeWayMerge} resolves delete cases before delegating here.
+ */
+function textMerge(base: string, ours: string, theirs: string): MergeResult {
   if (base === "" && ours === "" && theirs === "") return { content: "", conflict: false };
   const chunks = diff3Chunks(splitLines(base), splitLines(ours), splitLines(theirs));
   const content = renderChunks(chunks);
@@ -187,10 +199,69 @@ export function threeWayMerge(base: string, ours: string, theirs: string): Merge
   return { content, conflict };
 }
 
+/**
+ * Merge one file's contents (baseline + local + remote) into a single text.
+ *
+ * Content is `string | undefined`; `undefined` is a **deletion** (jj `None`),
+ * strictly distinct from an empty file (`""`). This resolves every delete case
+ * deterministically so the sync layer never emits a false content conflict on a
+ * delete:
+ *
+ * - delete/delete                 -> the file stays deleted (both absent)
+ * - modify/delete (either side)   -> keep the surviving/modifying side's content
+ * - new-file add/add              -> identical collapses; overlapping-different conflicts
+ * - new-file delete/add           -> keep the addition
+ * - pre-existing, both present    -> normal line-level diff3 merge
+ */
+export function threeWayMerge(
+  base: string | undefined,
+  ours: string | undefined,
+  theirs: string | undefined,
+): MergeResult {
+  const baseAbsent = base === undefined;
+  const oursAbsent = ours === undefined;
+  const theirsAbsent = theirs === undefined;
+  const deleted = (): MergeResult => ({ content: "", conflict: false, baseAbsent, oursAbsent, theirsAbsent });
+
+  // Nothing on any side -> the file is gone.
+  if (baseAbsent && oursAbsent && theirsAbsent) return deleted();
+  // Both sides deleted a pre-existing file -> stays deleted.
+  if (!baseAbsent && oursAbsent && theirsAbsent) return deleted();
+
+  // modify/delete: one side kept/modified the pre-existing file, the other deleted it.
+  // Keep the surviving content (less lossy than a deletion); never conflict.
+  if (!baseAbsent && oursAbsent && !theirsAbsent) {
+    return { content: theirs!, conflict: false, baseAbsent: false, oursAbsent: true, theirsAbsent: false };
+  }
+  if (!baseAbsent && !oursAbsent && theirsAbsent) {
+    return { content: ours!, conflict: false, baseAbsent: false, oursAbsent: false, theirsAbsent: true };
+  }
+
+  // File new since last sync (baseline absent).
+  if (baseAbsent) {
+    // One side deleted the new file, the other has it -> keep the content.
+    if (oursAbsent && theirs !== undefined) return { content: theirs, conflict: false, baseAbsent: true, oursAbsent: true, theirsAbsent: false };
+    if (ours !== undefined && theirsAbsent) return { content: ours, conflict: false, baseAbsent: true, oursAbsent: false, theirsAbsent: true };
+    // Both have it -> add/add: identical collapses to one; overlapping-different conflicts.
+    if (ours !== undefined && theirs !== undefined) {
+      const m = textMerge("", ours, theirs);
+      return { ...m, baseAbsent: true, oursAbsent: false, theirsAbsent: false };
+    }
+    // New file, both deleted -> gone.
+    return deleted();
+  }
+
+  // Pre-existing file, both present -> normal line-level merge. All undefined cases
+  // above are exhausted, so base/ours/theirs are non-undefined here.
+  const m = textMerge(base!, ours!, theirs!);
+  return { ...m, baseAbsent: false, oursAbsent: false, theirsAbsent: false };
+}
+
 /** Merge every file in a diff set, preserving input order. */
 export function mergeAll(diffs: FileDiff[]): Array<{ path: string; content: string; conflict: boolean }> {
   return diffs.map((d) => {
-    const merged = threeWayMerge(d.base ?? "", d.local ?? "", d.remote ?? "");
+    // Preserve undefined (deletion) so delete cases resolve via threeWayMerge semantics.
+    const merged = threeWayMerge(d.base, d.local, d.remote);
     return { path: d.path, content: merged.content, conflict: merged.conflict };
   });
 }

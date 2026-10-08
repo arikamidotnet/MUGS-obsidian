@@ -7,19 +7,27 @@ const J = (lines: string[]): string => lines.join("\n");
 describe("threeWayMerge — unchanged / one-sided", () => {
   it("returns the baseline when nothing changed on either side", () => {
     const base = J(["h1", "body"]);
-    expect(threeWayMerge(base, base, base)).toEqual({ content: base, conflict: false });
+    const r = threeWayMerge(base, base, base);
+    expect(r.content).toBe(base);
+    expect(r.conflict).toBe(false);
   });
 
   it("takes local-only changes (unpushed)", () => {
-    expect(threeWayMerge("v1", "L1", "v1")).toEqual({ content: "L1", conflict: false });
+    const r = threeWayMerge("v1", "L1", "v1");
+    expect(r.content).toBe("L1");
+    expect(r.conflict).toBe(false);
   });
 
   it("takes remote-only changes (unpulled)", () => {
-    expect(threeWayMerge("v1", "v1", "R1")).toEqual({ content: "R1", conflict: false });
+    const r = threeWayMerge("v1", "v1", "R1");
+    expect(r.content).toBe("R1");
+    expect(r.conflict).toBe(false);
   });
 
   it("collapses identical edits from both sides to a single copy", () => {
-    expect(threeWayMerge("v1", "same", "same")).toEqual({ content: "same", conflict: false });
+    const r = threeWayMerge("v1", "same", "same");
+    expect(r.content).toBe("same");
+    expect(r.conflict).toBe(false);
   });
 
   it("round-trips unchanged multi-line content exactly", () => {
@@ -33,7 +41,9 @@ describe("threeWayMerge — line-level (non-overlapping edits merge cleanly)", (
     const base = J(["a", "b", "c", "d", "e"]);
     const ours = J(["A", "b", "c", "d", "e"]); // changed line 1
     const theirs = J(["a", "b", "c", "d", "Z"]); // changed line 5
-    expect(threeWayMerge(base, ours, theirs)).toEqual({ content: J(["A", "b", "c", "d", "Z"]), conflict: false });
+    const r = threeWayMerge(base, ours, theirs);
+    expect(r.content).toBe(J(["A", "b", "c", "d", "Z"]));
+    expect(r.conflict).toBe(false);
   });
 
   it("handles two separate non-overlapping conflicts as two marker blocks", () => {
@@ -55,31 +65,96 @@ describe("threeWayMerge — line-level (non-overlapping edits merge cleanly)", (
       "W",
       ">>>>>>> theirs",
     ].join("\n");
-    expect(threeWayMerge(base, ours, theirs)).toEqual({ content: expected, conflict: true });
+    const r = threeWayMerge(base, ours, theirs);
+    expect(r.content).toBe(expected);
+    expect(r.conflict).toBe(true);
   });
 
   it("emits conflict markers when both sides change the same line differently", () => {
     const base = J(["a", "b", "c"]);
     const ours = J(["A", "b", "c"]); // changed line 1
     const theirs = J(["T", "b", "c"]); // changed line 1 differently
-    expect(threeWayMerge(base, ours, theirs)).toEqual({
-      content: ["<<<<<<< ours", "A", "=======", "T", ">>>>>>> theirs", "b", "c"].join("\n"),
-      conflict: true,
-    });
+    const r = threeWayMerge(base, ours, theirs);
+    expect(r.content).toBe(["<<<<<<< ours", "A", "=======", "T", ">>>>>>> theirs", "b", "c"].join("\n"));
+    expect(r.conflict).toBe(true);
   });
 });
 
 describe("threeWayMerge — empty files", () => {
   it("treats all-empty as unchanged empty", () => {
-    expect(threeWayMerge("", "", "")).toEqual({ content: "", conflict: false });
+    const r = threeWayMerge("", "", "");
+    expect(r.content).toBe("");
+    expect(r.conflict).toBe(false);
   });
 
   it("adds content to a previously empty file (one side)", () => {
-    expect(threeWayMerge("", J(["x", "y"]), "")).toEqual({ content: J(["x", "y"]), conflict: false });
+    const r = threeWayMerge("", J(["x", "y"]), "");
+    expect(r.content).toBe(J(["x", "y"]));
+    expect(r.conflict).toBe(false);
   });
 
   it("conflicts when both sides create an empty file with different content", () => {
     expect(threeWayMerge("", "x", "y").conflict).toBe(true);
+  });
+});
+
+describe("threeWayMerge — deletions (undefined = deletion, distinct from empty \"\")", () => {
+  it("stays deleted when both sides delete a pre-existing file", () => {
+    const r = threeWayMerge("content", undefined, undefined);
+    expect(r.conflict).toBe(false);
+    expect(r.oursAbsent).toBe(true);
+    expect(r.theirsAbsent).toBe(true);
+    expect(r.content).toBe("");
+  });
+
+  it("keeps the remote modification when local deletes (modify/delete)", () => {
+    const r = threeWayMerge("base", undefined, "R");
+    expect(r.conflict).toBe(false);
+    expect(r.oursAbsent).toBe(true);
+    expect(r.theirsAbsent).toBe(false);
+    expect(r.content).toBe("R");
+  });
+
+  it("keeps the local modification when remote deletes (modify/delete, other direction)", () => {
+    const r = threeWayMerge("base", "L", undefined);
+    expect(r.conflict).toBe(false);
+    expect(r.oursAbsent).toBe(false);
+    expect(r.theirsAbsent).toBe(true);
+    expect(r.content).toBe("L");
+  });
+
+  it("distinguishes an empty file from a deletion (empty stays, deletion goes)", () => {
+    // Empty file on local vs unchanged remote -> empty content, NOT absent.
+    const empty = threeWayMerge("content", "", "content");
+    expect(empty.content).toBe("");
+    expect(empty.oursAbsent).toBe(false);
+    // Local deleted (undefined) vs remote has content -> deletion semantics resolve to theirs.
+    const del = threeWayMerge("content", undefined, "x");
+    expect(del.oursAbsent).toBe(true);
+  });
+
+  it("stays deleted when a new file is deleted on both sides (no base)", () => {
+    const r = threeWayMerge(undefined, undefined, undefined);
+    expect(r.conflict).toBe(false);
+    expect(r.oursAbsent).toBe(true);
+    expect(r.theirsAbsent).toBe(true);
+  });
+
+  it("keeps the addition when one side deletes a new file and the other has it", () => {
+    const r = threeWayMerge(undefined, undefined, "R");
+    expect(r.conflict).toBe(false);
+    expect(r.content).toBe("R");
+    expect(r.oursAbsent).toBe(true);
+  });
+
+  it("conflicts when both sides add a brand-new file with different content (add/add)", () => {
+    expect(threeWayMerge(undefined, "L", "R").conflict).toBe(true);
+  });
+
+  it("collapses identical new-file additions to one copy (add/add same)", () => {
+    const r = threeWayMerge(undefined, "same", "same");
+    expect(r.content).toBe("same");
+    expect(r.conflict).toBe(false);
   });
 });
 
