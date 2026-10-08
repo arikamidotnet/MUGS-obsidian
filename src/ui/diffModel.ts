@@ -15,6 +15,13 @@
 export interface AuthorRef {
   name: string;
   email?: string;
+  /** "human" (backed by git user.name/email) or "agent" (a sub-user with its own
+   *  committer identity). Defaults to "human" when unset for backward compatibility. */
+  kind?: "human" | "agent";
+  /** Stable agent id when {@link kind} is "agent". */
+  agentId?: string;
+  /** The human who authorized this agent — used for remote "On-behalf-of" attribution. */
+  ownerHuman?: string;
 }
 
 /** filename (repo-relative) -> committing authors, newest first. */

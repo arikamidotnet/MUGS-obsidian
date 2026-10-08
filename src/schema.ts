@@ -5,6 +5,7 @@
  * every other module validates against it, and TS types are derived from it.
  */
 import { z } from "zod";
+import { DEFAULT_SYNC_POLICY } from "./types";
 import type {
   MugsSettings,
   Credential,
@@ -36,6 +37,8 @@ export const folderMappingSchema = z.object({
   providerId: z.string().min(1),
   branch: z.string().optional(),
   direction: syncDirectionSchema.default("push-pull"),
+  includes: z.array(z.string()).default([]),
+  excludes: z.array(z.string()).default([]),
 });
 
 export const lastSyncStateSchema = z.object({
@@ -52,6 +55,10 @@ export const conflictSchema = z.object({
   base: z.string().optional(),
   ours: z.string(),
   theirs: z.string(),
+  oursAbsent: z.boolean().optional(),
+  theirsAbsent: z.boolean().optional(),
+  oursSavedAt: z.number().int().positive().optional(),
+  theirsModifiedAt: z.number().int().positive().optional(),
   resolved: z.boolean().optional(),
   resolvedContent: z.string().optional(),
 });
@@ -61,12 +68,55 @@ export const securitySchema = z.object({
   encryptionKeyHint: z.string().optional(),
 });
 
+export const obsidianEntrySchema = z.object({
+  path: z.string().min(1),
+  scope: z.enum(["vault-wide", "personal"]),
+  includes: z.array(z.string()).default([]),
+  excludes: z.array(z.string()).default([]),
+});
+
+export const obsidianConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  entries: z.array(obsidianEntrySchema).default([]),
+});
+
+export const syncPolicySchema = z.object({
+  autoMerge: z.boolean().default(true),
+  defaultResolution: z.enum(["both", "theirs", "ours"]).default("both"),
+  sameChangeAccept: z.boolean().default(true),
+  recencyWins: z.boolean().default(true),
+  paused: z.boolean().default(false),
+  intervalSeconds: z.number().int().positive().default(300),
+  obsidianConfig: obsidianConfigSchema.default(() => structuredClone(DEFAULT_SYNC_POLICY.obsidianConfig)),
+});
+
+export const agentSchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1),
+  ownerHuman: z.string().optional(),
+  committerName: z.string().optional(),
+  committerEmail: z.string().optional(),
+  mcpEndpoint: z.string().url().optional(),
+});
+
+export const stagedChangeSchema = z.object({
+  mappingId: z.string().min(1),
+  path: z.string().min(1),
+  state: z.enum(["unstaged", "staged", "held"]),
+});
+
+/** Clone the shared default so parsed settings never alias DEFAULT_SYNC_POLICY. */
+const cloneSyncPolicy = () => structuredClone(DEFAULT_SYNC_POLICY);
+
 export const mugsSettingsSchema = z.object({
   version: z.number().int().positive().default(1),
   credentials: z.array(credentialSchema).default([]),
   mappings: z.array(folderMappingSchema).default([]),
   lastSync: z.record(z.string(), lastSyncStateSchema).default({}),
   conflicts: z.record(z.string(), z.array(conflictSchema)).default({}),
+  sync: syncPolicySchema.default(cloneSyncPolicy),
+  agents: z.array(agentSchema).default([]),
+  staging: z.record(z.string(), z.array(stagedChangeSchema)).default({}),
   security: securitySchema.default({ encryptCredentials: false }),
 });
 
@@ -76,6 +126,10 @@ export type CredentialType = z.infer<typeof credentialSchema>;
 export type MappingType = z.infer<typeof folderMappingSchema>;
 export type LastSyncType = z.infer<typeof lastSyncStateSchema>;
 export type ConflictType = z.infer<typeof conflictSchema>;
+export type SyncPolicyType = z.infer<typeof syncPolicySchema>;
+export type ObsidianConfigType = z.infer<typeof obsidianConfigSchema>;
+export type AgentType = z.infer<typeof agentSchema>;
+export type StagedChangeType = z.infer<typeof stagedChangeSchema>;
 
 /**
  * Parse arbitrary persisted JSON into a validated MugsSettings, applying
