@@ -107,11 +107,88 @@ export interface ExclusionRules {
   excludes: string[];
 }
 
+/** The subset of a mapping that governs path scoping. Kept structural so this
+ *  module stays free of the domain `FolderMapping` import (pure + unit-tested). */
+export interface ScopeConfig {
+  /** Path on the remote repo root ("" means the whole repository). */
+  remotePath: string;
+  /** Allowlist globs within the scope. */
+  includes?: string[];
+  /** Denylist globs within the scope (gitignore-style). */
+  excludes?: string[];
+}
+
+/** Normalize a remote path to no leading "./" and no trailing slash(es). */
+export function normalizeRemotePath(p: string): string {
+  return p.split("\\").join("/").replace(/^\.{1,2}\//, "").replace(/\/+$/, "");
+}
+
+/**
+ * True when `path` is within a mapping's scope: it lives under the mapping's
+ * `remotePath` subtree (or the mapping is unscoped) AND passes the include/exclude
+ * rules. This is the single effective-scope predicate used by the sync driver for
+ * both pull (which files to merge) and push (which files to stage).
+ */
+export function isInScope(config: ScopeConfig, path: string): boolean {
+  const rp = normalizeRemotePath(config.remotePath);
+  if (rp) {
+    const norm = normalizePath(path);
+    if (!(norm === rp || norm.startsWith(`${rp}/`))) return false;
+  }
+  return shouldSync(path, { includes: config.includes ?? [], excludes: config.excludes ?? [] });
+}
+
+/** A file detected as moved from `from` to `to` by content identity. */
+export interface Rename {
+  from: string;
+  to: string;
+}
+
+/**
+ * Detect file moves by content identity between two snapshots (`path -> content id`).
+ * A path present in `before` but absent in `after`, whose content id matches a path
+ * present in `after` but absent in `before`, is treated as a rename from→to. Empty
+ * content ids are ignored so empty files do not masquerade as renames. This lets the
+ * sync layer recognize cross-device moves (git's own content-identity idea) instead of
+ * surfacing them as a delete + add pair.
+ */
+export function detectRenames(before: Record<string, string>, after: Record<string, string>): Rename[] {
+  const removed = new Map<string, string>(); // content id -> path (present in before, gone from after)
+  for (const p of Object.keys(before)) if (!(p in after) && before[p]) removed.set(before[p], p);
+  const added = new Map<string, string>(); // content id -> path (present in after, absent from before)
+  for (const p of Object.keys(after)) if (!(p in before) && after[p]) added.set(after[p], p);
+  const renames: Rename[] = [];
+  for (const [id, from] of removed) {
+    const to = added.get(id);
+    if (to && to !== from) renames.push({ from, to });
+  }
+  return renames;
+}
+
 /** True when `path` matches at least one include glob. */
 export function matchesAnyInclude(path: string, includes: string[]): boolean {
   if (includes.length === 0) return true;
   const norm = normalizePath(path);
   return includes.some((g) => globToRegExp(g).test(norm));
+}
+
+/**
+ * Generate a non-colliding working-tree path for a file that already exists at
+ * `basePath`. Appends " (conflict N)" before the extension, incrementing N until the
+ * result is not present in `existing` — mirroring Obsidian/Obsync's `Note (conflict <id>).md`
+ * convention for resolving path collisions between devices.
+ */
+export function uniqueConflictPath(basePath: string, existing: Set<string> = new Set()): string {
+  const i = basePath.lastIndexOf(".");
+  const stem = i === -1 ? basePath : basePath.slice(0, i);
+  const ext = i === -1 ? "" : basePath.slice(i);
+  let n = 1;
+  let candidate = basePath;
+  while (existing.has(candidate)) {
+    candidate = `${stem} (conflict ${n})${ext}`;
+    n++;
+  }
+  return candidate;
 }
 
 /**

@@ -18,6 +18,7 @@ import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedFile } from "./conflict";
+import { isInScope, detectRenames, type Rename } from "./exclusion";
 
 /** Pull action, mirrored from the sync contract. */
 export type SyncPull = SyncAction;
@@ -96,6 +97,8 @@ export interface SyncResult {
   newRemoteSha?: string;
   /** Files that diverged and need manual resolution (empty when none). */
   conflicts: FileConflict[];
+  /** Files moved by content identity between local and remote (empty when none). */
+  renames?: Rename[];
 }
 
 export class CloneManager {
@@ -159,7 +162,7 @@ export class CloneManager {
       if (merged.conflicts.length > 0) {
         const all = [...(this.conflicts?.getConflicts(mapping.id) ?? []), ...merged.conflicts];
         this.conflicts?.setConflicts(mapping.id, all);
-        return { mappingId: mapping.id, pull: "rebase", push: false, needsConflictResolution: true, conflicts: merged.conflicts };
+        return { mappingId: mapping.id, pull: "rebase", push: false, needsConflictResolution: true, conflicts: merged.conflicts, renames: merged.renames };
       }
       // Clean merge is now in the working tree; fall through to commit + push below.
     } else if (decision.pull !== "none") {
@@ -167,7 +170,11 @@ export class CloneManager {
     }
 
     if (decision.push) {
-      const paths = mapping.remotePath ? [mapping.remotePath] : undefined;
+      // Stage only in-scope working-tree changes so excluded paths are never pushed.
+      // When nothing is uncommitted to scope-filter, fall back to the subtree/whole-repo add.
+      const changed = await this.client.workingTreePaths();
+      const scoped = changed.filter((path) => isInScope(mapping, path));
+      const paths = scoped.length > 0 ? scoped : mapping.remotePath ? [mapping.remotePath] : undefined;
       await this.client.add(paths);
       await this.client.commit(formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath }));
       await this.client.push("origin", branch);
@@ -175,7 +182,7 @@ export class CloneManager {
     }
 
     this.syncs.recordPull(mapping.id, remoteSha);
-    return { mappingId: mapping.id, pull: decision.pull, push: decision.push, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [] };
+    return { mappingId: mapping.id, pull: decision.pull, push: decision.push, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [], renames: [] };
   }
 
   /**
@@ -183,7 +190,7 @@ export class CloneManager {
    * each with a 3-way merge, write clean results into the working tree, and return
    * divergent files as conflicts. Local content is read from HEAD (committed state).
    */
-  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedFile[]; conflicts: FileConflict[] }> {
+  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedFile[]; conflicts: FileConflict[]; renames: Rename[] }> {
     const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
     const remoteRef = `origin/${branch}`;
     const baseSha = await this.client.mergeBase("HEAD", remoteRef);
@@ -191,25 +198,26 @@ export class CloneManager {
     const remotePaths = new Set(await this.client.changedPaths(`${baseSha}...${remoteRef}`));
 
     // Union both sides into one Set so a file changed on local AND remote is merged once.
-    const entries = Array.from(new Set<string>([...localPaths, ...remotePaths]))
-      .filter((path) => this.inScope(mapping, path))
-      .map(async (path) => ({
-        path,
-        base: await this.client.show(baseSha, path),
-        ours: (await this.client.show("HEAD", path)) ?? "",
-        theirs: (await this.client.show(remoteRef, path)) ?? "",
-      }));
+    const inScopePaths = Array.from(new Set<string>([...localPaths, ...remotePaths])).filter((path) => isInScope(mapping, path));
+
+    const entries = inScopePaths.map(async (path) => ({
+      path,
+      base: await this.client.show(baseSha, path),
+      ours: (await this.client.show("HEAD", path)) ?? "",
+      theirs: (await this.client.show(remoteRef, path)) ?? "",
+    }));
     const resolved = await Promise.all(entries);
+
+    // Recognize cross-device moves by content identity so a rename surfaces as a move
+    // rather than a delete + add pair. Only changed paths are compared; unchanged files
+    // appear on both sides and never match the removed/added sets.
+    const renames = detectRenames(
+      Object.fromEntries(resolved.filter((r) => r.base !== undefined).map((r) => [r.path, r.base as string])),
+      Object.fromEntries(resolved.filter((r) => r.theirs !== undefined).map((r) => [r.path, r.theirs as string])),
+    );
 
     const { applied, conflicts } = applyMerge(resolved);
     await Promise.all(applied.map((a) => this.workingTree?.writeFile(`${dir}/${a.path}`, a.content)));
-    return { applied, conflicts };
-  }
-
-  /** True when `path` is under the mapping's remotePath subtree (or unscoped). */
-  private inScope(mapping: FolderMapping, path: string): boolean {
-    const rp = mapping.remotePath;
-    if (!rp) return true;
-    return path === rp || path.startsWith(`${rp}/`);
+    return { applied, conflicts, renames };
   }
 }

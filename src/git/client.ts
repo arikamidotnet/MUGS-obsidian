@@ -159,6 +159,14 @@ export class GitClient {
     return r.stdout.trim();
   }
 
+  /** Paths with uncommitted changes vs HEAD (staged + unstaged), one per line. Used
+   *  to stage only in-scope working-tree changes on push. */
+  async workingTreePaths(): Promise<string[]> {
+    const r = await this.run(["diff", "--name-only", "HEAD"]);
+    if (r.code !== 0) throw new Error(`git diff --name-only HEAD failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
   /** Paths changed across a `base...HEAD`-style range, one per line. */
   async changedPaths(range: string): Promise<string[]> {
     const r = await this.run(["diff", "--name-only", range]);

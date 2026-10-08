@@ -307,6 +307,34 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(store.getState().map((c) => c.path)).toEqual(["notes/todo.md", "notes/other.md"]);
   });
 
+  it("filters out excluded paths from a clean divergence merge (scope excludes)", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged
+      changedPaths: ["notes/a.md", "notes/b.log"], // b.log is excluded by the mapping
+      showMap: {
+        M0: { "notes/a.md": J(["a", "b", "c"]) },
+        HEAD: { "notes/a.md": J(["A", "b", "c"]) },
+        "origin/main": { "notes/a.md": J(["a", "b", "C"]) },
+      },
+    });
+    const { accessor } = spyAccessor(""); // unpushed local work
+    const outcomes = await syncAllMappings({
+      mappings: [mapping({ excludes: ["*.log"] })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      workingTree,
+    });
+    // Only the in-scope file is merged/written; the excluded .log is dropped.
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/a.md", J(["A", "b", "C"])]]);
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+  });
+
   it("continues past a skipped mapping and reports every mapping", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
     const { accessor } = spyAccessor("L1"); // base == localSha -> clean fast-forward
