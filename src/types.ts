@@ -224,5 +224,10 @@ export interface LastSyncState {
   lastPullAt?: number;
   lastLocalSha?: string;
   lastRemoteSha?: string;
+  /** Git base SHA this mapping's last sync was keyed on — the deterministic resume point
+   *  so an offline session resumes cleanly and a reconnect reconciles forward. */
+  baseSha?: string;
+  /** Monotonic operation id for the last sync pass (increments per pull/push). */
+  opId?: number;
   status: SyncStatus;
 }

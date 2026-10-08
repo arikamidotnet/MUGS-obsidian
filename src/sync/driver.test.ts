@@ -3,7 +3,11 @@ import type { FolderMapping, Credential, FileConflict } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
-import { syncAllMappings } from "./driver";
+import { syncAllMappings, storeWritableAccessor } from "./driver";
+import { EditorOpenGuard } from "./editorOpen";
+import { resumeKey } from "./resume";
+import { MugsStore, MemoryIO } from "../store";
+import { DEFAULT_SYNC_POLICY } from "../types";
 
 const J = (lines: string[]): string => lines.join("\n");
 
@@ -348,5 +352,163 @@ describe("syncAllMappings — sync outcomes", () => {
       lastSync: accessor,
     });
     expect(outcomes.map((o) => o.status)).toEqual(["skipped", "ok"]);
+  });
+});
+
+describe("syncAllMappings — policy-driven auto-resolution (Area D)", () => {
+  it("auto-resolves a genuine conflict via injected policy instead of surfacing it", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const store = memoryConflictStore();
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged, overlapping edit -> conflict
+      changedPaths: ["notes/todo.md"],
+      showMap: {
+        M0: { "notes/todo.md": J(["a", "shared", "c"]) },
+        HEAD: { "notes/todo.md": J(["a", "LOCAL", "c"]) },
+        "origin/main": { "notes/todo.md": J(["a", "REMOTE", "c"]) },
+      },
+    });
+    const { accessor, state } = spyAccessor(""); // unpushed local work -> rebase
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      conflicts: store.store,
+      workingTree,
+      policy: { ...DEFAULT_SYNC_POLICY, defaultResolution: "theirs" },
+    });
+    // Auto-resolved to theirs and written into the working tree; NOT surfaced as a conflict.
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["a", "REMOTE", "c"])]]);
+    expect(store.getState()).toEqual([]);
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+    expect(state.conflict).toEqual([]);
+  });
+
+  it("still surfaces a conflict when no policy is injected (default behavior unchanged)", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const store = memoryConflictStore();
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true,
+      changedPaths: ["notes/todo.md"],
+      showMap: {
+        M0: { "notes/todo.md": J(["a", "shared", "c"]) },
+        HEAD: { "notes/todo.md": J(["a", "LOCAL", "c"]) },
+        "origin/main": { "notes/todo.md": J(["a", "REMOTE", "c"]) },
+      },
+    });
+    const { accessor } = spyAccessor("");
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      conflicts: store.store,
+      workingTree,
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
+    expect(store.getState()).toEqual([
+      { path: "notes/todo.md", base: J(["a", "shared", "c"]), ours: J(["a", "LOCAL", "c"]), theirs: J(["a", "REMOTE", "c"]) },
+    ]);
+  });
+});
+
+describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
+  it("skips writing a clean-merge result for a file open with unsaved changes", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const editorOpen = new EditorOpenGuard(["notes/todo.md"]); // open w/ unsaved changes
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged, non-overlapping -> clean merge
+      changedPaths: ["notes/todo.md"],
+      showMap: {
+        M0: { "notes/todo.md": J(["a", "b", "c"]) },
+        HEAD: { "notes/todo.md": J(["A", "b", "c"]) },
+        "origin/main": { "notes/todo.md": J(["a", "b", "C"]) },
+      },
+    });
+    const { accessor } = spyAccessor(""); // unpushed -> rebase, clean merge
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      workingTree,
+      editorOpen,
+    });
+    // The merged result is NOT written because the file is open with unsaved changes.
+    expect(writes).toEqual([]);
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+  });
+
+  it("writes normally when the path is not open (guard does not over-block)", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const editorOpen = new EditorOpenGuard(["other.md"]); // a different file is open
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true,
+      changedPaths: ["notes/todo.md"],
+      showMap: {
+        M0: { "notes/todo.md": J(["a", "b", "c"]) },
+        HEAD: { "notes/todo.md": J(["A", "b", "c"]) },
+        "origin/main": { "notes/todo.md": J(["a", "b", "C"]) },
+      },
+    });
+    const { accessor } = spyAccessor("");
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      workingTree,
+      editorOpen,
+    });
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+  });
+});
+
+describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => {
+  it("persists a resume baseline and increments the op id across pulls, surviving save/reload", async () => {
+    const io = new MemoryIO();
+    const store = new MugsStore(io);
+    await store.load();
+    const acc = storeWritableAccessor(store);
+    acc.recordPull("m1", "R1"); // first pull: baseSha="" (never synced), opId=1, lastRemoteSha="R1"
+    acc.recordPull("m1", "R2"); // second pull: baseSha="R1" (resume point), opId=2, lastRemoteSha="R2"
+    await store.save();
+
+    // Fresh store reading the same IO — simulates an offline->reconnect session.
+    const reloaded = new MugsStore(io);
+    const s = await reloaded.load();
+    expect(s.lastSync["m1"]).toMatchObject({ mappingId: "m1", baseSha: "R1", opId: 2, lastRemoteSha: "R2" });
+    expect(resumeKey(s.lastSync["m1"] ?? {})).toBe("R1\u00002");
+  });
+
+  it("increments the op id on push while preserving the base SHA", async () => {
+    const io = new MemoryIO();
+    const store = new MugsStore(io);
+    await store.load();
+    const acc = storeWritableAccessor(store);
+    acc.recordPull("m1", "R1"); // baseSha="" (no prior remote), opId=1, lastRemoteSha="R1"
+    acc.recordPull("m1", "R2"); // baseSha="R1" (pre-pull baseline), opId=2, lastRemoteSha="R2"
+    acc.recordPush("m1", "L3"); // push preserves the pull-established baseSha, opId=3
+    const s = store.getSettings().lastSync["m1"];
+    expect(s?.baseSha).toBe("R1"); // push did not clobber the reconciliation baseline
+    expect(s?.opId).toBe(3);
+    expect(resumeKey(s ?? {})).toBe("R1\u00003");
   });
 });

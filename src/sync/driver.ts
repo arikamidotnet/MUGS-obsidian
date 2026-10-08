@@ -20,7 +20,9 @@ import type { ProviderInput } from "../providers/factory";
 import type { GitRunner } from "../git/types";
 import { GitClient } from "../git/client";
 import { CloneManager, type LastSyncAccessor, type SyncResult, type WorkingTreeWriter, type ConflictStore } from "./cloneManager";
+import type { EditorOpenGuard } from "./editorOpen";
 import type { MugsStore } from "../store";
+import type { SyncPolicy } from "../types";
 
 /** Result of syncing one mapping. */
 export interface SyncOutcome {
@@ -56,6 +58,11 @@ export interface SyncDriverDeps {
   workingTree?: WorkingTreeWriter;
   /** Optional: durable per-mapping conflict store, so conflicts survive across sessions. */
   conflicts?: ConflictStore;
+  /** Optional: automatic-first resolution policy; when provided + autoMerge, genuine
+   *  conflicts are auto-resolved (recency-wins / defaultResolution) instead of surfaced. */
+  policy?: SyncPolicy;
+  /** Optional: tracks paths open with unsaved changes so writes never clobber an edit. */
+  editorOpen?: EditorOpenGuard;
 }
 
 /** Run one sync pass over every mapping and return a per-mapping outcome list. */
@@ -65,6 +72,8 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
   const manager = new CloneManager(client, layout, deps.lastSync, {
     workingTree: deps.workingTree,
     conflicts: deps.conflicts,
+    policy: deps.policy,
+    editorOpen: deps.editorOpen,
   });
   const providerCache = new Map<string, Provider>();
   const results: SyncOutcome[] = [];
@@ -136,8 +145,12 @@ function errorMessage(error: unknown): string {
 export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
   return {
     lastRemoteSha: (id) => store.getSettings().lastSync[id]?.lastRemoteSha,
-    recordPull: (id, remoteSha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, lastRemoteSha: remoteSha, status: "ok", lastPullAt: Date.now() })),
-    recordPush: (id, localSha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, lastLocalSha: localSha, status: "ok", lastPushAt: Date.now() })),
+    // Persist the git base SHA + a monotonic op id so an offline session resumes cleanly
+    // from where it left off (resume.ts). baseSha is the pre-pull remote point we advance from.
+    recordPull: (id, remoteSha) =>
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.lastRemoteSha ?? "", lastRemoteSha: remoteSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPullAt: Date.now() })),
+    recordPush: (id, localSha) =>
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPushAt: Date.now() })),
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
   };
 }

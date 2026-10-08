@@ -47,6 +47,8 @@ export const lastSyncStateSchema = z.object({
   lastPullAt: z.number().int().positive().optional(),
   lastLocalSha: z.string().optional(),
   lastRemoteSha: z.string().optional(),
+  baseSha: z.string().optional(),
+  opId: z.number().int().positive().optional(),
   status: syncStatusSchema.default("pending"),
 });
 

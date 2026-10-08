@@ -13,12 +13,15 @@
  * and the runtime path compiles/bundles.
  */
 import type { GitClient } from "../git/client";
-import type { FolderMapping, FileConflict } from "../types";
+import type { FolderMapping, FileConflict, SyncPolicy } from "../types";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedChange } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
+import { orderApplyOps, type ApplyOp } from "./applier";
+import { EditorOpenGuard } from "./editorOpen";
+import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
 
 /** Pull action, mirrored from the sync contract. */
 export type SyncPull = SyncAction;
@@ -108,7 +111,15 @@ export class CloneManager {
     private client: GitClient,
     private layout: CloneLayout,
     private syncs: LastSyncAccessor,
-    private readonly seams: { workingTree?: WorkingTreeWriter; conflicts?: ConflictStore } = {},
+    private readonly seams: {
+      workingTree?: WorkingTreeWriter;
+      conflicts?: ConflictStore;
+      /** Automatic-first resolution policy; when present + autoMerge, genuine conflicts
+       *  are auto-resolved (recency-wins / defaultResolution) instead of surfaced. */
+      policy?: SyncPolicy;
+      /** Tracks paths open with unsaved changes so writes never clobber an in-progress edit. */
+      editorOpen?: EditorOpenGuard;
+    } = {},
   ) {}
 
   get workingTree(): WorkingTreeWriter | undefined {
@@ -117,6 +128,14 @@ export class CloneManager {
 
   get conflicts(): ConflictStore | undefined {
     return this.seams.conflicts;
+  }
+
+  private get policy(): SyncPolicy | undefined {
+    return this.seams.policy;
+  }
+
+  private get editorOpen(): EditorOpenGuard | undefined {
+    return this.seams.editorOpen;
   }
 
   /** True when `dir` is already a checked-out git work tree. */
@@ -220,13 +239,51 @@ export class CloneManager {
     );
 
     const { applied, conflicts } = applyMerge(resolved);
-    await Promise.all(
-      applied.map(async (a) => {
-        const absPath = `${dir}/${a.path}`;
-        if ("content" in a) await this.workingTree?.writeFile(absPath, a.content);
-        else await this.workingTree?.deleteFile?.(absPath); // both sides deleted -> remove it
-      }),
-    );
-    return { applied, conflicts, renames };
+
+    // Automatic-first resolution: when a policy is injected and auto-merge is on, resolve
+    // genuine conflicts automatically (recency-wins / defaultResolution) and write the
+    // resolved content instead of surfacing them. Only unresolvable conflicts are returned
+    // for manual review. With no policy injected this is a no-op — behavior is unchanged.
+    let surfacedConflicts = conflicts;
+    const toApply: Array<ApplyOp & { content?: string }> = applied.map(toWriteOp);
+    if (this.policy?.autoMerge) {
+      surfacedConflicts = [];
+      for (const c of conflicts) {
+        if (canAutoResolve(c, this.policy)) {
+          const content = autoResolvedContent(c, resolveConflictAuto(c, this.policy)!);
+          // Skip a no-op write when the resolved content already equals local.
+          const local = c.oursAbsent ? "" : c.ours;
+          if (content !== local) toApply.push({ path: c.path, kind: "write", content });
+        } else {
+          surfacedConflicts.push(c);
+        }
+      }
+    }
+
+    // Safe applier ordering: writes before deletes, parents before children.
+    await this.applyOrdered(dir, orderApplyOps(toApply));
+    return { applied, conflicts: surfacedConflicts, renames };
   }
+
+  /**
+   * Apply ordered write/delete operations to the working tree. Writes skip any path that is
+   * open with unsaved changes (the editor-open guard) so a remote/merge result never clobbers
+   * an in-progress edit; deletions remove both-sides-deleted files.
+   */
+  private async applyOrdered(dir: string, ops: Array<ApplyOp & { content?: string }>): Promise<void> {
+    for (const op of ops) {
+      const absPath = `${dir}/${op.path}`;
+      if (op.kind === "delete") {
+        await this.workingTree?.deleteFile?.(absPath);
+        continue;
+      }
+      if (this.editorOpen && !this.editorOpen.isWriteSafe(op.path)) continue; // open w/ unsaved changes -> skip
+      await this.workingTree?.writeFile(absPath, op.content ?? "");
+    }
+  }
+}
+
+/** Map an applied change to a write/delete op for the applier ordering. */
+function toWriteOp(a: AppliedChange): ApplyOp & { content?: string } {
+  return "content" in a ? { path: a.path, kind: "write", content: a.content } : { path: a.path, kind: "delete" };
 }
