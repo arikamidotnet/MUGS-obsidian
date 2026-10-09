@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { FolderMapping, Credential, FileConflict } from "../types";
+import type { FolderMapping, Credential, FileConflict, Agent } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
@@ -569,5 +569,45 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
     expect(s?.baseSha).toBe("R1"); // push did not clobber the reconciliation baseline
     expect(s?.opId).toBe(3);
     expect(resumeKey(s ?? {})).toBe("R1\u00003");
+  });
+});
+
+describe("syncAllMappings — agent attribution on push (Area 10)", () => {
+  it("attributes an agent's push to that agent with an On-behalf-of trailer", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false }); // clone + unpushed
+    const actingAgent: Agent = { id: "agent-1", displayName: "Research Bot", committerEmail: "bot@local", ownerHuman: "Ada" };
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor, // unpushed -> push
+      pickAgent: () => actingAgent,
+    });
+    const commitCall = calls.find((c) => c[0] === "commit")!;
+    // Message carries the on-behalf-of trailer for the owner…
+    expect(commitCall.join(" ")).toContain("On-behalf-of: Ada");
+    // …and the commit is authored by the agent's committer identity.
+    const authorIdx = commitCall.indexOf("--author");
+    expect(commitCall[authorIdx + 1]).toBe("Research Bot <bot@local>");
+  });
+
+  it("leaves attribution to git defaults when no agent acts on the mapping", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false });
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor,
+      pickAgent: () => undefined, // no agent -> plain sync commit
+    });
+    const commitCall = calls.find((c) => c[0] === "commit")!;
+    expect(commitCall.join(" ")).not.toContain("On-behalf-of");
+    expect(commitCall).not.toContain("--author");
   });
 });

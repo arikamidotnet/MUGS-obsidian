@@ -13,7 +13,8 @@
  * and the runtime path compiles/bundles.
  */
 import type { GitClient } from "../git/client";
-import type { FolderMapping, FileConflict, SyncPolicy, ObsidianConfigPolicy } from "../types";
+import type { FolderMapping, FileConflict, SyncPolicy, ObsidianConfigPolicy, Agent } from "../types";
+import { authorRefForAgent } from "./attribution";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
@@ -123,6 +124,10 @@ export class CloneManager {
       /** Opt-in `.obsidian/` config sync scope (Area 9). When enabled, per-path
        *  personal/vault-wide classification gates which `.obsidian/` files are pulled/pushed. */
       obsidianConfig?: ObsidianConfigPolicy;
+      /** Optional: resolve the agent sub-user acting on a mapping's push. When it returns
+       *  an agent, the commit is attributed to that agent and carries an "On-behalf-of"
+       *  trailer for its owner (Area 10). Absent -> plain sync attribution (unchanged). */
+      pickAgent?: (mapping: FolderMapping) => Agent | undefined;
     } = {},
   ) {}
 
@@ -144,6 +149,10 @@ export class CloneManager {
 
   private get obsidianConfig(): ObsidianConfigPolicy | undefined {
     return this.seams.obsidianConfig;
+  }
+
+  private get pickAgent(): ((mapping: FolderMapping) => Agent | undefined) | undefined {
+    return this.seams.pickAgent;
   }
 
   /**
@@ -221,7 +230,14 @@ export class CloneManager {
       const scoped = changed.filter((path) => this.inScope(mapping, path));
       const paths = scoped.length > 0 ? scoped : mapping.remotePath ? [mapping.remotePath] : undefined;
       await this.client.add(paths);
-      await this.client.commit(formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath }));
+      // Attribute an agent sub-user's push to that agent (with on-behalf-of trailer for
+      // its owner); otherwise leave attribution to the repo's configured git identity.
+      const agent = this.pickAgent?.(mapping);
+      const author = agent ? authorRefForAgent(agent) : undefined;
+      await this.client.commit(
+        formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath, ownerHuman: author?.ownerHuman }),
+        author?.email ? { name: author.name, email: author.email } : undefined,
+      );
       await this.client.push("origin", branch);
       this.syncs.recordPush(mapping.id, localSha);
     }

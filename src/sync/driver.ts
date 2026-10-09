@@ -13,7 +13,7 @@
  * seams (ChildProcessRunner, store-backed accessor) and calls this from the ribbon
  * and command.
  */
-import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy } from "../types";
+import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy, Agent } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
 import type { HttpTransport } from "../providers/http";
 import type { ProviderInput } from "../providers/factory";
@@ -66,6 +66,10 @@ export interface SyncDriverDeps {
   /** Optional: opt-in `.obsidian/` config sync scope (Area 9). When enabled, personal vs
    *  vault-wide classification gates which `.obsidian/` files are pulled/pushed. */
   obsidianConfig?: ObsidianConfigPolicy;
+  /** Optional: resolve the agent sub-user acting on a mapping's push. When it returns an
+   *  agent, the commit is attributed to that agent with an "On-behalf-of" owner trailer.
+   *  Absent -> plain sync attribution (unchanged). */
+  pickAgent?: (mapping: FolderMapping) => Agent | undefined;
 }
 
 /** Run one sync pass over every mapping and return a per-mapping outcome list. */
@@ -78,6 +82,7 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     policy: deps.policy,
     editorOpen: deps.editorOpen,
     obsidianConfig: deps.obsidianConfig,
+    pickAgent: deps.pickAgent,
   });
   const providerCache = new Map<string, Provider>();
   const results: SyncOutcome[] = [];

@@ -5,6 +5,7 @@
  * commit message so history stays legible and the op log can be parsed. Pure
  * string logic, fully unit-tested.
  */
+import { onBehalfOfTrailer } from "./attribution";
 
 /** The kind of sync operation that produced a commit. */
 export type SyncOp = "push" | "pull" | "rebase";
@@ -18,13 +19,16 @@ export interface CommitMeta {
   remotePath?: string;
   /** Acting author name/email (optional). */
   author?: string;
+  /** The human an agent sub-user is committing on-behalf-of (appends a trailer). */
+  ownerHuman?: string;
 }
 
 /** Build a deterministic sync commit message. */
 export function formatCommitMessage(m: CommitMeta): string {
   const subject = buildSubject(m);
   const body = buildBody(m);
-  return body ? `${subject}\n\n${body}` : subject;
+  const core = body ? `${subject}\n\n${body}` : subject;
+  return `${core}${onBehalfOfTrailer(m.ownerHuman)}`;
 }
 
 function buildSubject(m: CommitMeta): string {
