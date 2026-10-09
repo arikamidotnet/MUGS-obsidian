@@ -145,6 +145,32 @@ export function attributeHunks(parsed: ParsedDiff, authorsByFile: AuthorsByFile 
   };
 }
 
+/**
+ * Deterministic accent color for a single author name (Manyana-style tint). The same
+ * name always yields the same hue; views use it to tint that author's changed lines so
+ * "who did what" reads at a glance. Pure — no DOM/Obsidian dependency.
+ */
+export function authorAccent(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  return `hsl(${h}, 58%, 52%)`;
+}
+
+/**
+ * Assign well-separated, stable accent colors to a set of author names so every view
+ * (full-tab diff + right-sidebar panel) tints the same author identically. Names are
+ * sorted for determinism and hues distributed by the golden angle (~137.5°). Pure.
+ */
+export function assignAuthorColors(authors: Iterable<string>): Map<string, string> {
+  const unique = Array.from(new Set(Array.from(authors).filter((n) => n && n.length > 0)))
+    .sort((a, b) => a.localeCompare(b));
+  const colors = new Map<string, string>();
+  unique.forEach((name, i) => {
+    colors.set(name, `hsl(${Math.round((i * 137.5) % 360)}, 62%, 54%)`);
+  });
+  return colors;
+}
+
 function basename(p: string): string {
   const i = p.lastIndexOf("/");
   return i === -1 ? p : p.slice(i + 1);

@@ -9,6 +9,7 @@ import { MugsStore, MemoryIO } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
+import { MugsConflictsPanel } from "./ui/diffPanel";
 import { setMugsContext } from "./ui/dataSources";
 import {
   StoreMapDataSource,
@@ -88,6 +89,7 @@ export default class MugsPlugin extends Plugin {
     this.addRibbonIcon("git-branch", "MUGS: Sync now", async () => void this.runSync());
     this.addRibbonIcon("map", "Open MUGS Map", async () => void this.openView("mugs-map"));
     this.addRibbonIcon("git-commit", "Open MUGS Diff", async () => void this.openView("mugs-diff"));
+    this.addRibbonIcon("pane-right", "Open MUGS Conflicts", () => void this.app.workspace.createPanelTab(this, MugsConflictsPanel));
 
     this.addCommand({
       id: "show-settings",
@@ -124,6 +126,12 @@ export default class MugsPlugin extends Plugin {
       id: "show-diff",
       name: "Show MUGS Diff (per-author changes)",
       callback: () => void this.openView("mugs-diff"),
+    });
+
+    this.addCommand({
+      id: "show-conflicts",
+      name: "Show MUGS Conflicts (right sidebar, with action labels)",
+      callback: () => void this.app.workspace.createPanelTab(this, MugsConflictsPanel),
     });
   }
 

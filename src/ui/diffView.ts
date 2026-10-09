@@ -8,6 +8,7 @@
  */
 import { ItemView, Notice, Setting } from "obsidian";
 import { parseUnifiedDiff, attributeHunks, type ParsedDiff } from "./diffModel";
+import { renderConflicts, renderDiff } from "./diffRender";
 import { getMugsContext } from "./dataSources";
 import type { FileConflict } from "../sync/conflict";
 import type { ResolveChoice } from "../sync/conflict";
@@ -115,40 +116,22 @@ export class DiffView extends ItemView {
     try {
       // Surface any unresolved conflicts above the diff so they are never missed.
       const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId });
-      this.renderConflicts(conflicts, output, mappingId);
+      renderConflicts(conflicts, output, (c, choice) => void this.resolveFile(c, choice));
       const { diffText, authorsByFile } = await getMugsContext().diff.getDiff({ mappingId, ref });
       if (!diffText.trim()) {
         output.createEl("p", {
           text: "No comparison available for this mapping yet — sync it first so a baseline exists.",
-          cls: "mugs-muted",
+          cls: "mags-muted",
         });
         return;
       }
       const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);
-      this.renderDiff(parsed, output);
+      renderDiff(parsed, output);
     } catch (err) {
       output.createEl("p", {
         text: `Could not load diff — ${err instanceof Error ? err.message : String(err)}`,
         cls: "mugs-muted",
       });
-    }
-  }
-
-  /** Render unresolved conflicts for the mapping above the diff, with per-file resolution rows. */
-  private renderConflicts(conflicts: FileConflict[], host: HTMLElement, mappingId: string): void {
-    if (conflicts.length === 0) return;
-    const box = host.createDiv({ cls: "mugs-conflicts" });
-    box.createEl("h3", {
-      text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need manual resolution`,
-      cls: "mugs-conflicts-title",
-    });
-    for (const c of conflicts) {
-      const row = box.createDiv({ cls: "mugs-conflict-row" });
-      row.createSpan({ text: c.path, cls: "mugs-conflict-path" });
-      new Setting(row)
-        .addButton((b) => b.setButtonText("Take ours").onClick(async () => void this.resolveFile(c, "ours")))
-        .addButton((b) => b.setButtonText("Take theirs").onClick(async () => void this.resolveFile(c, "theirs")))
-        .addButton((b) => b.setButtonText("Merge both").onClick(async () => void this.resolveFile(c, "both")));
     }
   }
 
@@ -168,35 +151,4 @@ export class DiffView extends ItemView {
     }
   }
 
-  private renderDiff(parsed: ParsedDiff, host: HTMLElement): void {
-    if (parsed.files.length === 0) {
-      host.createEl("p", { text: "Nothing changed in this range.", cls: "mugs-muted" });
-      return;
-    }
-
-    for (const file of parsed.files) {
-      const block = host.createDiv({ cls: "mugs-diff-file" });
-      block.createEl("h4", { text: file.name, cls: "mugs-diff-filename" });
-
-      let lineNo = 0;
-      for (const hunk of file.hunks) {
-        if (hunk.author) {
-          block.createDiv({ cls: "mugs-diff-author" }).createSpan({
-            text: `by ${hunk.author}${hunk.email ? ` <${hunk.email}>` : ""}`,
-            cls: "mugs-diff-author-badge",
-          });
-        }
-        const table = block.createEl("table", { cls: "mugs-diff-hunk" });
-        for (const line of hunk.lines) {
-          lineNo++;
-          const row = table.insertRow();
-          if (line.type !== "context") row.addClass(`mugs-diff-row-${line.type}`);
-          row.insertCell().createSpan({ text: String(lineNo), cls: "mugs-diff-lineno" });
-          const sign = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
-          row.insertCell().createSpan({ text: sign, cls: `mugs-diff-sign mugs-diff-${line.type}` });
-          row.insertCell().createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
-        }
-      }
-    }
-  }
 }

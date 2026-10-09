@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { parseUnifiedDiff, attributeHunks, authorsByFileFromLog } from "./diffModel";
+import {
+  parseUnifiedDiff,
+  attributeHunks,
+  authorsByFileFromLog,
+  authorAccent,
+  assignAuthorColors,
+} from "./diffModel";
 
 const US = "\u001f"; // field separator (git %x1f)
 const RS = "\u001e"; // record separator (git %x1e)
@@ -138,5 +144,30 @@ describe("authorsByFileFromLog", () => {
 
   it("returns an empty map for empty input", () => {
     expect(authorsByFileFromLog("")).toEqual({});
+  });
+});
+
+describe("authorAccent", () => {
+  it("is deterministic and returns a valid hsl color string", () => {
+    expect(authorAccent("Ada Lovelace")).toBe(authorAccent("Ada Lovelace"));
+    expect(authorAccent("Ada Lovelace")).toMatch(/^hsl\(\d+, \d+%, \d+%\)$/);
+  });
+
+  it("produces different hues for different names", () => {
+    expect(authorAccent("Alice")).not.toBe(authorAccent("Bob"));
+  });
+});
+
+describe("assignAuthorColors", () => {
+  it("returns a stable map keyed by unique, sorted author names", () => {
+    const colors = assignAuthorColors(["Bob", "Ada", "Bob", "Grace"]);
+    expect(Array.from(colors.keys())).toEqual(["Ada", "Bob", "Grace"]); // deduped + sorted
+  });
+
+  it("filters empty names and distributes hues by golden angle", () => {
+    const colors = assignAuthorColors(["A", "B", "C"]);
+    expect(colors.get("A")).toBe("hsl(0, 62%, 54%)");
+    expect(colors.get("B")).toBe("hsl(138, 62%, 54%)"); // round(137.5) = 138
+    expect(colors.get("C")).toBe("hsl(275, 62%, 54%)");
   });
 });
