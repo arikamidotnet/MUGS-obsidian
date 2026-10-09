@@ -138,6 +138,21 @@ export function isInScope(config: ScopeConfig, path: string): boolean {
   return shouldSync(path, { includes: config.includes ?? [], excludes: config.excludes ?? [] });
 }
 
+/**
+ * Route a repo-relative path to the mapping whose scope contains it — used by the
+ * event handler to decide which mapping an edited file belongs to before syncing.
+ * Returns the first matching mapping (mappings are typically non-overlapping), or
+ * undefined when no mapping covers the path. Generic over the mapping type so the
+ * caller gets back its concrete shape (`FolderMapping` in the driver, etc.).
+ * `FolderMapping` satisfies {@link ScopeConfig}.
+ */
+export function resolveMappingForPath<T extends ScopeConfig>(mappings: Iterable<T>, path: string): T | undefined {
+  for (const config of mappings) {
+    if (isInScope(config, path)) return config as T;
+  }
+  return undefined;
+}
+
 /** A file detected as moved from `from` to `to` by content identity. */
 export interface Rename {
   from: string;

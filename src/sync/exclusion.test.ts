@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isInScope, detectRenames, uniqueConflictPath, normalizeRemotePath } from "./exclusion";
+import { isInScope, resolveMappingForPath, detectRenames, uniqueConflictPath, normalizeRemotePath } from "./exclusion";
 
 describe("isInScope — subtree + include/exclude composition", () => {
   it("includes everything when unscoped (remotePath empty)", () => {
@@ -88,5 +88,27 @@ describe("uniqueConflictPath — collision-safe path generation", () => {
 
   it("handles paths with no extension", () => {
     expect(uniqueConflictPath("README", new Set(["README"]))).toBe("README (conflict 1)");
+  });
+});
+
+describe("resolveMappingForPath — route a path to its mapping", () => {
+  const mappings = [
+    { id: "a", label: "A", remotePath: "diary", localFolder: "Diary", providerId: "c", direction: "push-pull" as const },
+    { id: "b", label: "B", remotePath: "docs", localFolder: "Docs", providerId: "c", direction: "pull-only" as const },
+  ];
+
+  it("returns the mapping whose subtree contains the path", () => {
+    expect(resolveMappingForPath(mappings, "diary/2024-01-01.md")?.id).toBe("a");
+    expect(resolveMappingForPath(mappings, "docs/api.json")?.id).toBe("b");
+  });
+
+  it("returns undefined when no mapping covers the path", () => {
+    expect(resolveMappingForPath(mappings, "blog/post.md")).toBeUndefined();
+  });
+
+  it("respects a mapping's include allowlist before matching", () => {
+    const scoped = [{ ...mappings[1], includes: ["*.md"] }];
+    expect(resolveMappingForPath(scoped, "docs/api.json")).toBeUndefined(); // json not allowed
+    expect(resolveMappingForPath(scoped, "docs/guide.md")?.id).toBe("b");
   });
 });
