@@ -7,6 +7,23 @@
 import { PluginSettingTab, Setting, Notice } from "obsidian";
 import type MugsPlugin from "./main";
 import type { Credential, SyncDirection } from "./types";
+import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
+
+// The shipped obsidian typings declare addToggle/addText/addButton on Setting but
+// not addSelect, even though it is a real API. Augment the module so our native
+// select builder typechecks (same pattern as Plugin.addStyleTag in main.ts).
+declare module "obsidian" {
+  interface Setting {
+    addSelect(callback: (component: MugsSelectComponent) => void): this;
+  }
+}
+
+/** Minimal chainable select-builder shape matching Obsidian's SelectComponent. */
+interface MugsSelectComponent {
+  addOption(value: string, displayText?: string): MugsSelectComponent;
+  setValue(value: unknown): MugsSelectComponent;
+  onChange(cb: (value: string) => void | Promise<void>): MugsSelectComponent;
+}
 
 /** Generate a stable id for new credentials/mappings. */
 function newId(): string {
@@ -15,6 +32,14 @@ function newId(): string {
   } catch {
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
+}
+
+/** Split a newline-separated textarea into trimmed, non-empty gitignore glob lines. */
+function parseGlobList(text: string): string[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 }
 
 /** Extract a readable message from a thrown value. */
@@ -90,6 +115,10 @@ export class MugsSettingTab extends PluginSettingTab {
                 this.display();
               }),
             );
+          // Editable include/exclude scope for this mapping (Area 1). Preserves all
+          // other fields via upsertMapping; changes persist on blur/change.
+          card.appendChild(this.scopeField(m, "includes"));
+          card.appendChild(this.scopeField(m, "excludes"));
         }
       }
 
@@ -126,6 +155,123 @@ export class MugsSettingTab extends PluginSettingTab {
         );
     });
 
+    // --- Automatic conflict resolution (Area 2) ---------------------------
+    this.section(containerEl, (card) => {
+      card.createEl("h3", { text: "Automatic Conflict Resolution" });
+      card.createEl("p", {
+        cls: "mugs-desc",
+        text: "How MUGS resolves divergent files automatically. Every choice is reversible via git history and the .mugs-trash.",
+      });
+
+      const sync = this.plugin.store.getSettings().sync;
+      new Setting(card)
+        .setName("Auto-merge clean divergences")
+        .setDesc("3-way merge every divergence and apply results without prompting.")
+        .addToggle((t) =>
+          t.setValue(sync.autoMerge).onChange(async (v) => {
+            this.plugin.store.setSync({ autoMerge: v });
+            await this.plugin.store.save();
+          }),
+        );
+
+      new Setting(card)
+        .setName("Tie-break for unresolved hunks")
+        .setDesc('When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").')
+        .addSelect((d) => {
+          for (const v of ["both", "theirs", "ours"]) d.addOption(v, v);
+          d
+            .setValue(sync.defaultResolution)
+            .onChange(async (v) => {
+              this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
+              await this.plugin.store.save();
+            });
+        });
+
+      new Setting(card)
+        .setName("Auto-accept identical changes")
+        .setDesc("When both sides made the same change, resolve automatically (jj same-change rule).")
+        .addToggle((t) =>
+          t.setValue(sync.sameChangeAccept).onChange(async (v) => {
+            this.plugin.store.setSync({ sameChangeAccept: v });
+            await this.plugin.store.save();
+          }),
+        );
+
+      new Setting(card)
+        .setName("Resolve by most recent save")
+        .setDesc("For a genuine conflict where both sides carry timestamps, keep the more-recently-saved side; otherwise fall back to the tie-break above.")
+        .addToggle((t) =>
+          t.setValue(sync.recencyWins).onChange(async (v) => {
+            this.plugin.store.setSync({ recencyWins: v });
+            await this.plugin.store.save();
+          }),
+        );
+    });
+
+    // --- Sync frequency + maintenance (Area 5/8) --------------------------
+    this.section(containerEl, (card) => {
+      card.createEl("h3", { text: "Sync Frequency & Maintenance" });
+      card.createEl("p", {
+        cls: "mugs-desc",
+        text: "How often MUGS polls for remote changes while idle, and a global pause for bulk edits.",
+      });
+
+      const sync = this.plugin.store.getSettings().sync;
+      new Setting(card)
+        .setName("Polling interval")
+        .setDesc("How often to check the remote when the vault is idle. Local edits still propagate immediately via event triggers.")
+        .addSelect((d) => {
+          for (const p of INTERVAL_PRESETS) d.addOption(p.id, p.label);
+          d
+            .setValue(presetIdForSeconds(sync.intervalSeconds))
+            .onChange(async (v) => {
+              this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
+              await this.plugin.store.save();
+            });
+        });
+
+      new Setting(card)
+        .setName("Pause vault sync")
+        .setDesc("While paused, MUGS stops all automatic push/pull and event triggers. Use it to make bulk edits safely; resuming runs one catch-up pass.")
+        .addToggle((t) =>
+          t
+            .setValue(sync.paused)
+            .onChange(async (v) => {
+              this.plugin.store.setSync({ paused: v });
+              await this.plugin.store.save();
+              new Notice(`MUGS sync ${v ? "paused" : "resumed"}.`);
+            }),
+        );
+    });
+
+    // --- Obsidian config sync (Area 9) ------------------------------------
+    this.section(containerEl, (card) => {
+      card.createEl("h3", { text: "Obsidian Config Sync" });
+      card.createEl("p", {
+        cls: "mugs-desc",
+        text: "Share vault-wide .obsidian/ config (themes, snippets, templates) across your team while keeping user-specific state local.",
+      });
+
+      const obs = this.plugin.store.getSettings().sync.obsidianConfig;
+      new Setting(card)
+        .setName("Sync .obsidian/ configuration")
+        .setDesc("When on, vault-wide entries are shared and personal entries stay local (excluded from push/pull). Off means .obsidian/ is never synced.")
+        .addToggle((t) =>
+          t
+            .setValue(obs.enabled)
+            .onChange(async (v) => {
+              this.plugin.store.setObsidianConfigEnabled(v);
+              await this.plugin.store.save();
+              new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
+            }),
+        );
+
+      const summary = card.createEl("p", { cls: "mags-muted" });
+      summary.textContent =
+        "Shared by default: themes, snippets, templates, global.css, plugins/manifest.json. " +
+        "Local by default: settings.json, core.json, workspace.json, recent-files.json, keymaps.json, and each plugin's data.json.";
+    });
+
     // --- About ------------------------------------------------------------
     containerEl.createEl("h2", { text: "About" });
     containerEl.createEl("p", {
@@ -143,6 +289,44 @@ export class MugsSettingTab extends PluginSettingTab {
     card.className = "mugs-section";
     body(card);
     containerEl.appendChild(card);
+  }
+
+  /** Persist an editable include/exclude scope change on an existing mapping. */
+  private saveMappingScope(
+    id: string,
+    patch: { includes?: string[]; excludes?: string[] },
+  ): void {
+    const current = this.plugin.store.getSettings().mappings.find((x) => x.id === id);
+    if (!current) return;
+    this.plugin.store.upsertMapping({ ...current, ...patch });
+    void this.plugin.store.save();
+  }
+
+  /** An editable include/exclude textarea bound to one mapping's scope. */
+  private scopeField(mapping: { id: string }, kind: "includes" | "excludes"): HTMLElement {
+    const current = this.plugin.store.getSettings().mappings.find((x) => x.id === mapping.id);
+    const value = (current?.[kind] ?? []).join("\n");
+    const hint =
+      kind === "includes"
+        ? "Only these globs sync within the scope (optional). Leave empty for everything."
+        : "These globs never sync (gitignore-style; '!' re-includes).";
+    const wrap = document.createElement("div");
+    wrap.className = "mugs-field";
+    const lbl = document.createElement("label");
+    lbl.textContent = kind === "includes" ? "Includes" : "Excludes";
+    wrap.appendChild(lbl);
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.rows = 2;
+    ta.style.width = "100%";
+    ta.className = "mugs-textarea";
+    ta.placeholder = hint;
+    ta.addEventListener("change", (e: Event) => {
+      const lines = parseGlobList((e.target as HTMLTextAreaElement).value);
+      this.saveMappingScope(mapping.id, { [kind]: lines });
+    });
+    wrap.appendChild(ta);
+    return wrap;
   }
 
   /** Add-credential form: provider picker + label/username/token/base-url fields. */
@@ -210,6 +394,8 @@ export class MugsSettingTab extends PluginSettingTab {
     let providerId = creds[0]?.id ?? "";
     let branch = "";
     let direction: SyncDirection = "push-pull";
+    let includesText = "";
+    let excludesText = "";
 
     const grid = document.createElement("div");
     grid.className = "mugs-form-grid";
@@ -228,6 +414,9 @@ export class MugsSettingTab extends PluginSettingTab {
       ["push-only", "Push only"],
     ]));
     addField("Branch", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
+    // Scope scoping for this mapping (Area 1): include/exclude gitignore globs.
+    grid.appendChild(this.scopeTextareaField("Includes (optional)", (v) => { includesText = v; }));
+    grid.appendChild(this.scopeTextareaField("Excludes (optional)", (v) => { excludesText = v; }));
 
     grid.appendChild(this.actions([
       {
@@ -246,6 +435,8 @@ export class MugsSettingTab extends PluginSettingTab {
               providerId,
               branch: branch || undefined,
               direction,
+              includes: parseGlobList(includesText),
+              excludes: parseGlobList(excludesText),
             });
             await this.plugin.store.save();
             new Notice(`MUGS: mapping "${label}" saved.`);
@@ -308,6 +499,22 @@ export class MugsSettingTab extends PluginSettingTab {
     input.placeholder = placeholder;
     input.addEventListener("change", (e: Event) => onChange((e.target as HTMLInputElement).value));
     return input;
+  }
+
+  /** A full-width labeled textarea for multi-line gitignore glob lists. */
+  private scopeTextareaField(label: string, onChange: (v: string) => void): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "mugs-field";
+    const lbl = document.createElement("label");
+    lbl.textContent = label;
+    wrap.appendChild(lbl);
+    const ta = document.createElement("textarea");
+    ta.rows = 3;
+    ta.style.width = "100%";
+    ta.className = "mugs-textarea";
+    ta.addEventListener("change", (e: Event) => onChange((e.target as HTMLTextAreaElement).value));
+    wrap.appendChild(ta);
+    return wrap;
   }
 
   /** Create a full-width action row containing one or more buttons. */

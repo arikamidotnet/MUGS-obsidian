@@ -481,6 +481,65 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
   });
 });
 
+describe("syncAllMappings — .obsidian/ scope gating (Area 9)", () => {
+  it("merges only vault-wide .obsidian/ files, keeping personal ones local", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged, non-overlapping -> clean merge
+      changedPaths: [".obsidian/themes/x.css", ".obsidian/settings.json"],
+      showMap: {
+        M0: { ".obsidian/themes/x.css": J(["a", "b", "c"]), ".obsidian/settings.json": J(["p", "q", "r"]) },
+        HEAD: { ".obsidian/themes/x.css": J(["A", "b", "c"]), ".obsidian/settings.json": J(["P", "q", "r"]) },
+        "origin/main": { ".obsidian/themes/x.css": J(["a", "b", "C"]), ".obsidian/settings.json": J(["p", "Q", "r"]) },
+      },
+    });
+    const { accessor } = spyAccessor(""); // unpushed -> rebase, clean merge
+    await syncAllMappings({
+      mappings: [mapping({ id: "obs", localFolder: ".obsidian", remotePath: "" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("obs")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      workingTree,
+      // Enabled with no user overrides -> default personal/vault-wide classification.
+      obsidianConfig: { enabled: true, entries: [] },
+    });
+    // Only the vault-wide theme is merged/written; personal settings.json stays local.
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
+  });
+
+  it("syncs nothing under .obsidian/ when the feature is disabled (default behavior unchanged)", async () => {
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true,
+      changedPaths: [".obsidian/themes/x.css"],
+      showMap: {
+        M0: { ".obsidian/themes/x.css": J(["a", "b", "c"]) },
+        HEAD: { ".obsidian/themes/x.css": J(["A", "b", "c"]) },
+        "origin/main": { ".obsidian/themes/x.css": J(["a", "b", "C"]) },
+      },
+    });
+    const { accessor } = spyAccessor("");
+    await syncAllMappings({
+      mappings: [mapping({ id: "obs", localFolder: ".obsidian", remotePath: "" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("obs")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      workingTree,
+      // Explicitly disabled -> .obsidian/ is not gated in, so it syncs like any other path.
+      obsidianConfig: { enabled: false, entries: [] },
+    });
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
+  });
+});
+
 describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => {
   it("persists a resume baseline and increments the op id across pulls, surviving save/reload", async () => {
     const io = new MemoryIO();

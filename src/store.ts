@@ -17,7 +17,15 @@ import {
   normalizeVaultPath,
   type Settings,
 } from "./schema";
-import type { MugsSettings, FolderMapping, Credential, FileConflict } from "./types";
+import type {
+  MugsSettings,
+  FolderMapping,
+  Credential,
+  FileConflict,
+  SyncPolicy,
+  Agent,
+  StagedChange,
+} from "./types";
 
 /** Minimal IO seam — matches Obsidian's loadData/saveData shape. */
 export interface SettingsIO {
@@ -91,9 +99,15 @@ export class MugsStore {
     this.runtimeTokens.delete(id);
   }
 
-  /** Add or replace a folder mapping, rejecting any that target .obsidian/. */
+  /** Add or replace a folder mapping, rejecting any that target .obsidian/ unless
+   *  obsidian config sync is enabled (Area 9), in which case a dedicated `.obsidian`
+   *  scope mapping is allowed and per-path classification decides what is shared. */
   upsertMapping(mapping: FolderMapping): FolderMapping {
-    assertMappingAllowed(this.settings.mappings, mapping.localFolder);
+    assertMappingAllowed(
+      this.settings.mappings,
+      mapping.localFolder,
+      this.settings.sync.obsidianConfig.enabled,
+    );
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== mapping.id);
     this.settings.mappings.push(mapping);
     return structuredClone(mapping);
@@ -127,6 +141,51 @@ export class MugsStore {
     this.settings.security = { ...this.settings.security, ...partial };
   }
 
+  /** Merge a partial update into the top-level sync policy (Area 2/5). */
+  setSync(partial: Partial<SyncPolicy>): void {
+    this.settings.sync = { ...this.settings.sync, ...partial };
+  }
+
+  // --- Agents / sub-users (Area 10) --------------------------------------
+
+  getAgents(): Agent[] {
+    return structuredClone(this.settings.agents);
+  }
+
+  /** Add or replace an agent/sub-user. Returns the stored copy. */
+  upsertAgent(agent: Agent): Agent {
+    this.settings.agents = this.settings.agents.filter((a) => a.id !== agent.id);
+    this.settings.agents.push(structuredClone(agent));
+    return structuredClone(agent);
+  }
+
+  removeAgent(id: string): void {
+    this.settings.agents = this.settings.agents.filter((a) => a.id !== id);
+  }
+
+  // --- Staged changes / review queue (Area 8) ----------------------------
+
+  getStaging(mappingId: string): StagedChange[] {
+    return structuredClone(this.settings.staging[mappingId] ?? []);
+  }
+
+  /** Replace the staged-change list for a mapping; drops the entry when empty. */
+  setStaging(mappingId: string, changes: StagedChange[]): void {
+    if (changes.length === 0) delete this.settings.staging[mappingId];
+    else this.settings.staging[mappingId] = structuredClone(changes);
+  }
+
+  // --- Obsidian config sync (Area 9) -------------------------------------
+
+  setObsidianConfig(config: MugsSettings["sync"]["obsidianConfig"]): void {
+    this.settings.sync.obsidianConfig = { ...this.settings.sync.obsidianConfig, ...config };
+  }
+
+  /** Toggle the opt-in .obsidian/ sync scope on or off. */
+  setObsidianConfigEnabled(enabled: boolean): void {
+    this.settings.sync.obsidianConfig = { ...this.settings.sync.obsidianConfig, enabled };
+  }
+
   /** Persist current settings. Tokens are encrypted at rest when enabled. */
   async save(): Promise<void> {
     const toWrite = structuredClone(this.settings);
@@ -145,15 +204,20 @@ export class MugsStore {
   }
 }
 
-/** Throw if adding `mapping` would sync a blocked folder. */
+/** Throw if adding a mapping would sync a blocked `.obsidian/` folder. A dedicated
+ *  `.obsidian/` scope is permitted only when obsidian config sync is enabled. */
 export function assertMappingAllowed(
   existing: FolderMapping[],
   localFolder: string,
+  obsidianEnabled = false,
 ): void {
   if (isBlockedFolder(localFolder)) {
-    throw new Error(
-      `Refusing to create mapping for "${localFolder}" — folders under .obsidian/ cannot be synced.`,
-    );
+    const norm = normalizeVaultPath(localFolder);
+    if (!(obsidianEnabled && norm.startsWith(".obsidian"))) {
+      throw new Error(
+        `Refusing to create mapping for "${localFolder}" — folders under .obsidian/ cannot be synced.`,
+      );
+    }
   }
 }
 

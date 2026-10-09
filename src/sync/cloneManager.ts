@@ -13,12 +13,13 @@
  * and the runtime path compiles/bundles.
  */
 import type { GitClient } from "../git/client";
-import type { FolderMapping, FileConflict, SyncPolicy } from "../types";
+import type { FolderMapping, FileConflict, SyncPolicy, ObsidianConfigPolicy } from "../types";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedChange } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
+import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
 import { EditorOpenGuard } from "./editorOpen";
 import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
@@ -119,6 +120,9 @@ export class CloneManager {
       policy?: SyncPolicy;
       /** Tracks paths open with unsaved changes so writes never clobber an in-progress edit. */
       editorOpen?: EditorOpenGuard;
+      /** Opt-in `.obsidian/` config sync scope (Area 9). When enabled, per-path
+       *  personal/vault-wide classification gates which `.obsidian/` files are pulled/pushed. */
+      obsidianConfig?: ObsidianConfigPolicy;
     } = {},
   ) {}
 
@@ -136,6 +140,26 @@ export class CloneManager {
 
   private get editorOpen(): EditorOpenGuard | undefined {
     return this.seams.editorOpen;
+  }
+
+  private get obsidianConfig(): ObsidianConfigPolicy | undefined {
+    return this.seams.obsidianConfig;
+  }
+
+  /**
+   * Whether a repo path is in the mapping's scope. Composes the folder-scope check
+   * (`isInScope`) with `.obsidian/` personal-vs-vault-wide gating: when obsidian config
+   * sync is enabled, `.obsidian/` paths are pulled/pushed only if {@link shouldSyncObsidianPath}
+   * says they are vault-wide. With obsidian disabled (default) this is exactly `isInScope`,
+   * so existing behavior is unchanged.
+   */
+  private inScope(mapping: FolderMapping, path: string): boolean {
+    if (!isInScope(mapping, path)) return false;
+    const config = this.obsidianConfig;
+    if (config?.enabled && isUnderObsidianRoot(path)) {
+      return shouldSyncObsidianPath(path, config);
+    }
+    return true;
   }
 
   /** True when `dir` is already a checked-out git work tree. */
@@ -194,7 +218,7 @@ export class CloneManager {
       // Stage only in-scope working-tree changes so excluded paths are never pushed.
       // When nothing is uncommitted to scope-filter, fall back to the subtree/whole-repo add.
       const changed = await this.client.workingTreePaths();
-      const scoped = changed.filter((path) => isInScope(mapping, path));
+      const scoped = changed.filter((path) => this.inScope(mapping, path));
       const paths = scoped.length > 0 ? scoped : mapping.remotePath ? [mapping.remotePath] : undefined;
       await this.client.add(paths);
       await this.client.commit(formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath }));
@@ -219,7 +243,7 @@ export class CloneManager {
     const remotePaths = new Set(await this.client.changedPaths(`${baseSha}...${remoteRef}`));
 
     // Union both sides into one Set so a file changed on local AND remote is merged once.
-    const inScopePaths = Array.from(new Set<string>([...localPaths, ...remotePaths])).filter((path) => isInScope(mapping, path));
+    const inScopePaths = Array.from(new Set<string>([...localPaths, ...remotePaths])).filter((path) => this.inScope(mapping, path));
 
     const entries = inScopePaths.map(async (path) => ({
       path,

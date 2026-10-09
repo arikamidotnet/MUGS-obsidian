@@ -143,6 +143,9 @@ export default class MugsPlugin extends Plugin {
       lastSync: storeWritableAccessor(this.store),
       workingTree: this.workingTreeWriter(),
       conflicts: storeConflictAccessor(this.store),
+      // Opt-in `.obsidian/` config sync scope (Area 9): when enabled, personal vs
+      // vault-wide classification gates which .obsidian/ files are pulled/pushed.
+      obsidianConfig: settings.sync.obsidianConfig,
     });
     await this.store.save();
 
