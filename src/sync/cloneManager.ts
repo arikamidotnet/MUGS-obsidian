@@ -12,7 +12,7 @@
  * WorkingTreeWriter + ConflictStore) so the pure decision logic stays unit-testable
  * and the runtime path compiles/bundles.
  */
-import type { GitClient } from "../git/client";
+import { GitClient } from "../git/client";
 import type { FolderMapping, FileConflict, SyncPolicy, ObsidianConfigPolicy, Agent } from "../types";
 import { authorRefForAgent } from "./attribution";
 import type { RepoSummary } from "../providers/types";
@@ -192,13 +192,16 @@ export class CloneManager {
     const branch = mapping.branch ?? repo.defaultBranch;
     const base = this.syncs.lastRemoteSha(mapping.id) ?? "";
 
-    await this.client.fetch();
-    const localSha = await this.client.currentHead();
-    const remoteSha = await this.client.revParse(`origin/${branch}`);
+    // Bind git ops to the clone dir; without a cwd they would run in process.cwd().
+    const c = this.client.at(dir);
+
+    await c.fetch();
+    const localSha = await c.currentHead();
+    const remoteSha = await c.revParse(`origin/${branch}`);
 
     // decideSyncAction consults the ancestry oracle at most once (with
     // localSha, [remoteSha]); precompute it so the pure contract stays synchronous.
-    const localContainsRemote = await this.client.isAncestor(localSha, [remoteSha]);
+    const localContainsRemote = await c.isAncestor(localSha, [remoteSha]);
 
     const decision = planSync({
       direction: mapping.direction,
@@ -212,7 +215,7 @@ export class CloneManager {
     // Diverged histories with unpushed local work. Merge file contents ourselves so
     // clean changes apply and only genuine conflicts are surfaced for resolution.
     if (decision.pull === "rebase") {
-      const merged = await this.mergeContents(mapping, repo, branch);
+      const merged = await this.mergeContents(mapping, repo, branch, c);
       if (merged.conflicts.length > 0) {
         const all = [...(this.conflicts?.getConflicts(mapping.id) ?? []), ...merged.conflicts];
         this.conflicts?.setConflicts(mapping.id, all);
@@ -220,30 +223,35 @@ export class CloneManager {
       }
       // Clean merge is now in the working tree; fall through to commit + push below.
     } else if (decision.pull !== "none") {
-      await this.client.pull("origin", branch, "ff");
+      await c.pull("origin", branch, "ff");
     }
 
+    let pushed = false;
     if (decision.push) {
-      // Stage only in-scope working-tree changes so excluded paths are never pushed.
-      // When nothing is uncommitted to scope-filter, fall back to the subtree/whole-repo add.
-      const changed = await this.client.workingTreePaths();
+      // Stage and commit only in-scope UNCOMMITTED changes. Skip the commit when the working
+      // tree is clean so we never attempt an empty commit (which fails with "nothing to
+      // commit" — e.g. a fresh clone on first sync). Already-committed unpushed work still
+      // goes out via push below, regardless of whether anything was newly committed here.
+      const changed = await c.workingTreePaths();
       const scoped = changed.filter((path) => this.inScope(mapping, path));
-      const paths = scoped.length > 0 ? scoped : mapping.remotePath ? [mapping.remotePath] : undefined;
-      await this.client.add(paths);
-      // Attribute an agent sub-user's push to that agent (with on-behalf-of trailer for
-      // its owner); otherwise leave attribution to the repo's configured git identity.
-      const agent = this.pickAgent?.(mapping);
-      const author = agent ? authorRefForAgent(agent) : undefined;
-      await this.client.commit(
-        formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath, ownerHuman: author?.ownerHuman }),
-        author?.email ? { name: author.name, email: author.email } : undefined,
-      );
-      await this.client.push("origin", branch);
+      if (scoped.length > 0) {
+        await c.add(scoped);
+        // Attribute an agent sub-user's push to that agent (with on-behalf-of trailer for
+        // its owner); otherwise leave attribution to the repo's configured git identity.
+        const agent = this.pickAgent?.(mapping);
+        const author = agent ? authorRefForAgent(agent) : undefined;
+        await c.commit(
+          formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath, ownerHuman: author?.ownerHuman }),
+          author?.email ? { name: author.name, email: author.email } : undefined,
+        );
+      }
+      await c.push("origin", branch);
       this.syncs.recordPush(mapping.id, localSha);
+      pushed = true;
     }
 
     this.syncs.recordPull(mapping.id, remoteSha);
-    return { mappingId: mapping.id, pull: decision.pull, push: decision.push, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [], renames: [] };
+    return { mappingId: mapping.id, pull: decision.pull, push: pushed, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [], renames: [] };
   }
 
   /**
@@ -251,22 +259,22 @@ export class CloneManager {
    * each with a 3-way merge, write clean results into the working tree, and return
    * divergent files as conflicts. Local content is read from HEAD (committed state).
    */
-  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[] }> {
+  private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string, client: GitClient): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[] }> {
     const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
     const remoteRef = `origin/${branch}`;
-    const baseSha = await this.client.mergeBase("HEAD", remoteRef);
-    const localPaths = new Set(await this.client.changedPaths(`${baseSha}...HEAD`));
-    const remotePaths = new Set(await this.client.changedPaths(`${baseSha}...${remoteRef}`));
+    const baseSha = await client.mergeBase("HEAD", remoteRef);
+    const localPaths = new Set(await client.changedPaths(`${baseSha}...HEAD`));
+    const remotePaths = new Set(await client.changedPaths(`${baseSha}...${remoteRef}`));
 
     // Union both sides into one Set so a file changed on local AND remote is merged once.
     const inScopePaths = Array.from(new Set<string>([...localPaths, ...remotePaths])).filter((path) => this.inScope(mapping, path));
 
     const entries = inScopePaths.map(async (path) => ({
       path,
-      base: await this.client.show(baseSha, path),
+      base: await client.show(baseSha, path),
       // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
-      ours: await this.client.show("HEAD", path),
-      theirs: await this.client.show(remoteRef, path),
+      ours: await client.show("HEAD", path),
+      theirs: await client.show(remoteRef, path),
     }));
     const resolved = await Promise.all(entries);
 

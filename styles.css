@@ -11,15 +11,55 @@
 
 /* --- Shared ---------------------------------------------------------------- */
 
-.mugs-muted {
+.mags-muted {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* Getting Started documentation card (top of settings) */
+.mugs-getting-started {
+  border: 1px solid var(--interactive-accent);
+  border-left-width: 4px;
+  border-radius: 10px;
+  padding: 12px 18px 16px;
+  margin-bottom: 18px;
+  background: var(--background-modifier-hover);
+}
+
+.mugs-getting-started h3 {
+  margin: 0 0 6px;
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+}
+
+.mugs-gs-intro {
+  margin: 0 0 10px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-gs-steps {
+  margin: 0 0 10px;
+  padding-left: 22px;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.55;
+}
+
+.mugs-note {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
 }
 
 /* --- Map view -------------------------------------------------------------- */
 
 .mugs-maps-view {
-  padding: 12px 16px;
+  padding: 8px 14px 12px;
 }
 
 .mugs-map-svg {
@@ -33,7 +73,7 @@
   flex-wrap: wrap;
   gap: 8px 14px;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .mugs-map-legend-label {
@@ -383,4 +423,38 @@
   margin: 2px 0 6px;
   font-size: var(--font-ui-small);
   font-weight: 600;
+}
+
+/* Review Queue legend — one-line explanation of Stage/Hold/Clear */
+.mugs-review-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+}
+
+.mugs-review-legend-text {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+/* Map footer — compact sync summary chips */
+.mugs-map-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.mugs-map-footer-item {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.mugs-map-footer-good {
+  color: var(--text-success, #3fb950);
 }

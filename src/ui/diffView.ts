@@ -6,7 +6,7 @@
  * attributed inline diff. Parsing/attribution live in diffModel.ts (unit-tested);
  * this file never runs under vitest because it imports the Obsidian DOM API.
  */
-import { ItemView, Notice, Setting } from "obsidian";
+import { ItemView, Notice } from "obsidian";
 import { parseUnifiedDiff, attributeHunks, type ParsedDiff } from "./diffModel";
 import { renderConflicts, renderDiff } from "./diffRender";
 import { getMugsContext } from "./dataSources";
@@ -59,51 +59,39 @@ export class DiffView extends ItemView {
     const controls = this.contentEl.createDiv({ cls: "mugs-diff-controls" });
     const output = this.contentEl.createDiv({ cls: "mugs-diff-output" });
 
-    new Setting(controls)
-      .setName("Mapping")
-      .addDropdown((d) =>
-        d.addOptions(
-          Object.fromEntries(rows.map((r) => [r.mapping.id, r.mapping.label || r.mapping.id])),
-        )
-        .setValue(rows[0].mapping.id)
-        .onChange(async (mappingId) => {
-          this.selectedMappingId = mappingId;
-          await this.showDiff(mappingId, output);
-        }),
-      );
+    // Compact comparison header — no big selectors. Mapping selection lives in the
+    // MUGS settings tab; here we only show *where* to compare (mapping → ref).
+    const header = controls.createDiv({ cls: "mugs-diff-range" });
+    header.createSpan({ text: "Compare", cls: "mugs-diff-range-label" });
 
-    let selectedMappingId = rows[0].mapping.id;
+    if (rows.length > 1) {
+      // Only surface a selector when there is genuinely more than one mapping.
+      const select = header.createEl("select", { cls: "mugs-diff-mapping-select" });
+      for (const r of rows) {
+        const opt = select.createEl("option");
+        opt.value = r.mapping.id;
+        opt.textContent = r.mapping.label || r.mapping.id;
+      }
+      select.value = rows[0].mapping.id;
+      this.selectedMappingId = rows[0].mapping.id;
+      select.addEventListener("change", (e) => {
+        this.selectedMappingId = (e.target as HTMLSelectElement).value;
+        void this.showDiff(this.selectedMappingId, output);
+      });
+    } else {
+      header.createSpan({ text: rows[0].mapping.label || rows[0].mapping.id, cls: "mugs-diff-mapping-name" });
+      this.selectedMappingId = rows[0].mapping.id;
+    }
 
-    new Setting(controls)
-      .setName("Mapping")
-      .addDropdown((d) =>
-        d.addOptions(
-          Object.fromEntries(rows.map((r) => [r.mapping.id, r.mapping.label || r.mapping.id])),
-        )
-        .setValue(selectedMappingId)
-        .onChange(async (mappingId) => {
-          selectedMappingId = mappingId;
-          await this.showDiff(mappingId, output);
-        }),
-      );
-
-    const refSetting = new Setting(controls)
-      .setName("Ref (to)")
-      .addText((t) =>
-        t.setPlaceholder("HEAD")
-          .setValue("HEAD")
-          .onChange(async (ref) => void this.showDiff(selectedMappingId, output, ref)),
-      );
-
-    new Setting(controls).addButton((b) =>
-      b.setButtonText("Show diff").onClick(async () => {
-        const ref = (refSetting.descEl.querySelector('input[type="text"]') as HTMLInputElement | null)?.value || "HEAD";
-        await this.showDiff(selectedMappingId, output, ref);
-      }),
+    const refInput = header.createEl("input", { type: "text", cls: "mugs-diff-ref-input" });
+    refInput.value = "HEAD";
+    refInput.addEventListener("change", () =>
+      void this.showDiff(this.selectedMappingId, output, refInput.value.trim() || "HEAD"),
     );
+    header.createSpan({ text: "against last-synced baseline", cls: "mugs-diff-range-hint" });
 
     // Load the default mapping immediately.
-    void this.showDiff(selectedMappingId, output);
+    void this.showDiff(this.selectedMappingId, output);
   }
 
   private async showDiff(

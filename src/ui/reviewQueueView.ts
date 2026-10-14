@@ -13,6 +13,13 @@ import type { ChangeState, StagedChange } from "../types";
 
 const STATE_LABEL: Record<ChangeState, string> = { unstaged: "Pending", staged: "Staged", held: "Held" };
 
+/** What each queue action does — shown as a hover tooltip and in the legend above. */
+const STATE_TOOLTIP: Record<ChangeState, string> = {
+  staged: "Stage this file — it will be pushed on the next sync.",
+  held: "Hold this file — skip it on the next sync (deferred).",
+  unstaged: "Clear from queue — let it sync automatically again.",
+};
+
 export class ReviewQueueView extends ItemView {
   constructor(private plugin: MugsPlugin, leaf: WorkspaceLeaf) {
     super(leaf);
@@ -59,6 +66,11 @@ export class ReviewQueueView extends ItemView {
     }
 
     this.contentEl.createEl("h2", { text: "Review Queue", cls: "mugs-conflicts-panel-title" });
+    const legend = this.contentEl.createDiv({ cls: "mugs-review-legend" });
+    legend.createSpan({
+      text: "Stage = include in next push · Hold = skip next sync · Clear = let it sync automatically",
+      cls: "mugs-review-legend-text",
+    });
     for (const group of byLabel.values()) this.renderGroup(group);
   }
 
@@ -82,6 +94,10 @@ export class ReviewQueueView extends ItemView {
       text,
       cls: `mugs-conflict-btn mugs-conflict-btn-${state}`,
     });
+    // Native title + Obsidian's aria-tooltip both drive hover popovers.
+    const tip = STATE_TOOLTIP[state];
+    el.setAttribute("title", tip);
+    el.setAttr("aria-tooltip", tip);
     el.addEventListener("click", () => void this.setChangeState(mappingId, path, state));
   }
 

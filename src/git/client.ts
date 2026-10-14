@@ -28,6 +28,11 @@ export interface AuthorActivity {
 export class GitClient {
   constructor(private runner: GitRunner, private cwd?: string) {}
 
+  /** Return a client bound to a different working directory, reusing this runner. */
+  at(cwd: string): GitClient {
+    return new GitClient(this.runner, cwd);
+  }
+
   private opts() {
     return this.cwd ? { cwd: this.cwd } : undefined;
   }

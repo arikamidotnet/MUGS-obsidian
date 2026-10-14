@@ -104,7 +104,30 @@ export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<s
 
   for (const file of parsed.files) {
     const block = host.createDiv({ cls: "mugs-diff-file" });
-    block.createEl("h4", { text: file.name, cls: "mugs-diff-filename" });
+    // Warp-style file summary: repo path + +/- counts + author badges.
+    let added = 0;
+    let removed = 0;
+    const authors = new Set<string>();
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.type === "added") added++;
+        else if (line.type === "removed") removed++;
+      }
+      if (hunk.author) authors.add(hunk.author);
+    }
+    const header = block.createDiv({ cls: "mugs-diff-file-header" });
+    header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
+    const summary = header.createSpan({ cls: "mugs-diff-summary" });
+    summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
+    summary.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
+    for (const author of authors) {
+      const color = palette.get(author) ?? authorAccent(author);
+      header.createSpan({
+        text: author,
+        cls: "mugs-diff-author-badge",
+        attr: { style: `background:${paleTint(color)};color:${color};border-color:${color}` },
+      });
+    }
 
     let lineNo = 0;
     for (const hunk of file.hunks) {
@@ -135,20 +158,37 @@ function renderHunkHeader(
   hunk: ParsedDiff["files"][number]["hunks"][number],
   authorColor?: string,
 ): HTMLTableElement {
+  // Per-hunk +/- counts (Warp-style) so a collapsed header still tells you the size.
+  let added = 0;
+  let removed = 0;
+  for (const line of hunk.lines) {
+    if (line.type === "added") added++;
+    else if (line.type === "removed") removed++;
+  }
+
   const header = block.createDiv({ cls: "mugs-diff-hunk-header" });
   if (authorColor) header.style.borderLeftColor = authorColor;
-  const chevron = header.createSpan({ text: "▸", cls: "mugs-diff-chevron" });
+  // Start expanded; the user collapses hunks they don't need to inspect.
+  const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
 
-  let label = hunk.section || `hunk ${hunk.oldStart}–${hunk.newStart}`;
-  if (hunk.author) label += ` · by ${hunk.author}`;
-  header.createSpan({ text: label, cls: "mugs-diff-hunk-label" });
+  const label = header.createSpan({ cls: "mugs-diff-hunk-label" });
+  label.createSpan({ text: `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`, cls: "mugs-diff-hunk-range" });
+  if (hunk.section) label.createSpan({ text: hunk.section, cls: "mugs-diff-hunk-section" });
+  if (hunk.author) header.createSpan({ text: hunk.author, cls: "mugs-diff-author-badge" });
+
+  const counts = header.createSpan({ cls: "mugs-diff-hunk-counts" });
+  counts.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
+  counts.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
 
   const body = block.createEl("table", { cls: "mugs-diff-hunk mugs-diff-hunk-body" });
-  header.addEventListener("click", () => {
-    const open = header.classList.toggle("mugs-diff-hunk-open");
+  let open = true;
+  const setOpen = () => {
+    open = !open;
     chevron.textContent = open ? "▾" : "▸";
+    header.classList.toggle("mugs-diff-hunk-open", open);
     body.style.display = open ? "" : "none";
-  });
+  };
+  header.addEventListener("click", setOpen);
   return body;
 }
 

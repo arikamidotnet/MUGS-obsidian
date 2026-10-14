@@ -89,7 +89,14 @@ export class StoreMapDataSource implements MapDataSource {
       } catch {
         owner = undefined; // no clone / git error -> surface without an owner
       }
-      rows.push({ mapping: m, status: lastSync[m.id]?.status ?? "pending", owner });
+      const ls = lastSync[m.id];
+      rows.push({
+        mapping: m,
+        status: ls?.status ?? "pending",
+        owner,
+        lastPushAt: ls?.lastPushAt,
+        lastPullAt: ls?.lastPullAt,
+      });
     }
 
     return rows;

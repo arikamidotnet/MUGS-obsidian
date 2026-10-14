@@ -13,13 +13,13 @@ import { buildMapGraph, type MapContext, type MapEdge, type MapGraph, type MapNo
 import { getMugsContext } from "./dataSources";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const NODE_W = 168;
-const NODE_H = 44;
-const ROW_H = 72;
-const PAD_TOP = 28;
+const NODE_W = 150;
+const NODE_H = 40;
+const ROW_H = 56;
+const PAD_TOP = 18;
 const PAD_LEFT = 24;
-const LEFT_X = 96; // folder node center x
-const RIGHT_X = 360; // repo node center x
+const LEFT_X = 72; // folder node center x
+const RIGHT_X = 300; // repo node center x
 
 /** Direction glyph shown on the edge between the two nodes. */
 const DIRECTION_GLYPH: Record<string, string> = {
@@ -74,28 +74,48 @@ export class MapView extends ItemView {
       const context: Record<string, MapContext> = {};
       for (const r of rows) context[r.mapping.id] = { owner: r.owner, status: r.status };
       const graph = buildMapGraph(rows.map((r) => r.mapping), context);
-      this.render(graph, rows.length);
+      this.render(graph, rows);
     } catch (err) {
       this.contentEl.empty();
       new Notice(`MUGS: could not load map — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private render(graph: MapGraph, rowCount: number): void {
+  private render(graph: MapGraph, rows: { status: string; lastPushAt?: number; lastPullAt?: number }[]): void {
     this.renderLegend();
 
-    if (rowCount === 0) {
+    if (rows.length === 0) {
       this.contentEl.createEl("p", { text: "No folder mappings yet. Add one in the MUGS settings." });
       return;
     }
 
     const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+    this.renderFooter(rows);
+
     const svg = this.contentEl.createSvg("svg");
     svg.addClass("mugs-map-svg");
-    svg.setAttribute("height", String(PAD_TOP * 2 + graph.edges.length * ROW_H));
+    const laneCount = Math.max(graph.edges.length, 1);
+    svg.setAttribute("height", String(PAD_TOP * 2 + laneCount * ROW_H));
 
     for (let i = 0; i < graph.edges.length; i++) {
       this.renderLane(svg, graph.edges[i], byId, i);
+    }
+  }
+
+  /** Compact footer: mapping count, in-sync count, and the most recent sync time. */
+  private renderFooter(rows: { status: string; lastPushAt?: number; lastPullAt?: number }[]): void {
+    const inSync = rows.filter((r) => r.status === "ok" || r.status === "up-to-date").length;
+    let latest = 0;
+    for (const r of rows) {
+      if (r.lastPushAt && r.lastPushAt > latest) latest = r.lastPushAt;
+      if (r.lastPullAt && r.lastPullAt > latest) latest = r.lastPullAt;
+    }
+
+    const footer = this.contentEl.createDiv({ cls: "mugs-map-footer" });
+    footer.createSpan({ text: `${rows.length} mapping${rows.length === 1 ? "" : "s"}`, cls: "mugs-map-footer-item" });
+    footer.createSpan({ text: `${inSync} in sync`, cls: "mugs-map-footer-item mugs-map-footer-good" });
+    if (latest) {
+      footer.createSpan({ text: `last sync ${relativeTime(Date.now() - latest)}`, cls: "mugs-map-footer-item" });
     }
   }
 
@@ -184,6 +204,18 @@ export class MapView extends ItemView {
       chip.createSpan({ text: label });
     }
   }
+}
+
+/** Human-friendly relative time, e.g. "2 min ago", "3 hours ago". */
+function relativeTime(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.round(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
 }
 
 function statusColor(status: string): string {

@@ -62,6 +62,9 @@ export class MugsSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    // --- Getting Started (startup documentation) ----------------------------
+    this.gettingStarted(containerEl);
+
     // --- Credentials / providers -------------------------------------------
     this.section(containerEl, (card) => {
       card.createEl("h3", { text: "Credentials & Providers" });
@@ -280,6 +283,28 @@ export class MugsSettingTab extends PluginSettingTab {
     });
     containerEl.createEl("p", {
       text: "Add a credential, then map a remote path to a vault folder. Use the ribbon icons or the 'MUGS' commands to sync and view changes.",
+    });
+  }
+
+  /** The Getting Started guide shown at the top of every settings open. This is
+   *  the plugin's startup documentation — it walks a fresh install through adding a
+   *  credential, creating a mapping, and syncing via the views/commands. */
+  private gettingStarted(containerEl: HTMLElement): void {
+    const card = containerEl.createDiv({ cls: "mugs-getting-started" });
+    card.createEl("h3", { text: "Getting Started" });
+    card.createEl("p", {
+      cls: "mugs-gs-intro",
+      text: "MUGS syncs Obsidian folders with git remotes (GitLab, GitHub, Bitbucket, Gitea/Forgejo or a local repo) using an automatic-first, fully git-reversible model. Set it up in three steps:",
+    });
+
+    const steps = card.createEl("ol", { cls: "mugs-gs-steps" });
+    steps.createEl("li", { text: "Add a credential — under Credentials & Providers, add your provider and token. For GitLab paste the base URL (include /api/v4 if self-hosted)." });
+    steps.createEl("li", { text: "Create a folder mapping — under Folder Mappings, map a remote path (or the repo root) to a vault folder such as Notes, then pick push+pull, pull-only, or push-only and an optional branch." });
+    steps.createEl("li", { text: "Sync — open the MUGS Map view to see each mapping's status. Edits sync automatically; use the Review Queue to stage/hold specific files and Diff to compare against the last-synced baseline." });
+
+    card.createDiv({
+      cls: "mugs-note",
+      text: "Local provider tip: a local mapping clones its repo into .mugs-clones/ inside the vault and treats that clone as the synced copy (your vault's own folders are not written to). Every sync is reversible via git history and the .mugs-trash. Open these settings via the gear icon next to MUGS in Community plugins.",
     });
   }
 

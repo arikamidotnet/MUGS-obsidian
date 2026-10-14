@@ -99,22 +99,41 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
   for (const mapping of deps.mappings) {
     const credential = deps.credentials.find((c) => c.id === mapping.providerId);
     if (!credential) { skip(mapping, "no credential"); continue; }
-    if (credential.kind === "local") { skip(mapping, "local provider needs a manual repo setup"); continue; }
-
-    const token = deps.getToken(credential.id);
-    if (!token) { skip(mapping, "missing token"); continue; }
-
-    let provider = providerCache.get(credential.id);
-    if (!provider) {
-      provider = deps.buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token }, { actingUsername: credential.username });
-      providerCache.set(credential.id, provider);
-    }
 
     let repos: RepoSummary[];
-    try {
-      repos = await provider.listRepos();
-    } catch {
-      skip(mapping, "could not reach provider"); continue;
+    if (credential.kind === "local") {
+      // Local provider has no REST adapter: it syncs an existing local repo directly.
+      // The repo path is stored in credential.baseUrl as a file:// URL (the schema requires
+      // baseUrl to be a valid URL). git's file:// scheme parser is unreliable across builds,
+      // so pass a plain absolute filesystem path to `git clone`/fetch/push instead. Fall
+      // through to the shared clone/sync path below.
+      const rawUrl = credential.baseUrl?.trim();
+      if (!rawUrl) { skip(mapping, "local provider needs a repo path set as the credential baseUrl"); continue; }
+      const remotePath = rawUrl.startsWith("file://") ? rawUrl.slice("file://".length) : rawUrl;
+      repos = [
+        {
+          id: mapping.id,
+          name: mapping.label ?? mapping.id,
+          pathWithNamespace: mapping.remotePath,
+          httpUrlToRepo: remotePath,
+          defaultBranch: mapping.branch ?? "main",
+        },
+      ];
+    } else {
+      const token = deps.getToken(credential.id);
+      if (!token) { skip(mapping, "missing token"); continue; }
+
+      let provider = providerCache.get(credential.id);
+      if (!provider) {
+        provider = deps.buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token }, { actingUsername: credential.username });
+        providerCache.set(credential.id, provider);
+      }
+
+      try {
+        repos = await provider.listRepos();
+      } catch {
+        skip(mapping, "could not reach provider"); continue;
+      }
     }
     const repo = repos.find((r) => r.id === mapping.id);
     if (!repo) { skip(mapping, "repo not found or not accessible"); continue; }

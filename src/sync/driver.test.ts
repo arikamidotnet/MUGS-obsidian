@@ -137,18 +137,18 @@ describe("syncAllMappings — skips", () => {
     expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "skipped", reason: "no credential" }]);
   });
 
-  it("skips a local provider (no REST adapter)", async () => {
+  it("skips a local provider that has no repo path (credential.baseUrl)", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
     const outcomes = await syncAllMappings({
       mappings: [mapping()],
-      credentials: [credential({ kind: "local" })],
+      credentials: [credential({ kind: "local" })], // no baseUrl -> cannot resolve repo
       getToken: () => "t",
       buildProvider: () => fakeProvider(fakeRepo("m1")),
       cloneRoot: CLONE_ROOT,
       runner,
       lastSync: spyAccessor().accessor,
     });
-    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: /local/ });
+    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: /baseUrl/ });
   });
 
   it("skips a mapping whose credential has no token", async () => {
@@ -355,7 +355,75 @@ describe("syncAllMappings — sync outcomes", () => {
   });
 });
 
-describe("syncAllMappings — policy-driven auto-resolution (Area D)", () => {
+describe("syncAllMappings — local provider (existing local clone)", () => {
+  it("fast-forwards a pull-only local mapping without pushing", async () => {
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const { accessor, state } = spyAccessor("L1"); // base == localSha -> no unpushed work
+    const outcomes = await syncAllMappings({
+      mappings: [mapping({ direction: "pull-only" })],
+      credentials: [credential({ kind: "local", baseUrl: "file:///tmp/shared.git" })],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+    });
+    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1" }]);
+    expect(state.pull).toEqual([["m1", "R1"]]);
+    expect(state.push).toEqual([]);
+  });
+
+  it("pulls fast-forward and pushes unpushed local work on a local push-pull mapping, cloning first", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false }); // not yet cloned
+    const { accessor, state } = spyAccessor("B0"); // base != localSha -> unpushed
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ kind: "local", baseUrl: "file:///tmp/shared.git" })],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+    });
+    // First run clones the local repo (ensureClone) before syncing.
+    const cloneCall = calls.find((c) => c[0] === "clone");
+    expect(cloneCall?.[1]).toBe("/tmp/shared.git");
+    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "R1" }]);
+    expect(state.push).toEqual([["m1", "L1"]]);
+    expect(state.pull).toEqual([["m1", "R1"]]);
+  });
+
+  it("surfaces a divergent file as a durable conflict on a local rebase pull", async () => {
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged
+      changedPaths: ["notes/todo.md"],
+      showMap: {
+        M0: { "notes/todo.md": J(["a", "shared", "c"]) }, // base
+        HEAD: { "notes/todo.md": J(["a", "LOCAL", "c"]) }, // ours edits the middle line
+        "origin/main": { "notes/todo.md": J(["a", "REMOTE", "c"]) }, // theirs edits it differently -> conflict
+      },
+    });
+    const store = memoryConflictStore();
+    const { accessor, state } = spyAccessor(""); // never synced -> base "" -> unpushed
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ kind: "local", baseUrl: "file:///tmp/shared.git" })],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+      conflicts: store.store,
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "conflict" });
+    expect(store.getState()).toEqual([
+      { path: "notes/todo.md", base: J(["a", "shared", "c"]), ours: J(["a", "LOCAL", "c"]), theirs: J(["a", "REMOTE", "c"]) },
+    ]);
+    expect(state.conflict).toEqual(["m1"]);
+  });
+});
+
+describe("syncAllMappings — sync outcomes", () => {
   it("auto-resolves a genuine conflict via injected policy instead of surfacing it", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
@@ -574,7 +642,7 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
 
 describe("syncAllMappings — agent attribution on push (Area 10)", () => {
   it("attributes an agent's push to that agent with an On-behalf-of trailer", async () => {
-    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false }); // clone + unpushed
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] }); // clone + unpushed
     const actingAgent: Agent = { id: "agent-1", displayName: "Research Bot", committerEmail: "bot@local", ownerHuman: "Ada" };
     await syncAllMappings({
       mappings: [mapping()],
@@ -595,7 +663,7 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
   });
 
   it("leaves attribution to git defaults when no agent acts on the mapping", async () => {
-    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false });
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] });
     await syncAllMappings({
       mappings: [mapping()],
       credentials: [credential()],
