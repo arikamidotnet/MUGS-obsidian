@@ -26,4 +26,13 @@ export interface Provider {
 
   /** Collaborators on a repo, for the local membership (visibility) view. */
   getMembers(repoId: string): Promise<Member[]>;
+
+  /**
+   * Immediate child directory names under `path` within a repo, for remote-path
+   * autofill. `path` is a repo-relative directory — "" for the repo root, or
+   * "a/b" to descend. Results are de-duplicated and sorted. `repoId` is the
+   * provider's repo identifier: GitLab project id/path; GitHub/Gitea owner/repo;
+   * Bitbucket workspace/repo.
+   */
+  listDirectories(repoId: string, path?: string): Promise<string[]>;
 }

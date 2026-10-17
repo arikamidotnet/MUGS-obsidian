@@ -160,4 +160,14 @@ export class GitLabProvider implements Provider {
     if (res.status >= 400 || !res.body) return DEFAULT_ACCESS_LEVEL;
     return res.body.access_level ?? DEFAULT_ACCESS_LEVEL;
   }
+
+  /** Immediate child directories under `path` via the repository/tree API. */
+  async listDirectories(repoId: string, path = ""): Promise<string[]> {
+    const base = `${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/tree`;
+    const url = withQuery(base, path ? { path } : {});
+    const res = await this.transport.get<{ type: string; path: string }[]>(url, { headers: this.headers() });
+    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}`);
+    const dirs = (res.body ?? []).filter((t) => t.type === "tree").map((t) => t.path.split("/").pop() ?? "");
+    return [...new Set(dirs)].sort();
+  }
 }

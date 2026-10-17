@@ -27,6 +27,11 @@ function fakeProvider(repo?: RepoSummary): Provider {
     async getMembers() {
       return [];
     },
+    // Directory autofill is exercised against real remotes; the sync driver does
+    // not use it, so a stub keeps this fake satisfying the Provider contract.
+    async listDirectories() {
+      return [];
+    },
   };
 }
 

@@ -187,4 +187,13 @@ export class BitbucketProvider implements Provider {
       }),
     );
   }
+
+  /** Immediate child directories under `path` via the src (tree) API. */
+  async listDirectories(repoId: string, path = ""): Promise<string[]> {
+    const encoded = encodeRepoPath(repoId);
+    const url = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/src`, path ? { path } : {});
+    const raw = (await paginateValues(this.transport, url, this.headers())) as Array<{ type: string; path: string }>;
+    const dirs = raw.filter((c) => c.type === "tracked").map((c) => c.path.split("/").pop() ?? "");
+    return [...new Set(dirs)].sort();
+  }
 }

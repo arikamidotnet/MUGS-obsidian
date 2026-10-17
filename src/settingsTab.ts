@@ -7,6 +7,8 @@
 import { PluginSettingTab, Setting, Notice } from "obsidian";
 import type MugsPlugin from "./main";
 import type { Credential, SyncDirection } from "./types";
+import type { RepoSummary } from "./providers/types";
+import { buildProvider } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 
 // The shipped obsidian typings declare addToggle/addText/addButton on Setting but
@@ -126,7 +128,7 @@ export class MugsSettingTab extends PluginSettingTab {
       }
 
       card.createEl("div", { cls: "mugs-divider" });
-      this.addMappingForm(card);
+      void this.addMappingForm(card);
     });
 
     // --- Security -----------------------------------------------------------
@@ -410,8 +412,14 @@ export class MugsSettingTab extends PluginSettingTab {
     card.appendChild(grid);
   }
 
-  /** Add-mapping form: provider picker + label/remote-path/local-folder/direction. */
-  private addMappingForm(card: HTMLElement): void {
+  /**
+   * Add-mapping form. REST providers enumerate the user's repos and each repo's
+   * directory tree, so "Repository", "Remote path" and "Vault folder" are dropdowns
+   * (autofill) instead of free text. `local` has a single implicit clone, so its
+   * repo/path fields are inert hints. Selecting a repository stores its id as the
+   * mapping id — that is how the driver matches the mapping to a repo at sync time.
+   */
+  private async addMappingForm(card: HTMLElement): Promise<void> {
     const creds = this.plugin.store.getSettings().credentials;
     let label = "";
     let remotePath = "";
@@ -421,6 +429,11 @@ export class MugsSettingTab extends PluginSettingTab {
     let direction: SyncDirection = "push-pull";
     let includesText = "";
     let excludesText = "";
+    // REST repo selection: repoSaveId (repo.id) is stored as the mapping id so the
+    // driver can match it; repoKey (pathWithNamespace) is what lists directories.
+    let repoSaveId = "";
+    let repoKey = "";
+    let reposCache: RepoSummary[] = [];
 
     const grid = document.createElement("div");
     grid.className = "mugs-form-grid";
@@ -429,10 +442,35 @@ export class MugsSettingTab extends PluginSettingTab {
       grid.appendChild(this.field(name, input));
     };
 
-    addField("Provider", this.selectOption((v) => { providerId = v; }, creds.map((c) => [c.id, c.label] as [string, string]), creds.length === 0));
-    addField("Label", this.text((v) => { label = v.trim(); }, "Label"));
-    addField("Remote path", this.text((v) => { remotePath = v.trim(); }, "Remote path (optional)"));
-    addField("Vault folder", this.text((v) => { localFolder = v.trim(); }, "Vault folder, e.g. Notes"));
+    // --- Provider picker -------------------------------------------------
+    const providerSel = this.selectOption((v) => {
+      providerId = v;
+      void refreshMappingDropdowns();
+    }, creds.map((c) => [c.id, c.label] as [string, string]), creds.length === 0);
+    addField("Provider", providerSel);
+
+    // --- Repository picker (REST providers only) -------------------------
+    const repoSel = document.createElement("select");
+    repoSel.className = "mugs-dir-select";
+    const addRepoOption = (value: string, text: string): void => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      repoSel.appendChild(opt);
+    };
+    addField("Repository", repoSel);
+
+    // --- Remote-path directory dropdown (drill-down) ---------------------
+    const remotePathSel = this.directorySelect(async (v) => {
+      remotePath = v;
+      await refreshRemoteDirs();
+    });
+    addField("Remote path", remotePathSel);
+
+    // --- Vault-folder dropdown -------------------------------------------
+    const vaultFolderSel = this.directorySelect((v) => { localFolder = v; });
+    addField("Vault folder", vaultFolderSel);
+
     addField("Direction", this.selectOption((v) => { direction = v as SyncDirection; }, [
       ["push-pull", "Push + pull"],
       ["pull-only", "Pull only"],
@@ -443,6 +481,78 @@ export class MugsSettingTab extends PluginSettingTab {
     grid.appendChild(this.scopeTextareaField("Includes (optional)", (v) => { includesText = v; }));
     grid.appendChild(this.scopeTextareaField("Excludes (optional)", (v) => { excludesText = v; }));
 
+    // --- Populate the dependent dropdowns for the current provider -------
+    const isRest = (): boolean => {
+      const cred = creds.find((c) => c.id === providerId);
+      return !!cred && cred.kind !== "local";
+    };
+    const refreshMappingDropdowns = async (): Promise<void> => {
+      reposCache = [];
+      repoSaveId = "";
+      repoKey = "";
+      remotePath = "";
+      if (!isRest()) {
+        // Local: single implicit clone, no REST tree API.
+        repoSel.disabled = true;
+        remotePathSel.disabled = true;
+        repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
+        remotePathSel.innerHTML = '<option value="">(whole clone)</option>';
+        await this.populateVaultFolders(vaultFolderSel, localFolder);
+        return;
+      }
+      const cred = creds.find((c) => c.id === providerId);
+      if (!cred) { repoSel.disabled = true; remotePathSel.disabled = true; return; }
+      try {
+        const token = this.plugin.store.getToken(providerId) ?? "";
+        if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; remotePathSel.disabled = true; return; }
+        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token }, { actingUsername: cred.username });
+        reposCache = await provider.listRepos();
+        if (reposCache.length === 0) {
+          new Notice("MUGS: no accessible repositories for this credential.");
+          repoSel.disabled = true;
+          remotePathSel.disabled = true;
+          return;
+        }
+        repoSel.disabled = false;
+        remotePathSel.disabled = false;
+        reposCache.sort((a, b) => a.pathWithNamespace.localeCompare(b.pathWithNamespace));
+        repoSel.innerHTML = "";
+        for (const r of reposCache) {
+          const name = r.name && r.name !== r.pathWithNamespace ? `  ·  ${r.name}` : "";
+          addRepoOption(r.id, `${r.pathWithNamespace}${name}`);
+        }
+        // Auto-select the first repo so directory autofill is ready immediately.
+        const first = reposCache[0];
+        repoSaveId = first.id;
+        repoKey = first.pathWithNamespace;
+        repoSel.value = first.id;
+        await refreshRemoteDirs();
+        await this.populateVaultFolders(vaultFolderSel, localFolder);
+      } catch (e) {
+        new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
+        repoSel.disabled = true;
+        remotePathSel.disabled = true;
+      }
+    };
+    const refreshRemoteDirs = async (): Promise<void> => {
+      if (!repoKey) return;
+      const cred = creds.find((c) => c.id === providerId);
+      if (!cred) return;
+      const dirs = await this.listDirectoriesFor(cred, repoKey, remotePath);
+      const opts: Array<[string, string]> = [];
+      if (remotePath) opts.push([remotePath, `● ${remotePath.split("/").pop()}`]);
+      for (const d of dirs) opts.push([`${remotePath ? `${remotePath}/` : ""}${d}`, d]);
+      this.fillDirectorySelect(remotePathSel, remotePath, opts, remotePath ? "← repository root" : "(repository root)");
+    };
+    repoSel.addEventListener("change", (e: Event) => {
+      const chosen = reposCache.find((r) => r.id === (e.target as HTMLSelectElement).value);
+      if (!chosen) return;
+      repoSaveId = chosen.id;
+      repoKey = chosen.pathWithNamespace;
+      remotePath = "";
+      void refreshRemoteDirs();
+    });
+
     grid.appendChild(this.actions([
       {
         text: "Add mapping",
@@ -451,9 +561,11 @@ export class MugsSettingTab extends PluginSettingTab {
         onClick: async () => {
           if (!label || !localFolder) { new Notice("MUGS: enter a label and vault folder."); return; }
           if (!providerId) { new Notice("MUGS: choose a credential/provider."); return; }
+          const cred = creds.find((c) => c.id === providerId);
+          if (cred && cred.kind !== "local" && !repoSaveId) { new Notice("MUGS: choose a repository."); return; }
           try {
             this.plugin.store.upsertMapping({
-              id: newId(),
+              id: repoSaveId || newId(),
               label,
               remotePath,
               localFolder,
@@ -475,6 +587,7 @@ export class MugsSettingTab extends PluginSettingTab {
     ]));
 
     card.appendChild(grid);
+    void refreshMappingDropdowns();
   }
 
   /** Create a labeled form-field wrapper (label + native input styled by Obsidian). */
@@ -506,6 +619,65 @@ export class MugsSettingTab extends PluginSettingTab {
     }
     sel.addEventListener("change", (e: Event) => set((e.target as HTMLSelectElement).value));
     return sel;
+  }
+
+  /** An empty directory <select> wired to an optional async onChange. */
+  private directorySelect(onChange?: (v: string) => void | Promise<void>): HTMLSelectElement {
+    const sel = document.createElement("select");
+    sel.className = "mugs-dir-select";
+    if (onChange) {
+      sel.addEventListener("change", (e: Event) => { void onChange((e.target as HTMLSelectElement).value); });
+    }
+    return sel;
+  }
+
+  /** Populate a directory <select> with a root option plus child options, keeping
+   *  the current selection when it is still among the children. */
+  private fillDirectorySelect(sel: HTMLSelectElement, current: string, options: Array<[string, string]>, rootLabel?: string): void {
+    const prev = sel.value;
+    sel.innerHTML = "";
+    const root = document.createElement("option");
+    root.value = "";
+    root.textContent = rootLabel ?? (current ? "← repository root" : "(repository root)");
+    sel.appendChild(root);
+    for (const [value, label] of options) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    }
+    if (options.some((o) => o[0] === prev)) sel.value = prev;
+  }
+
+  /** List child directories of `repoKey` at `path` for a credential's provider. */
+  private async listDirectoriesFor(cred: Credential, repoKey: string, path: string): Promise<string[]> {
+    const token = this.plugin.store.getToken(cred.id) ?? cred.token ?? "";
+    if (!token) return [];
+    try {
+      const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token }, { actingUsername: cred.username });
+      return await provider.listDirectories(repoKey, path);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Top-level vault folders via the DataAdapter (defensive cast, like getBasePath). */
+  private async listVaultFolders(): Promise<string[]> {
+    try {
+      const adapter = this.app.vault.adapter as unknown as {
+        list(path: string, options?: { recursive?: boolean }): Promise<{ files?: string[]; folders?: string[] }>;
+      };
+      const res = await adapter.list("", {});
+      return (res?.folders ?? []).filter((f) => f.length > 0).sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** Fill a vault-folder dropdown from existing top-level vault folders. */
+  private async populateVaultFolders(sel: HTMLSelectElement, current: string): Promise<void> {
+    const folders = await this.listVaultFolders();
+    this.fillDirectorySelect(sel, current, folders.map((f) => [f, f]), folders.length ? "(a vault folder)" : "(create a folder in Obsidian first)");
   }
 
   /** Create a native text <input> wired to an onChange callback. */

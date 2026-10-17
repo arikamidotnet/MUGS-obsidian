@@ -140,4 +140,14 @@ export class GiteaProvider implements Provider {
       }),
     );
   }
+
+  /** Immediate child directories under `path` via the contents API. */
+  async listDirectories(repoId: string, path = ""): Promise<string[]> {
+    const base = `${this.baseUrl}/repos/${encodeRepoPath(repoId)}/contents`;
+    const url = withQuery(base, path ? { path } : {});
+    const res = await this.transport.get<{ type: string; name: string }[]>(url, { headers: this.headers() });
+    if (res.status >= 400) throw new Error(`Gitea ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}`);
+    const dirs = (res.body ?? []).filter((c) => c.type === "dir").map((c) => c.name);
+    return [...new Set(dirs)].sort();
+  }
 }
