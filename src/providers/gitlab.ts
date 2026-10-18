@@ -140,7 +140,7 @@ export class GitLabProvider implements Provider {
     const myAccess = await this.resolveMyAccessLevel(repoId);
     const url = `${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/branches`;
     const res = await this.transport.get<GitLabBranch[]>(url, { headers: this.headers() });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching branches for ${repoId}`);
+    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching branches for ${repoId}${res.message ? ` — ${res.message}` : ""}`);
     return (res.body ?? []).map((b) =>
       branchSummarySchema.parse({
         name: b.name,
@@ -166,7 +166,7 @@ export class GitLabProvider implements Provider {
     const base = `${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/tree`;
     const url = withQuery(base, path ? { path } : {});
     const res = await this.transport.get<{ type: string; path: string }[]>(url, { headers: this.headers() });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}`);
+    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}${res.message ? ` — ${res.message}` : ""}`);
     const dirs = (res.body ?? []).filter((t) => t.type === "tree").map((t) => t.path.split("/").pop() ?? "");
     return [...new Set(dirs)].sort();
   }

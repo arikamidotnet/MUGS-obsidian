@@ -15,6 +15,8 @@ export interface HttpResponse<T = unknown> {
   body: T;
   /** Value of the response `Link` header, if any (GitHub/GitLab use it for pagination). */
   linkHeader?: string | null;
+  /** Human-readable error detail extracted from a JSON error body when status >= 400. */
+  message?: string;
 }
 
 /** Minimal GET transport used by provider adapters. */
@@ -34,7 +36,10 @@ export class FetchTransport implements HttpTransport {
       // Non-JSON error bodies (e.g. an HTML 404 page): surface the status with an empty body.
       body = undefined as unknown as T;
     }
-    return { status: res.status, body, linkHeader };
+    // Extract a human-readable reason from JSON error bodies (GitLab's `error_description`,
+    // GitHub-style `message`/`error`) so notices explain *why* the request failed.
+    const message = res.status >= 400 ? describeError(body) : undefined;
+    return { status: res.status, body, linkHeader, message };
   }
 }
 
@@ -62,11 +67,23 @@ export async function paginateAll(
   let next: string | null = url;
   while (next) {
     const res = await transport.get<unknown>(next, { headers });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error paginating ${next}`);
+    if (res.status >= 400) throw new Error(`GitLab ${res.status} error paginating${res.message ? ` — ${res.message}` : ""} (${next})`);
     if (Array.isArray(res.body)) acc.push(...(res.body as unknown[]));
     next = extractNextLink(res.linkHeader);
   }
   return acc;
+}
+
+/** Pull a human-readable error message from a parsed API error body (GitLab/GitHub-style). */
+export function describeError(body: unknown): string | undefined {
+  if (body && typeof body === "object") {
+    const b = body as Record<string, unknown>;
+    for (const key of ["error_description", "message", "error"]) {
+      const v = b[key];
+      if (typeof v === "string" && v.length) return v;
+    }
+  }
+  return undefined;
 }
 
 /** Extract the `rel="next"` URL from a raw `Link` header value. */
