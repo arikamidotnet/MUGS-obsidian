@@ -11,12 +11,14 @@ import type { RepoSummary } from "./providers/types";
 import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 
-// The shipped obsidian typings declare addToggle/addText/addButton on Setting but
-// not addSelect, even though it is a real API. Augment the module so our native
-// select builder typechecks (same pattern as Plugin.addStyleTag in main.ts).
+// The shipped obsidian typings (pinned "latest" at an older snapshot) omit
+// addSelect/addField from Setting even though both are real runtime APIs.
+// Augment the module so our native select builder typechecks (same pattern as
+// Plugin.addStyleTag in main.ts).
 declare module "obsidian" {
   interface Setting {
     addSelect(callback: (component: MugsSelectComponent) => void): this;
+    addField(label: string, input: HTMLElement): this;
   }
 }
 
@@ -182,15 +184,16 @@ export class MugsSettingTab extends PluginSettingTab {
       new Setting(card)
         .setName("Tie-break for unresolved hunks")
         .setDesc('When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").')
-        .addSelect((d) => {
-          for (const v of ["both", "theirs", "ours"]) d.addOption(v, v);
-          d
-            .setValue(sync.defaultResolution)
-            .onChange(async (v) => {
+        .addField(
+          "",
+          this.selectOption(
+            (v) => {
               this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
-              await this.plugin.store.save();
-            });
-        });
+              void this.plugin.store.save();
+            },
+            [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]],
+          ),
+        );
 
       new Setting(card)
         .setName("Auto-accept identical changes")
@@ -225,15 +228,16 @@ export class MugsSettingTab extends PluginSettingTab {
       new Setting(card)
         .setName("Polling interval")
         .setDesc("How often to check the remote when the vault is idle. Local edits still propagate immediately via event triggers.")
-        .addSelect((d) => {
-          for (const p of INTERVAL_PRESETS) d.addOption(p.id, p.label);
-          d
-            .setValue(presetIdForSeconds(sync.intervalSeconds))
-            .onChange(async (v) => {
+        .addField(
+          "",
+          this.selectOption(
+            (v) => {
               this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
-              await this.plugin.store.save();
-            });
-        });
+              void this.plugin.store.save();
+            },
+            INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>,
+          ),
+        );
 
       new Setting(card)
         .setName("Pause vault sync")
