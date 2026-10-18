@@ -60,3 +60,38 @@ export class MemoryTrashStore implements TrashStore {
 function key(mappingId: string, relPath: string): string {
   return `${mappingId}\u0000${relPath}`;
 }
+
+/**
+ * Filesystem-backed TrashStore rooted at `<cloneRoot>/.mugs-trash`. Records each trashed
+ * file at `.mugs-trash/<mappingId>/<relPath>` so a sync-driven deletion is recoverable.
+ * Synchronous writes (matching the {@link TrashStore} contract) keep the record in place
+ * before the corresponding working-tree removal, avoiding a delete/record race. Uses the
+ * Node `fs` API, available in the Obsidian/Electron runtime (as `node:child_process` already
+ * is in git/runner.ts).
+ */
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
+
+export class FileSystemTrashStore implements TrashStore {
+  constructor(private readonly root: string) {}
+
+  trash(mappingId: string, relPath: string, content: string | undefined): void {
+    const target = `${this.root}/${mappingId}/${relPath}`;
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content ?? "");
+  }
+
+  /** Read the recorded content for a trashed file (empty string when none was recorded). */
+  restore(mappingId: string, relPath: string): string {
+    try {
+      return readFileSync(`${this.root}/${mappingId}/${relPath}`, "utf8");
+    } catch {
+      return "";
+    }
+  }
+
+  /** Remove a mapping's trashed files (e.g. after an explicit restore). */
+  clearMapping(mappingId: string): void {
+    rmSync(`${this.root}/${mappingId}`, { recursive: true, force: true });
+  }
+}

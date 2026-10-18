@@ -44,6 +44,8 @@ export const folderMappingSchema = z.object({
   localFolder: z.string(),
   providerId: z.string().min(1),
   branch: z.string().optional(),
+  /** Optional pinned agent sub-user id (Area 10); absent -> normal sync attribution. */
+  agentId: z.string().optional(),
   direction: syncDirectionSchema.default("push-pull"),
   includes: z.array(z.string()).default([]),
   excludes: z.array(z.string()).default([]),

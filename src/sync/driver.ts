@@ -20,6 +20,7 @@ import type { ProviderInput } from "../providers/factory";
 import type { GitRunner } from "../git/types";
 import { GitClient } from "../git/client";
 import { CloneManager, type LastSyncAccessor, type SyncResult, type WorkingTreeWriter, type ConflictStore } from "./cloneManager";
+import type { TrashStore } from "./trash";
 import type { EditorOpenGuard } from "./editorOpen";
 import type { MugsStore } from "../store";
 import type { SyncPolicy } from "../types";
@@ -70,6 +71,12 @@ export interface SyncDriverDeps {
    *  agent, the commit is attributed to that agent with an "On-behalf-of" owner trailer.
    *  Absent -> plain sync attribution (unchanged). */
   pickAgent?: (mapping: FolderMapping) => Agent | undefined;
+  /** Optional: record a file's content before it is removed from the working tree during
+   *  sync, so both-sides-deletions are recoverable via `.mugs-trash` (Area 3). */
+  trash?: TrashStore;
+  /** Optional: set of paths explicitly held back for review (Area 8); held paths are
+   *  excluded from push. Absent -> nothing held. */
+  heldPaths?: (mappingId: string) => ReadonlySet<string> | undefined;
 }
 
 /** Run one sync pass over every mapping and return a per-mapping outcome list. */
@@ -83,6 +90,8 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     editorOpen: deps.editorOpen,
     obsidianConfig: deps.obsidianConfig,
     pickAgent: deps.pickAgent,
+    trash: deps.trash,
+    heldPaths: deps.heldPaths,
   });
   const providerCache = new Map<string, Provider>();
   const results: SyncOutcome[] = [];
@@ -180,6 +189,19 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     recordPush: (id, localSha) =>
       persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPushAt: Date.now() })),
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
+  };
+}
+
+/**
+ * Build a held-paths accessor over the store's review-queue `staging` map. A path is held
+ * when its staging entry state is "held", so held files are excluded from push (Area 8).
+ */
+export function storeHeldAccessor(store: MugsStore): { heldPaths: (mappingId: string) => ReadonlySet<string> } {
+  return {
+    heldPaths: (mappingId) => {
+      const entries = store.getStaging(mappingId) ?? [];
+      return new Set(entries.filter((e) => e.state === "held").map((e) => e.path));
+    },
   };
 }
 

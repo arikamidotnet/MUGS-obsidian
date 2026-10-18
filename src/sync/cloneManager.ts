@@ -22,6 +22,7 @@ import { applyMerge, type AppliedChange } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
+import type { TrashStore } from "./trash";
 import { EditorOpenGuard } from "./editorOpen";
 import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
 
@@ -141,6 +142,12 @@ export class CloneManager {
        *  an agent, the commit is attributed to that agent and carries an "On-behalf-of"
        *  trailer for its owner (Area 10). Absent -> plain sync attribution (unchanged). */
       pickAgent?: (mapping: FolderMapping) => Agent | undefined;
+      /** Records a file's content before it is removed from the working tree during sync,
+       *  so both-sides-deletions are recoverable via `.mugs-trash` (Area 3). Optional. */
+      trash?: TrashStore;
+      /** Optional: set of paths explicitly held back for review (Area 8). Held paths are
+       *  excluded from the push stage so they never leave the machine. Absent -> nothing held. */
+      heldPaths?: (mappingId: string) => ReadonlySet<string> | undefined;
     } = {},
   ) {}
 
@@ -166,6 +173,14 @@ export class CloneManager {
 
   private get pickAgent(): ((mapping: FolderMapping) => Agent | undefined) | undefined {
     return this.seams.pickAgent;
+  }
+
+  private get trash(): TrashStore | undefined {
+    return this.seams.trash;
+  }
+
+  private get heldPaths(): (mappingId: string) => ReadonlySet<string> | undefined {
+    return this.seams.heldPaths ?? (() => undefined);
   }
 
   /**
@@ -246,7 +261,10 @@ export class CloneManager {
       // commit" — e.g. a fresh clone on first sync). Already-committed unpushed work still
       // goes out via push below, regardless of whether anything was newly committed here.
       const changed = await c.workingTreePaths();
-      const scoped = changed.filter((path) => this.inScope(mapping, path));
+      // Exclude paths explicitly held back for review (Area 8) so they never leave the machine;
+      // unstaged/staged in-scope changes still push, preserving the automatic-first default.
+      const held = this.heldPaths?.(mapping.id);
+      const scoped = changed.filter((path) => this.inScope(mapping, path) && !(held?.has(path) ?? false));
       if (scoped.length > 0) {
         await c.add(scoped);
         // Attribute an agent sub-user's push to that agent (with on-behalf-of trailer for
@@ -306,7 +324,14 @@ export class CloneManager {
     // resolved content instead of surfacing them. Only unresolvable conflicts are returned
     // for manual review. With no policy injected this is a no-op — behavior is unchanged.
     let surfacedConflicts = conflicts;
-    const toApply: Array<ApplyOp & { content?: string }> = applied.map(toWriteOp);
+    // Best-effort recoverable content for deletes: the last-known local (HEAD) content, so a
+    // both-sides-deletion is recorded in `.mugs-trash` before the working-tree removal.
+    const priorByPath = new Map(resolved.map((e) => [e.path, e.ours]));
+    const toApply: Array<ApplyOp & { content?: string; priorContent?: string }> = applied.map((a) => {
+      const op: ApplyOp & { content?: string; priorContent?: string } = toWriteOp(a);
+      if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
+      return op;
+    });
     if (this.policy?.autoMerge) {
       surfacedConflicts = [];
       for (const c of conflicts) {
@@ -322,7 +347,7 @@ export class CloneManager {
     }
 
     // Safe applier ordering: writes before deletes, parents before children.
-    await this.applyOrdered(dir, orderApplyOps(toApply));
+    await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
     return { applied, conflicts: surfacedConflicts, renames };
   }
 
@@ -331,10 +356,13 @@ export class CloneManager {
    * open with unsaved changes (the editor-open guard) so a remote/merge result never clobbers
    * an in-progress edit; deletions remove both-sides-deleted files.
    */
-  private async applyOrdered(dir: string, ops: Array<ApplyOp & { content?: string }>): Promise<void> {
+  private async applyOrdered(dir: string, ops: Array<ApplyOp & { content?: string; priorContent?: string }>, mappingId: string): Promise<void> {
     for (const op of ops) {
       const absPath = `${dir}/${op.path}`;
       if (op.kind === "delete") {
+        // Record the file's prior content before removing it so a sync-driven deletion is
+        // recoverable via `.mugs-trash` (Area 3). Runs synchronously ahead of deleteFile.
+        this.trash?.trash(mappingId, op.path, op.priorContent);
         await this.workingTree?.deleteFile?.(absPath);
         continue;
       }

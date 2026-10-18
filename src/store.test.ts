@@ -1,5 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { MugsStore, MemoryIO } from "./store";
+
+// Minimal copy of the legacy XOR used by store.ts's backward-compatible reader,
+// so this test can synthesize an `enc:` payload without reaching into internals.
+function xorEncode(plaintext: string): string {
+  const key = "mugs-default-hint-v1";
+  const seed = new Array(key.length).fill(0);
+  let acc = 0;
+  for (let i = 0; i < key.length; i++) {
+    acc = (acc + key.charCodeAt(i) * (i + 1)) % 251;
+    seed[i] = acc;
+  }
+  return Array.from(plaintext)
+    .map((ch, i) => String.fromCharCode(ch.charCodeAt(0) ^ seed[i % seed.length]))
+    .join("");
+}
 import type { FolderMapping } from "./types";
 
 const mapping = (over: Partial<FolderMapping> = {}): FolderMapping => ({
@@ -82,13 +97,31 @@ describe("MugsStore persistence + redaction", () => {
     await store.save();
 
     const onDisk = (await io.read()) as { credentials: Array<{ token: string }> };
-    expect(onDisk.credentials[0].token).toMatch(/^enc:/);
+    expect(onDisk.credentials[0].token).toMatch(/^aesgcm:/);
     expect(onDisk.credentials[0].token).not.toContain("SECRETKEY");
 
     // Reload — the decrypted runtime token must equal the original secret.
     const store2 = new MugsStore(io);
     await store2.load();
     expect(store2.getToken("c1")).toBe("glpat-SECRETKEY");
+  });
+
+  it("reads legacy XOR (enc:) tokens written by older versions", async () => {
+    // Simulate data persisted before AES-GCM: a hand-built enc: payload.
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [{ id: "c1", label: "work", kind: "gitlab", token: "enc:" + xorEncode("glpat-LEGACY") }],
+      mappings: [],
+      lastSync: {},
+      conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [],
+      staging: {},
+      security: { encryptCredentials: true, encryptionKeyHint: "mugs-default-hint-v1" },
+    });
+    const store = new MugsStore(io);
+    await store.load();
+    expect(store.getToken("c1")).toBe("glpat-LEGACY");
   });
 });
 

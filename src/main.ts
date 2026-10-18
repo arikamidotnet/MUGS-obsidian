@@ -21,13 +21,16 @@ import {
   StoreConflictDataSource,
   DEFAULT_CLONE_DIRNAME,
 } from "./ui/defaultDataSources";
-import type { MugsSettings, FolderMapping } from "./types";
+import type { MugsSettings, FolderMapping, Agent } from "./types";
 import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
-import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./sync/driver";
-import { decideRun, type RunDecision } from "./sync/schedule";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor } from "./sync/driver";
+import { decideRun, debounceFireTimes, type RunDecision } from "./sync/schedule";
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
 import type { WorkingTreeWriter } from "./sync/cloneManager";
+import { EditorOpenGuard } from "./sync/editorOpen";
+import { FileSystemTrashStore } from "./sync/trash";
+import { MCP_SERVER_NAME, listAgentTools } from "./mcp/server";
 
 // Injected at build time by esbuild (define) from styles.css so the plugin's
 // Map/Diff/settings UI is self-contained in main.js — no separate file to copy.
@@ -39,6 +42,9 @@ declare const __MUGS_CSS__: string;
 declare module "obsidian" {
   interface Plugin {
     addStyleTag(css: string): void;
+    /** Obsidian's MCP host hook (newer builds). Augmented here because the shipped typings
+     *  predate MCP support; guarded by `typeof` at the call site so older builds are fine. */
+    registerMcpServer?(definition: { name: string; version: string; tools?: unknown[] }): EventRef;
   }
 }
 
@@ -60,6 +66,10 @@ export default class MugsPlugin extends Plugin {
   private pollTimer?: number;
   /** Pending debounced-sync timer handle. */
   private eventDebounceTimer?: number;
+  /** Timestamps of pending file-change events, coalesced via debounceFireTimes before a sync. */
+  private eventTimestamps: number[] = [];
+  /** Tracks vault paths currently open with unsaved changes so sync writes never clobber an edit (Area 5). */
+  private editorOpen = new EditorOpenGuard();
 
   async onload(): Promise<void> {
     // In Obsidian, IO is backed by loadData/saveData; MemoryIO covers tests.
@@ -118,6 +128,12 @@ export default class MugsPlugin extends Plugin {
     this.registerEvent(ws.on("modify", (p) => this.onVaultChange(p)));
     this.registerEvent(ws.on("create", (p) => this.onVaultChange(p)));
     this.registerEvent(ws.on("delete", (p) => this.onVaultChange(p)));
+    // Rebuild the open-with-unsaved-changes set whenever the open files change so the
+    // editor-open guard stays current (Area 5). Defensive cast like getBasePath above.
+    const wsWithOpenChanged = this.app.workspace as unknown as { on(name: string, callback: () => void): EventRef };
+    this.registerEvent(wsWithOpenChanged.on("open-changed", () => this.recomputeOpenEditors()));
+    // Register the MUGS agents MCP server when this Obsidian build hosts MCP (Area 10).
+    this.registerMcpServerIfSupported();
 
     this.addSettingTab(new MugsSettingTab(this));
 
@@ -179,8 +195,7 @@ export default class MugsPlugin extends Plugin {
 
   /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice. */
   async runSync(quiet = false): Promise<void> {
-    const basePath = (this.app.vault.adapter as unknown as { getBasePath(): string }).getBasePath();
-    const cloneRoot = `${basePath}/${DEFAULT_CLONE_DIRNAME}`;
+    const cloneRoot = this.cloneRoot();
     const settings = this.store.getSettings();
 
     const outcomes = await syncAllMappings({
@@ -196,6 +211,10 @@ export default class MugsPlugin extends Plugin {
       // Opt-in `.obsidian/` config sync scope (Area 9): when enabled, personal vs
       // vault-wide classification gates which .obsidian/ files are pulled/pushed.
       obsidianConfig: settings.sync.obsidianConfig,
+      editorOpen: this.editorOpen,
+      trash: this.trashStore(),
+      heldPaths: storeHeldAccessor(this.store).heldPaths,
+      pickAgent: this.pickAgent,
     });
     await this.store.save();
 
@@ -218,6 +237,27 @@ export default class MugsPlugin extends Plugin {
   private workingTreeWriter(): WorkingTreeWriter {
     const adapter = this.app.vault.adapter as unknown as { writeFile(p: string, data: string | ArrayBuffer): Promise<void> };
     return { writeFile: (absPath, content) => adapter.writeFile(absPath, content) };
+  }
+
+  /** The on-disk clones directory, resolved defensively like getBasePath. */
+  private cloneRoot(): string {
+    try {
+      const basePath = (this.app.vault.adapter as unknown as { getBasePath(): string }).getBasePath();
+      return `${basePath}/${DEFAULT_CLONE_DIRNAME}`;
+    } catch {
+      return `./${DEFAULT_CLONE_DIRNAME}`;
+    }
+  }
+
+  /** Filesystem-backed recoverable-deletion log rooted at `<cloneRoot>/.mugs-trash`.
+   *  Records each both-sides-deleted file's prior content before it is removed (Area 3). */
+  private trashStore(): FileSystemTrashStore {
+    return new FileSystemTrashStore(`${this.cloneRoot()}/.mugs-trash`);
+  }
+
+  /** Resolve the agent sub-user acting on a mapping's push (Area 10) via its pinned agentId. */
+  private pickAgent = (mapping: FolderMapping): Agent | undefined => {
+    return mapping.agentId ? this.store.getAgents().find((a) => a.id === mapping.agentId) : undefined;
   }
 
   /** Open (or activate) a registered custom view in its own leaf. */
@@ -261,11 +301,41 @@ export default class MugsPlugin extends Plugin {
     if (settings.sync.paused || this.hidden) return; // pause gate
     if (!this.relevantMapping(path)) return;          // only files that belong to a mapping
 
+    // Buffer the event timestamp and coalesce a burst into at most one sync per quiet window.
+    this.eventTimestamps.push(Date.now());
     if (this.eventDebounceTimer) clearTimeout(this.eventDebounceTimer);
     this.eventDebounceTimer = window.setTimeout(() => {
+      const fires = debounceFireTimes(this.eventTimestamps, Math.max(1, EVENT_DEBOUNCE_MS - POLL_TICK_MS));
+      this.eventTimestamps = [];
       this.eventDebounceTimer = undefined;
-      void this.tickSync();
+      if (fires.length > 0) void this.tickSync();
     }, EVENT_DEBOUNCE_MS);
+  }
+
+  /** Rebuild the editor-open set from currently open, dirty workspace leaves. */
+  private recomputeOpenEditors(): void {
+    const open = new Set<string>();
+    try {
+      const leaves = (this.app.workspace as unknown as { getOpenLeaves?: () => Array<{ getFile?: () => { path: string; isDirty?: boolean } }> }).getOpenLeaves?.() ?? [];
+      for (const leaf of leaves) {
+        const file = leaf.getFile?.();
+        if (file && file.isDirty) open.add(file.path);
+      }
+    } catch {
+      // Defensive: a missing adapter method must not abort event handling.
+    }
+    this.editorOpen = new EditorOpenGuard(open);
+  }
+
+  /** Register the MUGS agents MCP server when this Obsidian build hosts MCP (Area 10). */
+  private registerMcpServerIfSupported(): void {
+    const reg = (this as unknown as { registerMcpServer?: (def: { name: string; version: string; tools?: unknown[] }) => unknown }).registerMcpServer;
+    if (typeof reg !== "function") return; // build predates MCP support — degrade gracefully
+    try {
+      reg.call(this, { name: MCP_SERVER_NAME, version: this.manifest.version, tools: listAgentTools() });
+    } catch (e) {
+      console.warn("MUGS: could not register MCP server", e);
+    }
   }
 
   /** The mapping a changed path belongs to — by remote scope or local folder. */

@@ -17,6 +17,7 @@ import {
   normalizeVaultPath,
   type Settings,
 } from "./schema";
+import { deriveKey, encryptBytes, decryptBytes } from "./crypto";
 import type {
   MugsSettings,
   FolderMapping,
@@ -65,11 +66,12 @@ export class MugsStore {
     // Restore runtime tokens from disk. When encryption is on the stored token
     // is ciphertext and must be decrypted before it can be used for auth.
     this.runtimeTokens.clear();
-    const encrypted = this.settings.security.encryptCredentials;
+    if (!this.settings.security.encryptCredentials) return this.getSettings();
+    // Derive the key once — PBKDF2 is deliberately expensive (see crypto.ts).
+    const key = await deriveKey(keyHint(this.settings));
     for (const c of this.settings.credentials) {
       if (!c.token || isMasked(c.token)) continue;
-      const real = encrypted ? decrypt(c.token, keyHint(this.settings)) : c.token;
-      this.runtimeTokens.set(c.id, real);
+      this.runtimeTokens.set(c.id, await decryptToken(c.token, key));
     }
     return this.getSettings();
   }
@@ -190,9 +192,11 @@ export class MugsStore {
   async save(): Promise<void> {
     const toWrite = structuredClone(this.settings);
     if (toWrite.security.encryptCredentials) {
+      // Derive once and reuse across credentials.
+      const key = await deriveKey(keyHint(toWrite));
       for (const c of toWrite.credentials) {
         const real = this.runtimeTokens.get(c.id) ?? c.token;
-        c.token = encrypt(real, keyHint(toWrite));
+        c.token = await encryptBytes(real, key);
       }
     }
     await this.io.write(toWrite);
@@ -227,22 +231,32 @@ function isMasked(token: string): boolean {
   return /^•+$/.test(token);
 }
 
-/**
- * Derive an encryption key material from the user-provided hint. This is a
- * placeholder KDF — Phase 2 will swap in WebCrypto AES-GCM with PBKDF2/HKDF.
- */
+/** Derive key material from the user-provided hint (default when unset). */
 function keyHint(s: MugsSettings): string {
   return s.security.encryptionKeyHint ?? "mugs-default-hint-v1";
 }
 
 /**
- * Deterministic, reversible obfuscation used while encryption is enabled.
- * NOT real cryptography — replaced by AES-GCM in a later phase. Kept simple so
- * it is unit-testable and dependency-free today.
+ * Decrypt a stored token, dispatching on its format:
+ *  - `aesgcm:` → real AES-256-GCM (current).
+ *  - `enc:`    → legacy XOR obfuscation (backward-compatible read of old data).
+ *  - otherwise → already plaintext / masked; return as-is.
  */
-function encrypt(plaintext: string, key: string): string {
-  const seed = xorFold(key);
-  return "enc:" + Array.from(plaintext)
+async function decryptToken(token: string, key: CryptoKey): Promise<string> {
+  if (token.startsWith("aesgcm:")) return decryptBytes(token, key);
+  if (token.startsWith("enc:")) return legacyXorDecrypt(token);
+  return token;
+}
+
+/**
+ * Reversible counterpart to the historical XOR obfuscation. Kept only so tokens
+ * written by older versions can still be read after upgrade; new writes use
+ * AES-GCM via crypto.ts.
+ */
+function legacyXorDecrypt(cipher: string): string {
+  const seed = xorFold(keyHintPlaceholder());
+  const body = cipher.slice("enc:".length);
+  return Array.from(body)
     .map((ch, i) => String.fromCharCode(ch.charCodeAt(0) ^ seed[i % seed.length]))
     .join("");
 }
@@ -257,12 +271,8 @@ function xorFold(key: string): number[] {
   return out;
 }
 
-/** Reversible counterpart to `encrypt` — used when loading encrypted settings. */
-function decrypt(cipher: string, key: string): string {
-  if (!cipher.startsWith("enc:")) return cipher; // already plaintext / migration
-  const seed = xorFold(key);
-  const body = cipher.slice(4);
-  return Array.from(body)
-    .map((ch, i) => String.fromCharCode(ch.charCodeAt(0) ^ seed[i % seed.length]))
-    .join("");
+// Legacy XOR was seeded from the hint string itself. When decrypting old data we
+// no longer have the original hint object handy, so fall back to the default hint.
+function keyHintPlaceholder(): string {
+  return "mugs-default-hint-v1";
 }

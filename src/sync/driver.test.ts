@@ -8,6 +8,7 @@ import { syncAllMappings, storeWritableAccessor } from "./driver";
 import { EditorOpenGuard } from "./editorOpen";
 import { resumeKey } from "./resume";
 import { MugsStore, MemoryIO } from "../store";
+import { MemoryTrashStore } from "./trash";
 import { DEFAULT_SYNC_POLICY } from "../types";
 
 const J = (lines: string[]): string => lines.join("\n");
@@ -702,5 +703,70 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
     const commitCall = calls.find((c) => c[0] === "commit")!;
     expect(commitCall.join(" ")).not.toContain("On-behalf-of");
     expect(commitCall).not.toContain("--author");
+  });
+});
+
+describe("syncAllMappings — review-queue 'held' gates push (Area 8)", () => {
+  it("excludes a held path from staging while still pushing in-scope changes", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true, changedPaths: ["notes/keep.md", "notes/held.md"] });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor, // unpushed -> fast-forward + push
+      heldPaths: () => new Set(["notes/held.md"]),
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok", push: true });
+    const addCall = calls.find((c) => c[0] === "add")!;
+    // The held file is staged out so it never leaves the machine; the in-scope change still pushes.
+    expect(addCall).toContain("notes/keep.md");
+    expect(addCall).not.toContain("notes/held.md");
+  });
+
+  it("pushes everything when nothing is held (heldPaths returns empty)", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true, changedPaths: ["notes/a.md", "notes/b.md"] });
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor,
+      heldPaths: () => new Set<string>(),
+    });
+    const addCall = calls.find((c) => c[0] === "add")!;
+    expect(addCall).toContain("notes/a.md");
+    expect(addCall).toContain("notes/b.md");
+  });
+});
+
+describe("syncAllMappings — recoverable deletions via .mugs-trash (Area 3)", () => {
+  it("records prior content before removing a both-sides-deleted file on rebase", async () => {
+    const trash = new MemoryTrashStore();
+    const { runner } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged -> rebase pull
+      changedPaths: ["notes/both.md"],
+      // Base has content; HEAD and origin/main omit it => both sides deleted.
+      showMap: { M0: { "notes/both.md": "original content" } },
+    });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor, // unpushed -> rebase + push
+      trash,
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+    // The deletion was recorded in the trash before removal (recoverable), even though the
+    // local side was already gone so no prior content survived to store.
+    expect(trash.has("m1", "notes/both.md")).toBe(true);
+    expect(trash.get("m1", "notes/both.md")).toBe("");
   });
 });

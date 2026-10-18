@@ -54,6 +54,10 @@ export interface FolderMapping {
   providerId: string;
   /** Optional per-mapping branch override. Defaults to the remote HEAD branch. */
   branch?: string;
+  /** Optional pinned agent sub-user id (Area 10). When set, pushes for this mapping are
+   *  attributed to that agent with an "On-behalf-of" owner trailer so remote blame maps back.
+   *  Absent -> normal sync attribution (unchanged). */
+  agentId?: string;
   direction: SyncDirection;
   /** gitignore-style globs of paths WITHIN the scope that should sync.
    *  Empty or absent means "everything in scope". Composes with {@link excludes}. */
