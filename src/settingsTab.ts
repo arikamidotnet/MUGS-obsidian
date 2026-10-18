@@ -363,6 +363,9 @@ export class MugsSettingTab extends PluginSettingTab {
     let username = "";
     let token = "";
     let baseUrl = "";
+    // Explicitly-allowed repos (owner/repo per line). When non-empty, MUGS uses these
+    // directly instead of enumerating all projects — for project-scoped fine-grained tokens.
+    let repos: string[] = [];
     // Base URL is prefilled per backend (editable) so the correct API base shows
     // by default while still allowing a self-hosted override.
     let baseUrlInput: HTMLInputElement | null = null;
@@ -403,6 +406,12 @@ export class MugsSettingTab extends PluginSettingTab {
     // Prefill for the initial provider default (field reference captured above).
     setBaseUrlField(prefilledBaseUrl(kind));
 
+    // Optional explicit allowed repos, one "owner/repo" per line. Populates the
+    // mapping dropdown directly and skips global enumeration at sync time.
+    grid.appendChild(this.scopeTextareaField("Allowed repositories (optional, owner/repo per line)", (v) => {
+      repos = parseGlobList(v);
+    }));
+
     grid.appendChild(this.actions([
       {
         text: "Add credential",
@@ -418,6 +427,7 @@ export class MugsSettingTab extends PluginSettingTab {
               username: username || undefined,
               token,
               baseUrl: baseUrl || undefined,
+              repos: repos.length ? repos : undefined,
             });
             await this.plugin.store.save();
             new Notice(`MUGS: credential "${label}" saved.`);
@@ -527,7 +537,7 @@ export class MugsSettingTab extends PluginSettingTab {
       try {
         const token = this.plugin.store.getToken(providerId) ?? "";
         if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; remotePathSel.disabled = true; return; }
-        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token }, { actingUsername: cred.username });
+        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
         reposCache = await provider.listRepos();
         if (reposCache.length === 0) {
           new Notice("MUGS: no accessible repositories for this credential.");

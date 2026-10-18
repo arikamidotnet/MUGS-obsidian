@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planSync, cloneDir, type PlanInput } from "./cloneManager";
+import { planSync, cloneDir, resolveSyncBranch, type PlanInput } from "./cloneManager";
 
 /** Build an ancestry oracle from explicit (ancestor -> descendant) edges. */
 const oracleFrom = (edges: [string, string][]): ((anc: string, desc: string[]) => boolean) => {
@@ -88,5 +88,19 @@ describe("cloneDir", () => {
 
   it("honors a custom slug function from the layout", () => {
     expect(cloneDir({ root: "c", slug: (s) => s.toUpperCase() }, "GitLab", "Proj")).toBe("c/GITLAB/PROJ");
+  });
+});
+
+describe("resolveSyncBranch", () => {
+  it("prefers an explicit mapping branch", () => {
+    expect(resolveSyncBranch({ branch: "dev" }, { defaultBranch: "main" })).toBe("dev");
+  });
+
+  it("falls back to the repo default branch", () => {
+    expect(resolveSyncBranch({}, { defaultBranch: "main" })).toBe("main");
+  });
+
+  it("falls back to HEAD when neither is known (synthesized allowed repo)", () => {
+    expect(resolveSyncBranch({}, { defaultBranch: "" })).toBe("HEAD");
   });
 });

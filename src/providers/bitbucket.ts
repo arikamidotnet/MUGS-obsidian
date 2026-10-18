@@ -16,6 +16,7 @@
 import type { Provider, RepoSummary, BranchSummary, Member } from "./types";
 import { repoSummarySchema, branchSummarySchema, memberSchema, type MemberRole } from "./schema";
 import { FetchTransport, withQuery, type HttpTransport } from "./http";
+import { cloneUrlFor, resolveDefaultBranch } from "./repoUrls";
 
 /** Bitbucket participant roles mapped to the normalized MUGS member role. */
 const PARTICIPANT_ROLE: Record<string, MemberRole> = {
@@ -40,6 +41,9 @@ export interface BitbucketOptions {
   transport?: HttpTransport;
   /** Acting user's Bitbucket username, used to compute per-branch push rights. */
   actingUsername?: string;
+  /** Explicit allowed repos (`workspace/repo`). When set, listRepos returns these
+   *  directly instead of calling GET /2.0/repositories — for project-scoped tokens. */
+  allowedRepos?: string[];
 }
 
 // --- Native Bitbucket shapes (subset of fields we consume) -----------------
@@ -136,12 +140,14 @@ export class BitbucketProvider implements Provider {
   private readonly token: string;
   private readonly actingUsername?: string;
   private readonly transport: HttpTransport;
+  private readonly allowedRepos?: string[];
 
   constructor(opts: BitbucketOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.actingUsername = opts.actingUsername;
     this.transport = opts.transport ?? new FetchTransport();
+    this.allowedRepos = opts.allowedRepos;
   }
 
   private headers(): Record<string, string> {
@@ -149,9 +155,32 @@ export class BitbucketProvider implements Provider {
   }
 
   async listRepos(): Promise<RepoSummary[]> {
+    // Explicitly-allowed repos: synthesize directly (no /2.0/repositories call), so a
+    // token scoped to specific repos works without the "list all repositories" permission.
+    if (this.allowedRepos && this.allowedRepos.length > 0) {
+      return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
+    }
     const url = withQuery(`${this.baseUrl}/2.0/repositories`, { include_public: false, per_page: 100 });
     const raw = (await paginateValues(this.transport, url, this.headers())) as BitbucketRepo[];
     return raw.map((r) => mapProject(r));
+  }
+
+  /** Build a RepoSummary for an explicitly-allowed repo path. The default branch is
+   *  resolved via the repo-specific refs endpoint (works with project-scoped tokens). */
+  private async synthRepo(path: string): Promise<RepoSummary> {
+    let defaultBranch = "";
+    try {
+      defaultBranch = resolveDefaultBranch(await this.getBranches(path));
+    } catch {
+      defaultBranch = "";
+    }
+    return repoSummarySchema.parse({
+      id: path,
+      name: path.split("/").pop() ?? path,
+      pathWithNamespace: path,
+      httpUrlToRepo: cloneUrlFor(this.baseUrl, path),
+      defaultBranch,
+    });
   }
 
   async getMembers(repoId: string): Promise<Member[]> {

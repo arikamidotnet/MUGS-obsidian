@@ -20,6 +20,12 @@ export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "gite
 export const syncDirectionSchema = z.enum(["push-pull", "pull-only", "push-only"]);
 export const syncStatusSchema = z.enum(["ok", "conflict", "error", "up-to-date", "pending"]);
 
+/** A repository path as `owner/repo` (GitLab nested groups allowed: `group/sub/repo`). */
+const repoPathSchema = z.string().trim().regex(
+  /^[^/\s]+(?:\/[^/\s]+)+$/,
+  "expected a repository path like owner/repo",
+);
+
 export const credentialSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
@@ -27,6 +33,8 @@ export const credentialSchema = z.object({
   username: z.string().optional(),
   token: z.string().min(1),
   baseUrl: z.string().url().optional(),
+  /** Explicit allowed repos; when set, MUGS skips global enumeration. */
+  repos: z.array(repoPathSchema).optional(),
 });
 
 export const folderMappingSchema = z.object({

@@ -15,6 +15,7 @@
 import type { Provider, RepoSummary, BranchSummary, Member } from "./types";
 import { repoSummarySchema, branchSummarySchema, memberSchema, type MemberRole } from "./schema";
 import { FetchTransport, withQuery, paginateAll, type HttpTransport } from "./http";
+import { cloneUrlFor, resolveDefaultBranch } from "./repoUrls";
 
 /** GitHub permission roles mapped to the normalized MUGS member role. */
 const PERMISSION_ROLE: Record<string, MemberRole> = {
@@ -37,6 +38,9 @@ export interface GitHubOptions {
   token: string;
   /** Optional transport override for tests. Defaults to global fetch. */
   transport?: HttpTransport;
+  /** Explicit allowed repos (`owner/repo`). When set, listRepos returns these
+   *  directly instead of calling GET /user/repos — for project-scoped tokens. */
+  allowedRepos?: string[];
 }
 
 // --- Native GitHub shapes (subset of fields we consume) --------------------
@@ -103,11 +107,13 @@ export class GitHubProvider implements Provider {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly transport: HttpTransport;
+  private readonly allowedRepos?: string[];
 
   constructor(opts: GitHubOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.transport = opts.transport ?? new FetchTransport();
+    this.allowedRepos = opts.allowedRepos;
   }
 
   /** `Authorization: Bearer` is the GitHub auth header (vs GitLab's PRIVATE-TOKEN). */
@@ -116,9 +122,32 @@ export class GitHubProvider implements Provider {
   }
 
   async listRepos(): Promise<RepoSummary[]> {
+    // Explicitly-allowed repos: synthesize directly (no /user/repos call), so a
+    // token scoped to specific repos works without the "list all repos" permission.
+    if (this.allowedRepos && this.allowedRepos.length > 0) {
+      return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
+    }
     const url = withQuery(`${this.baseUrl}/user/repos`, { visibility: "all", per_page: 100 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((r) => mapProject(r as GitHubRepo));
+  }
+
+  /** Build a RepoSummary for an explicitly-allowed repo path. The default branch is
+   *  resolved via the repo-specific branches endpoint (works with project-scoped tokens). */
+  private async synthRepo(path: string): Promise<RepoSummary> {
+    let defaultBranch = "";
+    try {
+      defaultBranch = resolveDefaultBranch(await this.getBranches(path));
+    } catch {
+      defaultBranch = "";
+    }
+    return repoSummarySchema.parse({
+      id: path,
+      name: path.split("/").pop() ?? path,
+      pathWithNamespace: path,
+      httpUrlToRepo: cloneUrlFor(this.baseUrl, path),
+      defaultBranch,
+    });
   }
 
   async getMembers(repoId: string): Promise<Member[]> {

@@ -24,6 +24,12 @@ export interface ProviderInput {
   baseUrl?: string;
   /** Resolved token (already decrypted by the store, or plaintext from the form). */
   token?: string;
+  /**
+   * Explicit allowed repos (`owner/repo`). When non-empty, the provider returns
+   * these directly from `listRepos()` instead of calling a global enumeration
+   * endpoint — for fine-grained tokens scoped to specific projects only.
+   */
+  allowedRepos?: string[];
 }
 
 /** Public-API base URLs per backend. GitLab's already includes its `/api/v4` prefix. */
@@ -43,6 +49,21 @@ export function defaultBaseUrl(kind: ProviderKind): string {
   return kind === "local" ? "" : DEFAULT_BASE_URL[kind];
 }
 
+/**
+ * Build an HTTPS git clone URL for a repository path on a given API base URL.
+ *
+ * Strips the trailing REST-api path segment (`/api`, `/api/vN`, `/2.0`) and the
+ * public `api.` subdomain (github.com / bitbucket.org expose REST under `api.*`
+ * but clone from the bare host), then appends `.git`. Used to synthesize a working
+ * clone URL for explicitly-allowed repos that are never fetched from an endpoint.
+ */
+export function cloneUrlFor(baseUrl: string, pathWithNamespace: string): string {
+  let root = baseUrl.replace(/\/+$/, "");
+  root = root.replace(/\/(?:api|2\.0)(?:\/v\d+)?/, "");
+  root = root.replace(/^https?:\/\/api\./i, "https://");
+  return `${root}/${pathWithNamespace}.git`;
+}
+
 /** Build the `Provider` for a credential. Throws for `local` (no REST adapter). */
 export function buildProvider(input: ProviderInput, opts: { transport?: HttpTransport; actingUsername?: string } = {}): Provider {
   const kind = input.kind;
@@ -51,20 +72,21 @@ export function buildProvider(input: ProviderInput, opts: { transport?: HttpTran
   }
   const baseUrl = input.baseUrl?.trim() || DEFAULT_BASE_URL[kind];
   const token = input.token ?? "";
+  const allowedRepos = input.allowedRepos;
 
   // Share the injected transport (tests) when present; providers fall back to
   // global fetch otherwise.
   const shared = { transport: opts.transport };
   switch (kind) {
     case "gitlab":
-      return new GitLabProvider({ baseUrl, token, ...shared });
+      return new GitLabProvider({ baseUrl, token, allowedRepos, ...shared });
     case "github":
-      return new GitHubProvider({ baseUrl, token, ...shared });
+      return new GitHubProvider({ baseUrl, token, allowedRepos, ...shared });
     case "gitea":
     case "forgejo":
-      return new GiteaProvider({ baseUrl, token, kind: kind as GiteaKind, ...shared });
+      return new GiteaProvider({ baseUrl, token, kind: kind as GiteaKind, allowedRepos, ...shared });
     case "bitbucket":
-      return new BitbucketProvider({ baseUrl, token, actingUsername: opts.actingUsername, ...shared });
+      return new BitbucketProvider({ baseUrl, token, actingUsername: opts.actingUsername, allowedRepos, ...shared });
     default: {
       const _exhaustive: never = kind;
       throw new Error(`Unknown provider kind: ${String(_exhaustive)}`);
@@ -73,6 +95,6 @@ export function buildProvider(input: ProviderInput, opts: { transport?: HttpTran
 }
 
 /** Convenience: build a provider from a full stored credential, resolving its username as the acting user. */
-export function providerFromCredential(credential: Pick<Credential, "id" | "kind" | "baseUrl" | "username"> & { token: string }, opts: { transport?: HttpTransport } = {}): Provider {
-  return buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token: credential.token }, { ...opts, actingUsername: credential.username });
+export function providerFromCredential(credential: Pick<Credential, "id" | "kind" | "baseUrl" | "username"> & { token: string; repos?: string[] }, opts: { transport?: HttpTransport } = {}): Provider {
+  return buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token: credential.token, allowedRepos: credential.repos }, { ...opts, actingUsername: credential.username });
 }

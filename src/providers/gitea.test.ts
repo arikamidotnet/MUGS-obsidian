@@ -133,3 +133,24 @@ describe("GiteaProvider — getBranches", () => {
     await expect(provider(t).getBranches("t/n")).rejects.toThrow(/404/);
   });
 });
+
+describe("GiteaProvider — allowed repos", () => {
+  it("synthesizes an allowed repo without calling /user/repos", async () => {
+    const t = new FakeTransport((url) => {
+      if (url.includes("/branches")) return { status: 200, body: [{ name: "main", protected: false }] };
+      return { status: 200, body: { id: 1, full_name: "t/n", default_branch: "main" } };
+    });
+    const p = new GiteaProvider({ baseUrl: BASE, token: "t", allowedRepos: ["team/notes"], transport: t });
+    const repos = await p.listRepos();
+    expect(repos).toEqual([
+      { id: "team/notes", name: "notes", pathWithNamespace: "team/notes", httpUrlToRepo: "https://gitea.com/team/notes.git", defaultBranch: "main" },
+    ]);
+    expect(t.calls.some((c) => c.url.includes("/user/repos"))).toBe(false);
+  });
+
+  it("falls back to an empty default branch when branches cannot be resolved", async () => {
+    const t = new FakeTransport(() => ({ status: 500, body: {} }));
+    const p = new GiteaProvider({ baseUrl: BASE, token: "t", allowedRepos: ["o/r"], transport: t });
+    expect((await p.listRepos())[0]).toMatchObject({ id: "o/r", name: "r", pathWithNamespace: "o/r", httpUrlToRepo: "https://gitea.com/o/r.git", defaultBranch: "" });
+  });
+});

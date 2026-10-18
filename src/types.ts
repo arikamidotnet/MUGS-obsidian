@@ -30,6 +30,15 @@ export interface Credential {
   token: string;
   /** Base URL for self-hosted instances, e.g. https://gitlab.example.com/api/v4 */
   baseUrl?: string;
+  /**
+   * Explicit list of repositories this credential is scoped to, as `owner/repo`
+   * paths (GitLab nested groups allowed: `group/sub/repo`). When non-empty, MUGS
+   * treats these as the authoritative repo set and never calls a global
+   * enumeration endpoint (`/projects`, `/user/repos`) — so it works with fine-
+   * grained tokens that lack the user-level "list all projects" permission but
+   * DO have project access. Absent/empty means "enumerate as usual".
+   */
+  repos?: string[];
 }
 
 /** A fine-grained folder mapping between a remote path and a vault folder. */

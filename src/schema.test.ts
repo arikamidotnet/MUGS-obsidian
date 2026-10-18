@@ -49,6 +49,16 @@ describe("data-plane schema (contract)", () => {
       }),
     ).not.toThrow();
   });
+
+  it("accepts and preserves an allowed-repos list on a credential", () => {
+    const s = parseSettings({ version: 1, credentials: [{ id: "c1", label: "work", kind: "gitlab", token: "glpat-xxxx", repos: ["a/b", "group/c/d"] }] });
+    expect(s.credentials[0].repos).toEqual(["a/b", "group/c/d"]);
+  });
+
+  it("rejects malformed repo paths (missing slash or containing whitespace)", () => {
+    expect(() => parseSettings({ version: 1, credentials: [{ id: "c1", label: "w", kind: "gitlab", token: "t", repos: ["noslash"] }] })).toThrow();
+    expect(() => parseSettings({ version: 1, credentials: [{ id: "c1", label: "w", kind: "gitlab", token: "t", repos: ["a b/c"] }] })).toThrow();
+  });
 });
 
 describe("credential redaction invariant", () => {

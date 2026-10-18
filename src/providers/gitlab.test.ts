@@ -148,3 +148,35 @@ describe("GitLabProvider — getBranches", () => {
     await expect(provider(t).getBranches("7")).rejects.toThrow(/404/);
   });
 });
+
+describe("GitLabProvider — allowed repos", () => {
+  it("synthesizes an allowed repo without calling /projects, resolving the default branch via branches", async () => {
+    const t = new FakeTransport((url) => {
+      if (url.includes("/members/me")) return { status: 200, body: { id: 1, username: "me", access_level: 3000 } };
+      if (url.includes("/repository/branches")) return { status: 200, body: [{ name: "main", protected: false, default: true }] };
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const p = new GitLabProvider({ baseUrl: BASE, token: "t", allowedRepos: ["fbr-rom/FBR-WRK"], transport: t });
+    const repos = await p.listRepos();
+    expect(repos).toEqual([
+      { id: "fbr-rom/FBR-WRK", name: "FBR-WRK", pathWithNamespace: "fbr-rom/FBR-WRK", httpUrlToRepo: "https://gitlab.com/fbr-rom/FBR-WRK.git", defaultBranch: "main" },
+    ]);
+    // No global /projects enumeration call (per-repo branches calls still hit /projects/<path>/...).
+    expect(t.calls.some((c) => /\/projects(\?|$)/.test(c.url))).toBe(false);
+  });
+
+  it("falls back to an empty default branch when branches cannot be resolved", async () => {
+    const t = new FakeTransport(() => ({ status: 500, body: {} }));
+    const p = new GitLabProvider({ baseUrl: BASE, token: "t", allowedRepos: ["o/r"], transport: t });
+    expect((await p.listRepos())[0]).toMatchObject({ id: "o/r", name: "r", pathWithNamespace: "o/r", httpUrlToRepo: "https://gitlab.com/o/r.git", defaultBranch: "" });
+  });
+
+  it("supports multiple allowed repos", async () => {
+    const t = new FakeTransport((url) => {
+      if (url.includes("/members/me")) return { status: 200, body: { access_level: 3000 } };
+      return { status: 200, body: [{ name: "main", protected: false, default: true }] };
+    });
+    const p = new GitLabProvider({ baseUrl: BASE, token: "t", allowedRepos: ["a/x", "b/y"], transport: t });
+    expect((await p.listRepos()).map((r) => r.pathWithNamespace)).toEqual(["a/x", "b/y"]);
+  });
+});

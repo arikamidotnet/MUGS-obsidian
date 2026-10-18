@@ -2,13 +2,20 @@ import { describe, it, expect } from "vitest";
 import type { HttpTransport, HttpResponse } from "./http";
 import { buildProvider, providerFromCredential } from "./factory";
 
-/** Fake transport that records the last call and returns a canned body. */
+/**
+ * Fake transport that records the last call. The canned "body" may be a static
+ * value or a dispatcher `(url) => HttpResponse` so tests can vary responses by
+ * endpoint (e.g. branches vs. members/me). A function body is invoked per call.
+ */
 class FakeTransport implements HttpTransport {
   public last?: { url: string; headers: Record<string, string> };
-  constructor(private body: unknown = []) {}
+  constructor(private responder: unknown | ((url: string) => HttpResponse<unknown>) = []) {}
   async get<T>(url: string, init: { headers: Record<string, string> }): Promise<HttpResponse<T>> {
     this.last = { url, headers: init.headers };
-    return { status: 200, body: this.body as T };
+    const body = typeof this.responder === "function"
+      ? (this.responder as (u: string) => HttpResponse<unknown>)(url).body
+      : this.responder;
+    return { status: 200, body: body as T };
   }
 }
 
@@ -70,5 +77,28 @@ describe("providerFromCredential", () => {
   it("builds from a full credential, using its username as the acting user", () => {
     const p = providerFromCredential({ id: "c1", kind: "github", token: "gho", username: "ada" });
     expect(p.kind).toBe("github");
+  });
+
+  it("threads allowedRepos so listRepos synthesizes without enumeration", async () => {
+    const t = new FakeTransport((url: string) => {
+      if (url.includes("/repository/branches")) return { status: 200, body: [{ name: "main", protected: false, default: true }] };
+      if (url.includes("/members/me")) return { status: 200, body: { access_level: 3000 } };
+      return { status: 200, body: [] };
+    });
+    const p = buildProvider({ kind: "gitlab", token: "t", allowedRepos: ["fbr-rom/FBR-WRK"] }, { transport: t });
+    const repos = await p.listRepos();
+    expect(repos.map((r) => r.pathWithNamespace)).toEqual(["fbr-rom/FBR-WRK"]);
+    // The recorded call is a branches call, never the /projects enumeration endpoint.
+    expect(t.last && /\/projects(\?|$)/.test(t.last.url)).toBe(false);
+  });
+
+  it("passes the credential's allowed repos through providerFromCredential", async () => {
+    const t = new FakeTransport((url: string) => {
+      if (url.includes("/repository/branches")) return { status: 200, body: [{ name: "main", protected: false, default: true }] };
+      if (url.includes("/members/me")) return { status: 200, body: { access_level: 3000 } };
+      return { status: 200, body: [] };
+    });
+    const p = providerFromCredential({ id: "c1", kind: "gitlab", token: "t", repos: ["o/r"] }, { transport: t });
+    expect((await p.listRepos()).map((r) => r.pathWithNamespace)).toEqual(["o/r"]);
   });
 });

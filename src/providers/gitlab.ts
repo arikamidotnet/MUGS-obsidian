@@ -24,6 +24,7 @@ import {
   paginateAll,
   type HttpTransport,
 } from "./http";
+import { cloneUrlFor, resolveDefaultBranch } from "./repoUrls";
 
 /** GitLab access levels mapped to the normalized MUGS member role. */
 const ACCESS_LEVELS: Record<number, MemberRole> = {
@@ -45,6 +46,9 @@ export interface GitLabOptions {
   token: string;
   /** Optional transport override for tests. Defaults to global fetch. */
   transport?: HttpTransport;
+  /** Explicit allowed repos (`owner/repo`). When set, listRepos returns these
+   *  directly instead of calling GET /projects — for project-scoped fine-grained tokens. */
+  allowedRepos?: string[];
 }
 
 // --- Native GitLab shapes (subset of fields we consume) ---------------------
@@ -110,11 +114,13 @@ export class GitLabProvider implements Provider {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly transport: HttpTransport;
+  private readonly allowedRepos?: string[];
 
   constructor(opts: GitLabOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.transport = opts.transport ?? new FetchTransport();
+    this.allowedRepos = opts.allowedRepos;
   }
 
   /** `PRIVATE-TOKEN` is the GitLab auth header (vs GitHub's `Authorization`). */
@@ -123,9 +129,33 @@ export class GitLabProvider implements Provider {
   }
 
   async listRepos(): Promise<RepoSummary[]> {
+    // Explicitly-allowed repos: synthesize directly (no /projects call), so a
+    // fine-grained token scoped to specific projects works without the user-level
+    // "[Project: Read]" enumeration permission.
+    if (this.allowedRepos && this.allowedRepos.length > 0) {
+      return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
+    }
     const url = withQuery(`${this.baseUrl}/projects`, { per_page: 100 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((p) => mapProject(p as GitLabProject));
+  }
+
+  /** Build a RepoSummary for an explicitly-allowed repo path. The default branch is
+   *  resolved via the repo-specific branches endpoint (works with project-scoped tokens). */
+  private async synthRepo(path: string): Promise<RepoSummary> {
+    let defaultBranch = "";
+    try {
+      defaultBranch = resolveDefaultBranch(await this.getBranches(path));
+    } catch {
+      defaultBranch = "";
+    }
+    return repoSummarySchema.parse({
+      id: path,
+      name: path.split("/").pop() ?? path,
+      pathWithNamespace: path,
+      httpUrlToRepo: cloneUrlFor(this.baseUrl, path),
+      defaultBranch,
+    });
   }
 
   async getMembers(repoId: string): Promise<Member[]> {

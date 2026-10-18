@@ -14,6 +14,7 @@ import type { Provider, RepoSummary, BranchSummary, Member } from "./types";
 import { repoSummarySchema, branchSummarySchema, memberSchema, type MemberRole } from "./schema";
 import type { ProviderKind } from "../types";
 import { FetchTransport, withQuery, paginateAll, type HttpTransport } from "./http";
+import { cloneUrlFor, resolveDefaultBranch } from "./repoUrls";
 
 /** Whether this adapter represents Gitea or Forgejo (same API shape). */
 export type GiteaKind = "gitea" | "forgejo";
@@ -27,6 +28,9 @@ export interface GiteaOptions {
   kind?: GiteaKind;
   /** Optional transport override for tests. Defaults to global fetch. */
   transport?: HttpTransport;
+  /** Explicit allowed repos (`owner/repo`). When set, listRepos returns these
+   *  directly instead of calling GET /user/repos — for project-scoped tokens. */
+  allowedRepos?: string[];
 }
 
 // --- Native shapes (subset of fields we consume) ---------------------------
@@ -96,12 +100,14 @@ export class GiteaProvider implements Provider {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly transport: HttpTransport;
+  private readonly allowedRepos?: string[];
 
   constructor(opts: GiteaOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
     this.kind = (opts.kind ?? "gitea") as ProviderKind;
     this.transport = opts.transport ?? new FetchTransport();
+    this.allowedRepos = opts.allowedRepos;
   }
 
   /** Gitea/Forgejo authenticate with `Authorization: token` (vs GitLab's PRIVATE-TOKEN). */
@@ -110,9 +116,32 @@ export class GiteaProvider implements Provider {
   }
 
   async listRepos(): Promise<RepoSummary[]> {
+    // Explicitly-allowed repos: synthesize directly (no /user/repos call), so a
+    // token scoped to specific repos works without the "list all repos" permission.
+    if (this.allowedRepos && this.allowedRepos.length > 0) {
+      return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
+    }
     const url = withQuery(`${this.baseUrl}/user/repos`, { visibility: "all", per_page: 100 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((p) => mapProject(p as GiteaProject));
+  }
+
+  /** Build a RepoSummary for an explicitly-allowed repo path. The default branch is
+   *  resolved via the repo-specific branches endpoint (works with project-scoped tokens). */
+  private async synthRepo(path: string): Promise<RepoSummary> {
+    let defaultBranch = "";
+    try {
+      defaultBranch = resolveDefaultBranch(await this.getBranches(path));
+    } catch {
+      defaultBranch = "";
+    }
+    return repoSummarySchema.parse({
+      id: path,
+      name: path.split("/").pop() ?? path,
+      pathWithNamespace: path,
+      httpUrlToRepo: cloneUrlFor(this.baseUrl, path),
+      defaultBranch,
+    });
   }
 
   async getMembers(repoId: string): Promise<Member[]> {

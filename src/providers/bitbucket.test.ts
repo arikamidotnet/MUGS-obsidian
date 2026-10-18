@@ -142,3 +142,25 @@ describe("BitbucketProvider", () => {
     expect(branches.map((b) => b.name)).toEqual(["a", "b"]);
   });
 });
+
+describe("BitbucketProvider — allowed repos", () => {
+  it("synthesizes an allowed repo without calling the /2.0/repositories enumeration endpoint", async () => {
+    const t = new FakeTransport({
+      "/refs": { status: 200, body: { values: [{ name: "main" }, { name: "dev" }], next: null } },
+      "/repositories/": { status: 200, body: { full_name: "acme/notes", mainbranch: { name: "main" } } },
+    });
+    const p = new BitbucketProvider({ baseUrl: BASE, token: "t", allowedRepos: ["acme/notes"], transport: t });
+    const repos = await p.listRepos();
+    expect(repos).toEqual([
+      { id: "acme/notes", name: "notes", pathWithNamespace: "acme/notes", httpUrlToRepo: "https://bitbucket.org/acme/notes.git", defaultBranch: "main" },
+    ]);
+    // No enumeration call to the /2.0/repositories list endpoint.
+    expect(t.calls.some((c) => /\/repositories\?/.test(c.url))).toBe(false);
+  });
+
+  it("falls back to an empty default branch when branches cannot be resolved", async () => {
+    const t = new FakeTransport({ "/repositories/": { status: 500, body: {} } });
+    const p = new BitbucketProvider({ baseUrl: BASE, token: "t", allowedRepos: ["acme/x"], transport: t });
+    expect((await p.listRepos())[0]).toMatchObject({ id: "acme/x", name: "x", pathWithNamespace: "acme/x", httpUrlToRepo: "https://bitbucket.org/acme/x.git", defaultBranch: "" });
+  });
+});

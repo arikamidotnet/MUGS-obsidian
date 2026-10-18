@@ -58,6 +58,19 @@ export function planSync(p: PlanInput): SyncDecision {
   return { pull, push, needsConflictResolution };
 }
 
+/**
+ * Resolve the remote branch ref name for a mapping's sync pass.
+ *
+ * Prefers an explicit mapping branch, then the repo default branch. Falls back to
+ * "HEAD" when neither is known — e.g. a synthesized allowed-repo entry whose
+ * branches could not be resolved (a scoped token that couldn't list them). An empty
+ * name would otherwise break `origin/<branch>` refs; `origin/HEAD` is created on
+ * clone and keeps tracking the remote's default branch.
+ */
+export function resolveSyncBranch(mapping: { branch?: string }, repo: { defaultBranch: string }): string {
+  return (mapping.branch ?? repo.defaultBranch) || "HEAD";
+}
+
 /** Narrow view of the persisted last-sync state the manager needs. */
 export interface LastSyncAccessor {
   /** Persisted remote SHA this mapping was last synced to ("" when never). */
@@ -189,7 +202,7 @@ export class CloneManager {
   /** Run a full sync pass for one mapping against its resolved repo. */
   async syncMapping(mapping: FolderMapping, repo: RepoSummary): Promise<SyncResult> {
     const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
-    const branch = mapping.branch ?? repo.defaultBranch;
+    const branch = resolveSyncBranch(mapping, repo);
     const base = this.syncs.lastRemoteSha(mapping.id) ?? "";
 
     // Bind git ops to the clone dir; without a cwd they would run in process.cwd().
