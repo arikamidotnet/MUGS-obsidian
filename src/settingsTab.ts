@@ -396,9 +396,11 @@ export class MugsSettingTab extends PluginSettingTab {
     addField("Label", this.text((v) => { label = v.trim(); }, "Label"));
     addField("Username", this.text((v) => { username = v.trim(); }, "Username (optional)"));
     addField("Token", this.password((v) => { token = v; }, "Token"));
-    addField("Base URL", this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)"));
+    const baseUrlInputEl = this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)");
+    baseUrlInput = baseUrlInputEl;
+    addField("Base URL", baseUrlInputEl);
 
-    // Prefill for the initial provider default (field already created above).
+    // Prefill for the initial provider default (field reference captured above).
     setBaseUrlField(prefilledBaseUrl(kind));
 
     grid.appendChild(this.actions([
