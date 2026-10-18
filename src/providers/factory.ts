@@ -35,6 +35,14 @@ const DEFAULT_BASE_URL: Record<Exclude<ProviderKind, "local">, string> = {
   forgejo: "https://forgejo.example.com/api/v1", // self-hosted; user should set baseUrl
 };
 
+/**
+ * Public-API base URL used to prefill the credential form for each backend.
+ * `local` has no REST API, so it returns "" (the field is left blank).
+ */
+export function defaultBaseUrl(kind: ProviderKind): string {
+  return kind === "local" ? "" : DEFAULT_BASE_URL[kind];
+}
+
 /** Build the `Provider` for a credential. Throws for `local` (no REST adapter). */
 export function buildProvider(input: ProviderInput, opts: { transport?: HttpTransport; actingUsername?: string } = {}): Provider {
   const kind = input.kind;

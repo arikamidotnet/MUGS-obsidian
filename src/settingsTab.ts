@@ -8,7 +8,7 @@ import { PluginSettingTab, Setting, Notice } from "obsidian";
 import type MugsPlugin from "./main";
 import type { Credential, SyncDirection } from "./types";
 import type { RepoSummary } from "./providers/types";
-import { buildProvider } from "./providers/factory";
+import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 
 // The shipped obsidian typings declare addToggle/addText/addButton on Setting but
@@ -363,6 +363,17 @@ export class MugsSettingTab extends PluginSettingTab {
     let username = "";
     let token = "";
     let baseUrl = "";
+    // Base URL is prefilled per backend (editable) so the correct API base shows
+    // by default while still allowing a self-hosted override.
+    let baseUrlInput: HTMLInputElement | null = null;
+    const setBaseUrlField = (value: string): void => {
+      baseUrl = value;
+      if (baseUrlInput) (baseUrlInput as HTMLInputElement).value = value;
+    };
+    // Prefill the API base for a backend; blank for local. Kept in a function so
+    // the "local" comparison is not narrowed by control-flow analysis.
+    const prefilledBaseUrl = (k: Credential["kind"]): string =>
+      k === "local" ? "" : defaultBaseUrl(k);
 
     const grid = document.createElement("div");
     grid.className = "mugs-form-grid";
@@ -371,7 +382,11 @@ export class MugsSettingTab extends PluginSettingTab {
       grid.appendChild(this.field(name, input));
     };
 
-    addField("Provider", this.selectOption((v) => { kind = v as Credential["kind"]; }, [
+    addField("Provider", this.selectOption((v) => {
+      kind = v as Credential["kind"];
+      // Prefill the API base for the chosen backend; blank for local.
+      setBaseUrlField(prefilledBaseUrl(kind));
+    }, [
       ["gitlab", "GitLab"],
       ["github", "GitHub"],
       ["bitbucket", "Bitbucket"],
@@ -382,6 +397,9 @@ export class MugsSettingTab extends PluginSettingTab {
     addField("Username", this.text((v) => { username = v.trim(); }, "Username (optional)"));
     addField("Token", this.password((v) => { token = v; }, "Token"));
     addField("Base URL", this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)"));
+
+    // Prefill for the initial provider default (field already created above).
+    setBaseUrlField(prefilledBaseUrl(kind));
 
     grid.appendChild(this.actions([
       {
@@ -502,6 +520,8 @@ export class MugsSettingTab extends PluginSettingTab {
       }
       const cred = creds.find((c) => c.id === providerId);
       if (!cred) { repoSel.disabled = true; remotePathSel.disabled = true; return; }
+      // Populate vault folders up front so they show even if the repo fetch fails.
+      await this.populateVaultFolders(vaultFolderSel, localFolder);
       try {
         const token = this.plugin.store.getToken(providerId) ?? "";
         if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; remotePathSel.disabled = true; return; }
@@ -527,7 +547,6 @@ export class MugsSettingTab extends PluginSettingTab {
         repoKey = first.pathWithNamespace;
         repoSel.value = first.id;
         await refreshRemoteDirs();
-        await this.populateVaultFolders(vaultFolderSel, localFolder);
       } catch (e) {
         new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
         repoSel.disabled = true;
@@ -661,17 +680,23 @@ export class MugsSettingTab extends PluginSettingTab {
     }
   }
 
-  /** Top-level vault folders via the DataAdapter (defensive cast, like getBasePath). */
+  /** Top-level vault folders via the DataAdapter (defensive cast, like getBasePath).
+   *  Tries the empty-string root first, falling back to "/", since adapter root
+   *  handling varies across Obsidian builds. */
   private async listVaultFolders(): Promise<string[]> {
-    try {
-      const adapter = this.app.vault.adapter as unknown as {
-        list(path: string, options?: { recursive?: boolean }): Promise<{ files?: string[]; folders?: string[] }>;
-      };
-      const res = await adapter.list("", {});
-      return (res?.folders ?? []).filter((f) => f.length > 0).sort();
-    } catch {
-      return [];
+    const adapter = this.app.vault.adapter as unknown as {
+      list(path: string, options?: { recursive?: boolean }): Promise<{ files?: string[]; folders?: string[] }>;
+    };
+    for (const root of ["", "/"]) {
+      try {
+        const res = await adapter.list(root, {});
+        const folders = (res?.folders ?? []).filter((f) => f.length > 0 && !f.startsWith("."));
+        if (folders.length > 0) return folders.sort();
+      } catch {
+        // fall through to the next root attempt
+      }
     }
+    return [];
   }
 
   /** Fill a vault-folder dropdown from existing top-level vault folders. */
