@@ -698,7 +698,9 @@ export class MugsSettingTab extends PluginSettingTab {
 
   /** Top-level vault folders via the DataAdapter (defensive cast, like getBasePath).
    *  Tries the empty-string root first, falling back to "/", since adapter root
-   *  handling varies across Obsidian builds. */
+   *  handling varies across Obsidian builds. Dotfolders are included on purpose so
+   *  users can map hidden targets like `.trash` or `.obsidian/`; the .obsidian/
+   *  mapping is still gated by `assertMappingAllowed` (requires config-sync enabled). */
   private async listVaultFolders(): Promise<string[]> {
     const adapter = this.app.vault.adapter as unknown as {
       list(path: string, options?: { recursive?: boolean }): Promise<{ files?: string[]; folders?: string[] }>;
@@ -706,7 +708,7 @@ export class MugsSettingTab extends PluginSettingTab {
     for (const root of ["", "/"]) {
       try {
         const res = await adapter.list(root, {});
-        const folders = (res?.folders ?? []).filter((f) => f.length > 0 && !f.startsWith("."));
+        const folders = (res?.folders ?? []).filter((f) => f.length > 0);
         if (folders.length > 0) return folders.sort();
       } catch {
         // fall through to the next root attempt
