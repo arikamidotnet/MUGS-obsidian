@@ -59,7 +59,7 @@ export function defaultBaseUrl(kind: ProviderKind): string {
  */
 export function cloneUrlFor(baseUrl: string, pathWithNamespace: string): string {
   let root = baseUrl.replace(/\/+$/, "");
-  root = root.replace(/\/(?:api|2\.0)(?:\/v\d+)?/, "");
+  root = root.replace(/\/(?:api|2\.0)(?:\/v\d+)?$/, "");
   root = root.replace(/^https?:\/\/api\./i, "https://");
   return `${root}/${pathWithNamespace}.git`;
 }

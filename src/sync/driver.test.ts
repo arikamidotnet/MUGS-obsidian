@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { FolderMapping, Credential, FileConflict, Agent } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
+import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
 import { syncAllMappings, storeWritableAccessor } from "./driver";
@@ -186,6 +187,25 @@ describe("syncAllMappings — skips", () => {
 });
 
 describe("syncAllMappings — sync outcomes", () => {
+  it("threads the credential's allowed repos into the provider built for sync", async () => {
+    // Regression: the sync-time provider build must forward allowedRepos so a
+    // project-scoped fine-grained token skips /projects enumeration (else 403).
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const inputs: ProviderInput[] = [];
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ repos: ["fbr-rom/FBR-WRK"] })],
+      getToken: () => "t",
+      buildProvider: (input) => { inputs.push(input); return fakeProvider(fakeRepo("m1")); },
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor().accessor,
+    });
+    expect(outcomes[0]).toMatchObject({ status: "ok" });
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.allowedRepos).toEqual(["fbr-rom/FBR-WRK"]);
+  });
+
   it("fast-forwards a pull-only mapping without pushing", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
     const { accessor, state } = spyAccessor("L1"); // base == localSha -> no unpushed work

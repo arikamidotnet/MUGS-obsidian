@@ -125,7 +125,7 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
 
       let provider = providerCache.get(credential.id);
       if (!provider) {
-        provider = deps.buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token }, { actingUsername: credential.username });
+        provider = deps.buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token, allowedRepos: credential.repos }, { actingUsername: credential.username });
         providerCache.set(credential.id, provider);
       }
 
