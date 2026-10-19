@@ -59,6 +59,16 @@ describe("data-plane schema (contract)", () => {
     expect(() => parseSettings({ version: 1, credentials: [{ id: "c1", label: "w", kind: "gitlab", token: "t", repos: ["noslash"] }] })).toThrow();
     expect(() => parseSettings({ version: 1, credentials: [{ id: "c1", label: "w", kind: "gitlab", token: "t", repos: ["a b/c"] }] })).toThrow();
   });
+
+  it("defaults a whole-vault mapping's syncTrashFolder to true (opt-out trash gate)", () => {
+    const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "", localFolder: ".", providerId: "c1" }] });
+    expect(s.mappings[0].syncTrashFolder).toBe(true);
+  });
+
+  it("preserves an explicit syncTrashFolder=false on a mapping", () => {
+    const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "", localFolder: ".", providerId: "c1", syncTrashFolder: false }] });
+    expect(s.mappings[0].syncTrashFolder).toBe(false);
+  });
 });
 
 describe("credential redaction invariant", () => {

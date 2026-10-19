@@ -49,6 +49,8 @@ export const folderMappingSchema = z.object({
   direction: syncDirectionSchema.default("push-pull"),
   includes: z.array(z.string()).default([]),
   excludes: z.array(z.string()).default([]),
+  /** Opt-out gate for the vault `.trash/` folder in this mapping (defaults on). */
+  syncTrashFolder: z.boolean().default(true),
 });
 
 export const lastSyncStateSchema = z.object({

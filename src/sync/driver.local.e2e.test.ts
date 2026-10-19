@@ -128,4 +128,62 @@ describe("local provider — real git end-to-end", () => {
     expect(outcomes[0].status).toBe("conflict");
     expect(store.getConflicts("map-synced-notes").map((c) => c.path)).toContain("Notes/diary.md");
   });
+
+  it("excludes .trash/ from push when syncTrashFolder is false, includes it when true", async () => {
+    // Isolated bare remote + clone root per scenario so the two gates don't interfere.
+    for (const syncTrashFolder of [false, true]) {
+      const base = join(tmpdir(), `mugs-e2e-trash-${syncTrashFolder}`);
+      const remotePlain = join(base, "remote.git");
+      const work = join(base, "work");
+      const cloneRoot = join(base, "clones");
+      rmSync(base, { recursive: true, force: true });
+
+      // Seed a bare repo containing a .trash/ folder and an ordinary notes/ folder.
+      execSync(`git init -q -b main "${work}"`);
+      mkdirSync(join(work, ".trash"), { recursive: true });
+      mkdirSync(join(work, "notes"), { recursive: true });
+      writeFileSync(join(work, ".trash", "old.md"), "# old trash\n");
+      writeFileSync(join(work, "notes", "foo.md"), "# foo\n");
+      execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+      execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+      execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+      rmSync(work, { recursive: true, force: true });
+
+      const cred: Credential = { id: "cred-trash", label: "Local", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
+      const mappingId = `map-trash-${syncTrashFolder}`;
+      const deps = () => ({
+        mappings: [{ id: mappingId, label: "Whole", remotePath: "", localFolder: ".", providerId: "cred-trash", direction: "push-pull" as const, syncTrashFolder }],
+        credentials: [cred],
+        getToken: () => "t",
+        buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
+        cloneRoot,
+        runner: new ChildProcessRunner(),
+        lastSync: storeWritableAccessor(new MugsStore(new MemoryIO())),
+        conflicts: storeConflictAccessor(new MugsStore(new MemoryIO())),
+      });
+
+      // Sync #1 lands the seeded tree in the clone; record baseline.
+      await syncAllMappings(deps());
+
+      // Local edits in the clone: commit an ordinary file (creating unpushed work that
+      // enables a push) and leave an uncommitted modification of a tracked .trash/ file,
+      // which is exactly what the inScope gate filters when staging on push.
+      const cp = cloneDir({ root: cloneRoot }, "cred-trash", mappingId);
+      writeFileSync(join(cp, "notes", "bar.md"), "# bar\n");
+      execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+      execSync(`git -C "${cp}" add notes/bar.md && git -C "${cp}" commit -q -m "add bar"`);
+      writeFileSync(join(cp, ".trash", "old.md"), "# old trash MODIFIED\n"); // uncommitted
+
+      // Sync #2 pushes; the gate decides whether the uncommitted .trash/ change leaves the machine.
+      await syncAllMappings(deps());
+
+      const check = join(base, "check.git");
+      execSync(`git clone -q "${remotePlain}" "${check}"`);
+      expect(existsSync(join(check, "notes", "bar.md"))).toBe(true); // committed ordinary file always pushes
+      const trashContent = readFileSync(join(check, ".trash", "old.md"), "utf8");
+      expect(trashContent).toBe(syncTrashFolder ? "# old trash MODIFIED\n" : "# old trash\n");
+      rmSync(check, { recursive: true, force: true });
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
 });

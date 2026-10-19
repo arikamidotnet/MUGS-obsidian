@@ -65,6 +65,9 @@ export interface FolderMapping {
   /** gitignore-style globs of paths within the scope to EXCLUDE from sync.
    *  Takes precedence over {@link includes}. */
   excludes?: string[];
+  /** When false, the vault `.trash/` folder is excluded from this mapping's sync
+   *  (opt-out; defaults to true). Only meaningful for whole-vault mappings. */
+  syncTrashFolder?: boolean;
 }
 
 /** Deterministic tie-break for hunks a 3-way merge cannot resolve cleanly. */

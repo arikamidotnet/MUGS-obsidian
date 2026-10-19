@@ -101,6 +101,17 @@ describe("effectiveObsidianEntries — defaults overlaid by config", () => {
     expect(names).toContain("settings.json");
     expect(DEFAULT_OBSIDIAN_ENTRIES.find((e) => e.path === "plugins")?.scope).toBe("vault-wide");
   });
+
+  it("round-trips a per-entry scope edit through effectiveObsidianEntries", () => {
+    const base = config({ enabled: true, entries: [{ path: "themes", scope: "personal" }] });
+    expect(shouldSyncObsidianPath(".obsidian/themes/x.css", base)).toBe(false); // personal -> local
+    const editedMap = effectiveObsidianEntries(base);
+    const themes = structuredClone(editedMap.get("themes")!);
+    themes.scope = "vault-wide";
+    editedMap.set("themes", themes);
+    const edited = { enabled: true, entries: Array.from(editedMap.values()) } as ObsidianConfigPolicy;
+    expect(shouldSyncObsidianPath(".obsidian/themes/x.css", edited)).toBe(true); // now shared
+  });
 });
 
 describe("path helpers", () => {

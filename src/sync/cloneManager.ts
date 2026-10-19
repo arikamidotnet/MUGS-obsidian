@@ -196,6 +196,8 @@ export class CloneManager {
     if (config?.enabled && isUnderObsidianRoot(path)) {
       return shouldSyncObsidianPath(path, config);
     }
+    // Opt-out gate for the vault `.trash/` folder: excluded when this mapping opts out.
+    if (mapping.syncTrashFolder === false && isTrashPath(path)) return false;
     return true;
   }
 
@@ -370,6 +372,11 @@ export class CloneManager {
       await this.workingTree?.writeFile(absPath, op.content ?? "");
     }
   }
+}
+
+/** True when `path` is inside the vault `.trash/` folder (a top-level dotfolder). */
+function isTrashPath(path: string): boolean {
+  return path === ".trash" || path.startsWith(".trash/");
 }
 
 /** Map an applied change to a write/delete op for the applier ordering. */

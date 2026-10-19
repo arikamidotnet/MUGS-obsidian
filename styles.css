@@ -458,3 +458,91 @@
 .mugs-map-footer-good {
   color: var(--text-success, #3fb950);
 }
+
+/* --- Whole-vault + dotfolder selector ------------------------------------ */
+
+.mugs-dotfolders {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-dotfolders > p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+}
+
+.mugs-dotfolder-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-normal);
+}
+
+.mugs-dotfolder-toggle input {
+  width: auto;
+}
+
+/* Obsidian per-entry selector */
+.mugs-obsidian-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.mugs-obsidian-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.mugs-obsidian-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mugs-obsidian-entry select {
+  width: auto;
+  min-width: 128px;
+}
+
+.mugs-obsidian-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.mugs-obsidian-add input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Ghost-style link buttons (Remove / Add entry) */
+.mugs-link-btn {
+  font-size: var(--font-ui-smaller);
+  padding: 3px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+}
+
+.mugs-link-btn:hover {
+  border-color: var(--text-error, #f85149);
+  color: var(--text-error, #f85149);
+}

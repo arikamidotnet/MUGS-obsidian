@@ -112,3 +112,15 @@ describe("resolveMappingForPath — route a path to its mapping", () => {
     expect(resolveMappingForPath(scoped, "docs/guide.md")?.id).toBe("b");
   });
 });
+
+describe("isInScope — whole-vault dotfolders", () => {
+  it("includes .trash and .obsidian paths for an unscoped (whole-repo) mapping", () => {
+    expect(isInScope({ remotePath: "" }, ".trash/old.md")).toBe(true);
+    expect(isInScope({ remotePath: "" }, ".obsidian/settings.json")).toBe(true);
+  });
+
+  it("still honors excludes for dotfolders in a whole-vault mapping", () => {
+    expect(isInScope({ remotePath: "", excludes: [".trash/**"] }, ".trash/old.md")).toBe(false);
+    expect(isInScope({ remotePath: "", excludes: [".trash/**"] }, "notes/x.md")).toBe(true);
+  });
+});
