@@ -1,16 +1,20 @@
 /**
  * MUGS — Multi-User Git Sync
- * Settings tab. Renders credentials, folder mappings and security options, with
- * working add/delete controls backed by the store (Phase 1/4). Kept thin so it
- * never runs in unit tests (it imports the Obsidian DOM API).
+ * Settings tab (v0.3.1 overhaul). Renders credentials, folder mappings and security
+ * options with working add/delete controls backed by the store. Rendering uses
+ * Obsidian's native Setting rows + toggles to match modern Obsidian settings UX; all
+ * reusable logic lives in pure modules (sync/folderMatch.ts, sync/obsidianCategories.ts)
+ * so this file stays thin and never runs in unit tests (it imports the Obsidian DOM API).
  */
 import { PluginSettingTab, Setting, Notice } from "obsidian";
 import type MugsPlugin from "./main";
-import type { Credential, SyncDirection, ObsidianEntryPolicy } from "./types";
+import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping } from "./types";
 import type { RepoSummary } from "./providers/types";
 import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
+import { categorizeObsidianEntries } from "./sync/obsidianCategories";
+import { matchFolderPairs, type FolderMatch } from "./sync/folderMatch";
 
 // The shipped obsidian typings (pinned "latest" at an older snapshot) omit
 // addSelect/addField from Setting even though both are real runtime APIs.
@@ -110,24 +114,9 @@ export class MugsSettingTab extends PluginSettingTab {
 
       const mappings = this.plugin.store.getDisplaySettings().mappings;
       if (mappings.length === 0) {
-        card.createEl("p", { cls: "mags-muted", text: "No mappings yet." });
+        card.createEl("p", { cls: "mags-muted", text: "No mappings yet. Add one below." });
       } else {
-        for (const m of mappings) {
-          new Setting(card)
-            .setName(m.label)
-            .setDesc(`${m.remotePath || "(repo root)"} → ${m.localFolder} · ${m.direction}`)
-            .addButton((b) =>
-              b.setButtonText("Delete").onClick(() => {
-                this.plugin.store.removeMapping(m.id);
-                void this.plugin.store.save();
-                this.display();
-              }),
-            );
-          // Editable include/exclude scope for this mapping (Area 1). Preserves all
-          // other fields via upsertMapping; changes persist on blur/change.
-          card.appendChild(this.scopeField(m, "includes"));
-          card.appendChild(this.scopeField(m, "excludes"));
-        }
+        this.renderMappings(card, mappings);
       }
 
       card.createEl("div", { cls: "mugs-divider" });
@@ -277,8 +266,8 @@ export class MugsSettingTab extends PluginSettingTab {
             }),
         );
 
-      // Obsidian-Sync-style per-entry selector: each top-level .obsidian/ child gets a
-      // personal vs vault-wide scope so you can share all settings or only certain components.
+      // Obsidian-Sync-style grouped toggles: each top-level .obsidian/ child gets a
+      // personal/vault-wide scope so you can share all settings or only certain components.
       this.renderObsidianEntries(card, obs);
     });
 
@@ -323,6 +312,96 @@ export class MugsSettingTab extends PluginSettingTab {
     containerEl.appendChild(card);
   }
 
+  /** Human-readable direction label for a mapping. */
+  private directionText(d: SyncDirection): string {
+    return d === "push-pull" ? "Push + pull" : d === "pull-only" ? "Pull only" : "Push only";
+  }
+
+  /** Render each stored mapping as a card with native Setting rows, collapsible
+   *  include/exclude managers and (for whole-vault mappings) a .trash/ toggle. */
+  private renderMappings(card: HTMLElement, mappings: FolderMapping[]): void {
+    for (const m of mappings) {
+      const block = card.createDiv({ cls: "mugs-mapping" });
+      new Setting(block)
+        .setName(m.label)
+        .setDesc(`${m.remotePath || "(repo root)"} → ${m.localFolder} · ${this.directionText(m.direction)}`)
+        .addButton((b) =>
+          b.setButtonText("Delete").onClick(() => {
+            this.plugin.store.removeMapping(m.id);
+            void this.plugin.store.save();
+            this.display();
+          }),
+        );
+
+      block.appendChild(this.managePanel(
+        "Includes",
+        (m.includes ?? []).join("\n"),
+        (v) => this.saveMappingScope(m.id, { includes: parseGlobList(v) }),
+        "Only these globs sync within the scope (optional). Leave empty for everything.",
+      ));
+      block.appendChild(this.managePanel(
+        "Excludes",
+        (m.excludes ?? []).join("\n"),
+        (v) => this.saveMappingScope(m.id, { excludes: parseGlobList(v) }),
+        "These globs never sync (gitignore-style; '!' re-includes).",
+      ));
+
+      // Whole-vault mappings expose a per-mapping .trash/ toggle.
+      if (m.remotePath === "" && m.localFolder === ".") {
+        new Setting(block)
+          .setName("Sync the repository's .trash/ folder")
+          .setDesc("Shared across all users via the single git path, like Obsidian's trash. Turn off to keep deletions local to this device.")
+          .addToggle((t) =>
+            t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
+              this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
+              await this.plugin.store.save();
+              this.display();
+            }),
+          );
+      }
+    }
+  }
+
+  /** A collapsible labelled panel with a "Manage" button that reveals a textarea.
+   *  Mirrors Obsidian Sync's "Excluded folders · Manage" progressive disclosure. */
+  private managePanel(title: string, initialText: string, onChange: (v: string) => void, placeholder: string): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "mugs-manage";
+
+    const head = document.createElement("div");
+    head.className = "mugs-manage-head";
+    const lbl = document.createElement("span");
+    lbl.className = "mugs-manage-title";
+    lbl.textContent = title;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mugs-manage-btn";
+    btn.textContent = "Manage";
+
+    const panel = document.createElement("div");
+    panel.className = "mugs-manage-panel is-collapsed";
+    const ta = document.createElement("textarea");
+    ta.rows = 3;
+    ta.style.width = "100%";
+    ta.className = "mugs-textarea";
+    ta.placeholder = placeholder;
+    ta.value = initialText;
+    ta.addEventListener("change", (e: Event) => onChange((e.target as HTMLTextAreaElement).value));
+
+    btn.addEventListener("click", () => {
+      panel.classList.toggle("is-collapsed");
+      // Persist the current value whenever the panel is opened so edits are not lost.
+      if (!panel.classList.contains("is-collapsed")) onChange(ta.value);
+    });
+
+    head.appendChild(lbl);
+    head.appendChild(btn);
+    panel.appendChild(ta);
+    wrap.appendChild(head);
+    wrap.appendChild(panel);
+    return wrap;
+  }
+
   /** Persist an editable include/exclude scope change on an existing mapping. */
   private saveMappingScope(
     id: string,
@@ -334,78 +413,45 @@ export class MugsSettingTab extends PluginSettingTab {
     void this.plugin.store.save();
   }
 
-  /** An editable include/exclude textarea bound to one mapping's scope. */
-  private scopeField(mapping: { id: string }, kind: "includes" | "excludes"): HTMLElement {
-    const current = this.plugin.store.getSettings().mappings.find((x) => x.id === mapping.id);
-    const value = (current?.[kind] ?? []).join("\n");
-    const hint =
-      kind === "includes"
-        ? "Only these globs sync within the scope (optional). Leave empty for everything."
-        : "These globs never sync (gitignore-style; '!' re-includes).";
-    const wrap = document.createElement("div");
-    wrap.className = "mugs-field";
-    const lbl = document.createElement("label");
-    lbl.textContent = kind === "includes" ? "Includes" : "Excludes";
-    wrap.appendChild(lbl);
-    const ta = document.createElement("textarea");
-    ta.value = value;
-    ta.rows = 2;
-    ta.style.width = "100%";
-    ta.className = "mugs-textarea";
-    ta.placeholder = hint;
-    ta.addEventListener("change", (e: Event) => {
-      const lines = parseGlobList((e.target as HTMLTextAreaElement).value);
-      this.saveMappingScope(mapping.id, { [kind]: lines });
-    });
-    wrap.appendChild(ta);
-    return wrap;
-  }
-
   /**
-   * Per-entry Obsidian-Sync-style selector for top-level .obsidian/ children (Area 9).
-   * Each entry gets a personal/vault-wide scope dropdown and a remove button; an add
-   * field lets users include additional paths. Re-renders the whole settings on each
-   * change so the effective (default-overlaid) list stays in sync.
+   * Obsidian-Sync-style grouped toggles for top-level .obsidian/ children (Area 9).
+   * Entries are bucketed into named categories ("Main settings", "Themes & snippets",
+   * …) each with a personal/vault-wide toggle. Re-renders persist on change.
    */
   private renderObsidianEntries(card: HTMLElement, obs: { enabled: boolean; entries: ObsidianEntryPolicy[] }): void {
     if (!obs.enabled) return;
-    const rows = card.createDiv({ cls: "mugs-obsidian-entries" });
 
+    const effective = Array.from(effectiveObsidianEntries(obs).values()).map((e) => structuredClone(e));
     const persist = (entries: ObsidianEntryPolicy[]): void => {
       this.plugin.store.setObsidianConfig({ enabled: obs.enabled, entries });
       void this.plugin.store.save();
     };
-    const currentEntries = (): ObsidianEntryPolicy[] => Array.from(effectiveObsidianEntries(obs).values()).map((e) => structuredClone(e));
 
-    for (const entry of currentEntries()) {
-      const row = rows.createDiv({ cls: "mugs-obsidian-entry" });
-      const name = row.createSpan({ cls: "mugs-obsidian-name" });
-      name.textContent = entry.path;
+    for (const group of categorizeObsidianEntries(effective)) {
+      card.createEl("div", { cls: "mugs-obsidian-group-head", text: group.title });
 
-      const scopeSel = document.createElement("select");
-      scopeSel.className = "mugs-dir-select";
-      for (const [val, label] of [["vault-wide", "Vault-wide (shared)"], ["personal", "Personal (local)"]] as Array<[string, string]>) {
-        const opt = document.createElement("option");
-        opt.value = val;
-        opt.textContent = label;
-        if (val === entry.scope) opt.selected = true;
-        scopeSel.appendChild(opt);
+      for (const path of group.paths) {
+        const entry = effective.find((e) => e.path === path)!;
+        new Setting(card)
+          .setName(path)
+          .setDesc(group.description)
+          .addToggle((t) =>
+            t.setValue(entry.scope === "vault-wide").onChange(async (v) => {
+              const scope: ObsidianScope = v ? "vault-wide" : "personal";
+              persist(effective.map((x) => (x.path === path ? { ...x, scope } : x)));
+              new Notice(`.obsidian/${path} ${v ? "shared vault-wide" : "kept personal"}.`);
+            }),
+          )
+          .addButton((b) =>
+b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
+              persist(effective.filter((x) => x.path !== path));
+            }),
+          );
       }
-      scopeSel.addEventListener("change", (e: Event) => {
-        const scope = (e.target as HTMLSelectElement).value as ObsidianEntryPolicy["scope"];
-        persist(currentEntries().map((x) => (x.path === entry.path ? { ...x, scope } : x)));
-      });
-      row.appendChild(scopeSel);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "mugs-link-btn";
-      removeBtn.textContent = "Remove";
-      removeBtn.addEventListener("click", () => persist(currentEntries().filter((x) => x.path !== entry.path)));
-      row.appendChild(removeBtn);
     }
 
-    const addWrap = rows.createDiv({ cls: "mugs-obsidian-add" });
+    // Add-entry field.
+    const addWrap = card.createDiv({ cls: "mugs-obsidian-add" });
     const input = document.createElement("input");
     input.type = "text";
     input.placeholder = "Add an .obsidian/ path (e.g. my-settings.json)";
@@ -416,7 +462,7 @@ export class MugsSettingTab extends PluginSettingTab {
     const add = (): void => {
       const p = input.value.trim();
       if (!p) return;
-      persist([...currentEntries(), { path: p, scope: "personal" }]);
+      persist([...effective, { path: p, scope: "personal" }]);
     };
     addBtn.addEventListener("click", add);
     input.addEventListener("keydown", (e: KeyboardEvent) => { if (e.key === "Enter") add(); });
@@ -424,63 +470,49 @@ export class MugsSettingTab extends PluginSettingTab {
     addWrap.appendChild(addBtn);
   }
 
-  /** Add-credential form: provider picker + label/username/token/base-url fields. */
+  /** Add-credential form as native Setting rows. */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = "gitlab";
     let label = "";
     let username = "";
     let token = "";
     let baseUrl = "";
-    // Explicitly-allowed repos (owner/repo per line). When non-empty, MUGS uses these
-    // directly instead of enumerating all projects — for project-scoped fine-grained tokens.
     let repos: string[] = [];
-    // Base URL is prefilled per backend (editable) so the correct API base shows
-    // by default while still allowing a self-hosted override.
     let baseUrlInput: HTMLInputElement | null = null;
+
     const setBaseUrlField = (value: string): void => {
       baseUrl = value;
       if (baseUrlInput) (baseUrlInput as HTMLInputElement).value = value;
     };
-    // Prefill the API base for a backend; blank for local. Kept in a function so
-    // the "local" comparison is not narrowed by control-flow analysis.
     const prefilledBaseUrl = (k: Credential["kind"]): string =>
       k === "local" ? "" : defaultBaseUrl(k);
 
-    const grid = document.createElement("div");
-    grid.className = "mugs-form-grid";
-
-    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
-      grid.appendChild(this.field(name, input));
-    };
-
-    addField("Provider", this.selectOption((v) => {
-      kind = v as Credential["kind"];
-      // Prefill the API base for the chosen backend; blank for local.
-      setBaseUrlField(prefilledBaseUrl(kind));
-    }, [
-      ["gitlab", "GitLab"],
-      ["github", "GitHub"],
-      ["bitbucket", "Bitbucket"],
-      ["gitea", "Gitea / Forgejo"],
-      ["local", "Local (existing clone)"],
-    ]));
-    addField("Label", this.text((v) => { label = v.trim(); }, "Label"));
-    addField("Username", this.text((v) => { username = v.trim(); }, "Username (optional)"));
-    addField("Token", this.password((v) => { token = v; }, "Token"));
+    new Setting(card).setName("Provider").setDesc("The backend this token authenticates against.").addField(
+      "",
+      this.selectOption((v) => {
+        kind = v as Credential["kind"];
+        setBaseUrlField(prefilledBaseUrl(kind));
+      }, [
+        ["gitlab", "GitLab"],
+        ["github", "GitHub"],
+        ["bitbucket", "Bitbucket"],
+        ["gitea", "Gitea / Forgejo"],
+        ["local", "Local (existing clone)"],
+      ]),
+    );
+    new Setting(card).setName("Label").setDesc("A friendly name for this credential.").addField("", this.text((v) => { label = v.trim(); }, "Label"));
+    new Setting(card).setName("Username").setDesc("Optional username (GitLab shows the acting user.").addField("", this.text((v) => { username = v.trim(); }, "Username (optional)"));
+    new Setting(card).setName("Token").setDesc("Your API token. Never shown in full; optionally encrypted at rest.").addField("", this.password((v) => { token = v; }, "Token"));
     const baseUrlInputEl = this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)");
     baseUrlInput = baseUrlInputEl;
-    addField("Base URL", baseUrlInputEl);
+    new Setting(card).setName("Base URL").setDesc("Self-hosted instance base URL (include /api/v4 if needed.").addField("", baseUrlInputEl);
 
-    // Prefill for the initial provider default (field reference captured above).
-    setBaseUrlField(prefilledBaseUrl(kind));
+    card.appendChild(this.scopeTextareaField(
+      "Allowed repositories (optional, owner/repo per line)",
+      (v) => { repos = parseGlobList(v); },
+    ));
 
-    // Optional explicit allowed repos, one "owner/repo" per line. Populates the
-    // mapping dropdown directly and skips global enumeration at sync time.
-    grid.appendChild(this.scopeTextareaField("Allowed repositories (optional, owner/repo per line)", (v) => {
-      repos = parseGlobList(v);
-    }));
-
-    grid.appendChild(this.actions([
+    card.appendChild(this.actions([
       {
         text: "Add credential",
         cta: true,
@@ -506,16 +538,15 @@ export class MugsSettingTab extends PluginSettingTab {
         },
       },
     ]));
-
-    card.appendChild(grid);
   }
 
   /**
-   * Add-mapping form. REST providers enumerate the user's repos and each repo's
-   * directory tree, so "Repository", "Remote path" and "Vault folder" are dropdowns
-   * (autofill) instead of free text. `local` has a single implicit clone, so its
-   * repo/path fields are inert hints. Selecting a repository stores its id as the
-   * mapping id — that is how the driver matches the mapping to a repo at sync time.
+   * Add-mapping form as native Setting rows. REST providers enumerate repos and each
+   * repo's directory tree, so "Repository", "Remote path" and "Vault folder" are
+   * dropdowns (autofill). Selecting a repository stores its id as the mapping id —
+   * that is how the driver matches the mapping to a repo at sync time. After a repo
+   * is selected, exact-name matches between remote and vault folders surface as
+   * one-click chips, and whole-vault mode reveals .trash/.obsidian dotfolder options.
    */
   private async addMappingForm(card: HTMLElement): Promise<void> {
     const creds = this.plugin.store.getSettings().credentials;
@@ -535,22 +566,18 @@ export class MugsSettingTab extends PluginSettingTab {
     let wholeVault = false;
     let trashSync = true;
     let detectedDirs: string[] = [];
+    let matches: FolderMatch[] = [];
 
-    const grid = document.createElement("div");
-    grid.className = "mugs-form-grid";
+    // Progressive-disclosure area: .trash toggle + auto-match chips.
+    const suggestionsEl = card.createDiv({ cls: "mugs-suggestions" });
 
-    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
-      grid.appendChild(this.field(name, input));
-    };
-
-    // --- Provider picker -------------------------------------------------
+    // --- Native Setting rows -------------------------------------------------
     const providerSel = this.selectOption((v) => {
       providerId = v;
       void refreshMappingDropdowns();
     }, creds.map((c) => [c.id, c.label] as [string, string]), creds.length === 0);
-    addField("Provider", providerSel);
+    new Setting(card).setName("Provider").setDesc("The backend this mapping syncs against.").addField("", providerSel);
 
-    // --- Repository picker (REST providers only) -------------------------
     const repoSel = document.createElement("select");
     repoSel.className = "mugs-dir-select";
     const addRepoOption = (value: string, text: string): void => {
@@ -559,54 +586,46 @@ export class MugsSettingTab extends PluginSettingTab {
       opt.textContent = text;
       repoSel.appendChild(opt);
     };
-    addField("Repository", repoSel);
+    new Setting(card).setName("Repository").setDesc("The repository to sync from.").addField("", repoSel);
 
-    // --- Remote-path directory dropdown (drill-down) ---------------------
     const remotePathSel = this.directorySelect(async (v) => {
       remotePath = v;
       await refreshRemoteDirs();
     });
-    addField("Remote path", remotePathSel);
+    new Setting(card).setName("Remote path").setDesc("A folder inside the repository ('' for the whole repo.).").addField("", remotePathSel);
 
-    // --- Vault-folder dropdown -------------------------------------------
     const vaultFolderSel = this.directorySelect((v) => { localFolder = v; });
-    addField("Vault folder", vaultFolderSel);
+    new Setting(card).setName("Vault folder").setDesc("The vault folder to sync into.").addField("", vaultFolderSel);
 
-    addField("Direction", this.selectOption((v) => { direction = v as SyncDirection; }, [
-      ["push-pull", "Push + pull"],
-      ["pull-only", "Pull only"],
-      ["push-only", "Push only"],
-    ]));
-    addField("Branch", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
+    new Setting(card).setName("Direction").setDesc("Which way changes flow.").addField(
+      "",
+      this.selectOption((v) => { direction = v as SyncDirection; }, [
+        ["push-pull", "Push + pull"],
+        ["pull-only", "Pull only"],
+        ["push-only", "Push only"],
+      ]),
+    );
+    new Setting(card).setName("Branch").setDesc("Optional branch to sync (defaults to the remote default branch.).").addField("", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
 
-    // Whole-vault scope: sync the entire repo to the vault root (.). Dotfolder toggles
-    // (.trash/.obsidian) appear in dotfolderBox once a REST repo is selected.
-    const dotfolderBox = document.createElement("div");
-    dotfolderBox.className = "mugs-dotfolders";
-    grid.appendChild(dotfolderBox);
+    new Setting(card).setName("Sync entire repository").setDesc("Map the whole repo root to the vault root ('.'). Dotfolder options (.trash/.obsidian) appear below.").addToggle((t) =>
+      t.setValue(wholeVault).onChange(async (v) => {
+        wholeVault = v;
+        repoSel.disabled = v;
+        remotePathSel.disabled = v;
+        vaultFolderSel.disabled = v;
+        if (v) localFolder = ".";
+        await refreshSuggestions();
+      }),
+    );
 
-    const scopeWrap = document.createElement("div");
-    scopeWrap.className = "mugs-field";
-    const vvInput = document.createElement("input");
-    vvInput.type = "checkbox";
-    const scopeLabel = document.createElement("label");
-    vvInput.addEventListener("change", (e: Event) => {
-      wholeVault = (e.target as HTMLInputElement).checked;
-      repoSel.disabled = wholeVault;
-      remotePathSel.disabled = wholeVault;
-      vaultFolderSel.disabled = wholeVault;
-      if (wholeVault) localFolder = ".";
-      renderDotfolderHints();
-    });
-    scopeLabel.appendChild(vvInput);
-    scopeLabel.appendChild(document.createTextNode(" Sync the entire repository to the vault root"));
-    scopeWrap.appendChild(scopeLabel);
-    grid.appendChild(scopeWrap);
-    // Scope scoping for this mapping (Area 1): include/exclude gitignore globs.
-    grid.appendChild(this.scopeTextareaField("Includes (optional)", (v) => { includesText = v; }));
-    grid.appendChild(this.scopeTextareaField("Excludes (optional)", (v) => { excludesText = v; }));
+    // Append the suggestions area after the core fields.
+    card.appendChild(suggestionsEl);
 
-    // --- Populate the dependent dropdowns for the current provider -------
+    // Includes / Excludes — collapsible manage panels.
+    card.appendChild(this.managePanel("Includes", includesText, (v) => { includesText = v; }, "Only these globs sync within the scope (optional). Leave empty for everything."));
+    card.appendChild(this.managePanel("Excludes", excludesText, (v) => { excludesText = v; }, "These globs never sync (gitignore-style; '!' re-includes)."));
+
+    // --- Dropdown population + suggestion refresh ---------------------------
     const isRest = (): boolean => {
       const cred = creds.find((c) => c.id === providerId);
       return !!cred && cred.kind !== "local";
@@ -623,6 +642,7 @@ export class MugsSettingTab extends PluginSettingTab {
         repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
         remotePathSel.innerHTML = '<option value="">(whole clone)</option>';
         await this.populateVaultFolders(vaultFolderSel, localFolder);
+        void refreshSuggestions();
         return;
       }
       const cred = creds.find((c) => c.id === providerId);
@@ -654,7 +674,7 @@ export class MugsSettingTab extends PluginSettingTab {
         repoKey = first.pathWithNamespace;
         repoSel.value = first.id;
         await refreshRemoteDirs();
-        void detectDotfolders();
+        void refreshSuggestions();
       } catch (e) {
         new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
         repoSel.disabled = true;
@@ -671,35 +691,64 @@ export class MugsSettingTab extends PluginSettingTab {
       for (const d of dirs) opts.push([`${remotePath ? `${remotePath}/` : ""}${d}`, d]);
       this.fillDirectorySelect(remotePathSel, remotePath, opts, remotePath ? "← repository root" : "(repository root)");
     };
-    // Detect top-level dotfolders (.trash/.obsidian) in the chosen repo to surface
-    // in-context toggles (progressive disclosure). Best-effort; failures degrade to none.
-    const detectDotfolders = async (): Promise<void> => {
-      if (!isRest() || !repoKey) { detectedDirs = []; renderDotfolderHints(); return; }
+    // Detect top-level dotfolders (.trash/.obsidian) and compute name matches in the
+    // chosen repo to surface in-context toggles/chips (progressive disclosure).
+    const refreshSuggestions = async (): Promise<void> => {
+      if (!isRest() || !repoKey) { detectedDirs = []; matches = []; renderSuggestions(); return; }
       const cred = creds.find((c) => c.id === providerId);
-      if (!cred) { detectedDirs = []; renderDotfolderHints(); return; }
+      if (!cred) { detectedDirs = []; matches = []; renderSuggestions(); return; }
       detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
-      renderDotfolderHints();
+      const vaultTop = await this.listVaultFolders();
+      matches = matchFolderPairs(detectedDirs, vaultTop);
+      renderSuggestions();
     };
-    const renderDotfolderHints = (): void => {
-      dotfolderBox.innerHTML = "";
-      if (!wholeVault || !isRest() || !repoKey) return;
-      const trashPresent = detectedDirs.includes(".trash");
-      const obsidianPresent = detectedDirs.includes(".obsidian");
-      if (trashPresent) {
-        const row = document.createElement("label");
-        row.className = "mugs-dotfolder-toggle";
-        const tInput = document.createElement("input");
-        tInput.type = "checkbox";
-        tInput.checked = trashSync;
-        tInput.addEventListener("change", (e: Event) => { trashSync = (e.target as HTMLInputElement).checked; });
-        row.appendChild(tInput);
-        row.appendChild(document.createTextNode(" Sync the repository's .trash/ folder"));
-        dotfolderBox.appendChild(row);
+    const renderSuggestions = (): void => {
+      suggestionsEl.innerHTML = "";
+      // .trash toggle (whole-vault + REST repo) — mirrors Obsidian Sync dotfolder UX.
+      if (wholeVault && isRest() && repoKey) {
+        const trashPresent = detectedDirs.includes(".trash");
+        const obsidianPresent = detectedDirs.includes(".obsidian");
+        const box = suggestionsEl.createDiv({ cls: "mugs-dotfolders" });
+        if (trashPresent) {
+          const row = document.createElement("label");
+          row.className = "mugs-dotfolder-toggle";
+          const tInput = document.createElement("input");
+          tInput.type = "checkbox";
+          tInput.checked = trashSync;
+          tInput.addEventListener("change", (e: Event) => { trashSync = (e.target as HTMLInputElement).checked; });
+          row.appendChild(tInput);
+          row.appendChild(document.createTextNode(" Sync the repository's .trash/ folder"));
+          box.appendChild(row);
+        }
+        const p = box.createEl("p", { cls: "mags-muted" });
+        if (obsidianPresent) p.textContent = "This repo has an .obsidian/ folder — configure which settings to share in the 'Obsidian Config Sync' section below.";
+        else if (!trashPresent) p.textContent = "No .trash/ or .obsidian/ folder found in this repo.";
       }
-      const p = dotfolderBox.createEl("p", { cls: "mags-muted" });
-      if (obsidianPresent) p.textContent = "This repo has an .obsidian/ folder — configure which settings to share in the 'Obsidian Config Sync' section below.";
-      else if (!trashPresent) p.textContent = "No .trash/ or .obsidian/ folder found in this repo.";
+      // Auto-match chips.
+      if (matches.length > 0) {
+        const head = suggestionsEl.createEl("div", { cls: "mugs-suggestions-head" });
+        head.textContent = "Matched folders — click to map";
+        for (const m of matches) {
+          const chip = suggestionsEl.createEl("button", { cls: "mugs-match-chip", type: "button" });
+          chip.textContent = `${m.remotePath} → ${m.localFolder}`;
+          chip.addEventListener("click", () => {
+            label = m.label;
+            remotePath = m.remotePath;
+            localFolder = m.localFolder;
+            direction = "push-pull";
+            vaultFolderSel.value = m.localFolder;
+            if (wholeVault) {
+              remotePathSel.value = "";
+            } else {
+for (const opt of Array.from(remotePathSel.options)) {
+                if (opt.value === m.remotePath) { remotePathSel.value = m.remotePath; break; }
+              }
+            }
+          });
+        }
+      }
     };
+
     repoSel.addEventListener("change", (e: Event) => {
       const chosen = reposCache.find((r) => r.id === (e.target as HTMLSelectElement).value);
       if (!chosen) return;
@@ -707,10 +756,10 @@ export class MugsSettingTab extends PluginSettingTab {
       repoKey = chosen.pathWithNamespace;
       remotePath = "";
       void refreshRemoteDirs();
-      void detectDotfolders();
+      void refreshSuggestions();
     });
 
-    grid.appendChild(this.actions([
+    card.appendChild(this.actions([
       {
         text: "Add mapping",
         cta: true,
@@ -745,21 +794,7 @@ export class MugsSettingTab extends PluginSettingTab {
       },
     ]));
 
-    card.appendChild(grid);
     void refreshMappingDropdowns();
-  }
-
-  /** Create a labeled form-field wrapper (label + native input styled by Obsidian). */
-  private field(label: string, input: HTMLInputElement | HTMLSelectElement): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "mugs-field";
-    if (label) {
-      const lbl = document.createElement("label");
-      lbl.textContent = label;
-      wrap.appendChild(lbl);
-    }
-    wrap.appendChild(input);
-    return wrap;
   }
 
   /** Create a native <select> wired to an onChange callback. */

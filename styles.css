@@ -487,48 +487,145 @@
   width: auto;
 }
 
-/* Obsidian per-entry selector */
-.mugs-obsidian-entries {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
+/* --- Settings: folder-mapping cards -------------------------------------- */
 
-.mugs-obsidian-entry {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
+.mugs-mapping {
   border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
+  border-radius: 8px;
+  padding: 6px 6px 4px;
+  margin-bottom: 12px;
   background: var(--background-secondary);
 }
 
-.mugs-obsidian-name {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Manage (include/exclude) collapsible panels — Obsidian Sync "Manage" pattern */
+.mugs-manage {
+  margin: 4px 2px 6px;
 }
 
-.mugs-obsidian-entry select {
-  width: auto;
-  min-width: 128px;
+.mugs-manage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.mugs-manage-title {
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.mugs-manage-btn {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.mugs-manage-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-accent);
+}
+
+.mugs-manage-panel {
+  margin-top: 6px;
+}
+
+.mugs-manage-panel.is-collapsed {
+  display: none;
+}
+
+/* --- Settings: Obsidian config grouped toggles --------------------------- */
+
+.mugs-obsidian-group-head {
+  margin: 14px 0 6px;
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mugs-obsidian-group-head:first-child {
+  margin-top: 6px;
 }
 
 .mugs-obsidian-add {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 12px;
 }
 
 .mugs-obsidian-add input {
   flex: 1;
+  min-width: 0;
+}
+
+/* --- Settings: whole-vault suggestions (dotfolder + auto-match) ---------- */
+
+.mugs-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.mugs-dotfolders {
+  padding: 10px 12px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-dotfolders > p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+}
+
+.mugs-dotfolder-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-normal);
+}
+
+.mugs-dotfolder-toggle input {
+  width: auto;
+}
+
+.mugs-suggestions-head {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+/* One-click auto-match chips */
+.mugs-match-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #ffffff);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.mugs-match-chip:hover {
+  filter: brightness(1.08);
+}
+
+/* Autofill directory selects */
+.mugs-dir-select {
+  width: 100%;
   min-width: 0;
 }
 
