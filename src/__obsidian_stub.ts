@@ -9,11 +9,14 @@ export class Notice {
   setMessage(_message: string): this { return this; }
 }
 
-/** Chainable stub of Obsidian's Setting builder — every method returns `this`. */
+/** Chainable stub of Obsidian's Setting builder — every method returns `this`.
+ *  setName/setDesc render into the container (label + description nodes) so DOM-
+ *  dependent modules can be asserted on, mirroring real Obsidian behaviour. */
 export class Setting {
-  constructor(_containerEl: HTMLElement) {}
-  setName(name: string): this { return this; }
-  setDesc(desc: string): this { return this; }
+  private el: HTMLElement;
+  constructor(containerEl: HTMLElement) { this.el = containerEl; }
+  setName(name: string): this { const d = this.el.createDiv(); d.textContent = String(name); return this; }
+  setDesc(desc: string): this { const d = this.el.createDiv({ cls: "setting-desc" }); d.textContent = String(desc); return this; }
   addExtraButton(cb: (button: any) => void): this { return this; }
   addText(cb: (text: any) => void): this { return this; }
   addTextArea(cb: (text: any) => void): this { return this; }
@@ -23,6 +26,22 @@ export class Setting {
   addColorPicker(cb: (picker: any) => void): this { return this; }
   addField(_label: string, _input: HTMLElement): this { return this; }
   setClass(_cls: string): this { return this; }
+}
+
+/** Minimal base-class stub of Obsidian's ItemView — provides contentEl + the
+ *  view lifecycle hooks the MUGS views override. Kept so diff/map/review views can
+ *  be driven under vitest via the resolve alias. */
+export class ItemView {
+  app: any;
+  workspace: any;
+  contentEl: HTMLElement;
+  constructor(_leaf?: any) { this.contentEl = document.createElement("div"); }
+  getViewType(): string { return ""; }
+  getDisplayText(): string { return ""; }
+  getIcon(): string { return ""; }
+  addAction(_name: string, _title: string, _cb?: () => void): any { return {}; }
+  onOpen(): Promise<void> { return Promise.resolve(); }
+  onClose(): Promise<void> { return Promise.resolve(); }
 }
 
 /** Base class stub mirroring the parts PluginSettingTab relies on. */

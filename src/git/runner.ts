@@ -20,12 +20,21 @@ export class ChildProcessRunner implements GitRunner {
         args,
         opts?.cwd ? { cwd: opts.cwd } : undefined,
         (err, stdout, stderr) => {
+          const out = stdout.toString();
+          const errText = stderr.toString();
           if (err) {
-            // Spawn failure (e.g. git not installed): surface a non-zero code.
-            const code = typeof err.code === "number" ? err.code : 127;
-            return resolve({ code, stdout: "", stderr: `${this.bin} could not run: ${err.message}` });
+            // A real non-zero exit carries a numeric code AND populated streams; preserve
+            // them so callers can inspect `code` and output (e.g. git merge-base --is-ancestor
+            // exits 1 when the ancestry claim is false). Discarding stdout/stderr here was a
+            // latent bug: any command that emits output before exiting non-zero lost it.
+            if (typeof err.code === "number") {
+              resolve({ code: err.code, stdout: out, stderr: errText });
+              return;
+            }
+            // Spawn-level failure (binary missing/unexecutable): no output was produced.
+            return resolve({ code: 127, stdout: "", stderr: `${this.bin} could not run: ${err.message}` });
           }
-          resolve({ code: 0, stdout: stdout.toString(), stderr: stderr.toString() });
+          resolve({ code: 0, stdout: out, stderr: errText });
         },
       );
     });
