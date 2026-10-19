@@ -306,10 +306,11 @@ export class MugsSettingTab extends PluginSettingTab {
 
   /** Wrap children in a single grouped settings card. */
   private section(containerEl: HTMLElement, body: (card: HTMLElement) => void): void {
-    const card = document.createElement("div");
-    card.className = "mugs-section";
+    // Build the card with Obsidian's native createDiv so it is guaranteed to expose
+    // createEl/createDiv/etc. In Obsidian 1.14.x a raw document.createElement("div")
+    // element does not reliably inherit those helpers, which left every section blank.
+    const card = containerEl.createDiv({ cls: "mugs-section" });
     body(card);
-    containerEl.appendChild(card);
   }
 
   /** Human-readable direction label for a mapping. */
