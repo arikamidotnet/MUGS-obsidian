@@ -55,4 +55,13 @@ export class PluginSettingTab {
     this.containerEl = document.createElement("div");
   }
   hide(): void {}
+  /** Mirror Obsidian 1.13+: the base reads this.plugin.settings and returns a
+   *  declarative definition set. MUGS stores settings in plugin.store, so with no
+   *  plugin.settings present it still yields a non-empty scaffold — which is exactly
+   *  what makes Obsidian render declaratively and skip display() (the blank-settings bug). */
+  getSettingDefinitions(): any[] {
+    const s = this.plugin && this.plugin.settings;
+    if (!s) return [{ name: "MUGS (declarative fallback)" }];
+    return Object.keys(s).map((k: string) => ({ name: k }));
+  }
 }

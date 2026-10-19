@@ -207,3 +207,58 @@ describe("MugsSettingTab — display() renders every section (blank-UI regressio
     expect(text).toContain("global.css");
   });
 });
+
+/**
+ * Reproduce + guard the Obsidian 1.13+ blank-settings bug. The framework calls
+ * getSettingDefinitions(); when it returns a non-empty array the tab is rendered
+ * declaratively and display() is skipped. MUGS stores settings in plugin.store, so
+ * without an override the base getSettingDefinitions() yields a scaffold → display()
+ * never runs → blank pane ("no UI except hint"). The fix overrides it to return [].
+ */
+function obsidianOpenTab(tab: MugsSettingTab): { path: string; text: string } {
+  const defs = tab.getSettingDefinitions();
+  if (defs.length > 0) {
+    // Obsidian renders declaratively and does NOT call display().
+    return { path: "declarative", text: collectText(tab.containerEl) };
+  }
+  tab.display();
+  return { path: "display", text: collectText(tab.containerEl) };
+}
+
+describe("MugsSettingTab — Obsidian 1.13+ declarative API (blank-settings guard)", () => {
+  const sections = [
+    "Getting Started",
+    "Credentials & Providers",
+    "Folder Mappings",
+    "Security & Credentials",
+    "Automatic Conflict Resolution",
+    "Sync Frequency & Maintenance",
+    "Obsidian Config Sync",
+    "About",
+  ];
+
+  it("returns empty definitions so Obsidian falls back to display()", () => {
+    const tab = new MugsSettingTab(makePlugin());
+    expect(tab.getSettingDefinitions()).toEqual([]);
+  });
+
+  it("renders the full pane via display() even with no plugin.settings (1.13 base behavior)", async () => {
+    // makePlugin has no .settings — the real base getSettingDefinitions() would yield a
+    // non-empty scaffold and skip display(); our override forces [] so display() runs.
+    const tab = new MugsSettingTab(makePlugin());
+    const { path, text } = obsidianOpenTab(tab);
+    await flush();
+    expect(path, "display() must be the render path").toBe("display");
+    for (const h of sections) expect(text, `missing section: ${h}`).toContain(h);
+  });
+
+  it("would have been blank under the pre-fix base behavior", () => {
+    // Sanity check on the harness: a tab whose getSettingDefinitions() returns a
+    // non-empty array is treated as declarative and display() is skipped (blank).
+    const tab = new MugsSettingTab(makePlugin());
+    (tab as any).getSettingDefinitions = () => [{ name: "x" }];
+    const { path, text } = obsidianOpenTab(tab);
+    expect(path).toBe("declarative");
+    expect(text).not.toContain("Getting Started");
+  });
+});

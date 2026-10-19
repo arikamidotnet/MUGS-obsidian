@@ -6,7 +6,7 @@
  * reusable logic lives in pure modules (sync/folderMatch.ts, sync/obsidianCategories.ts)
  * so this file stays thin and never runs in unit tests (it imports the Obsidian DOM API).
  */
-import { PluginSettingTab, Setting, Notice } from "obsidian";
+import { PluginSettingTab, Setting, Notice, type SettingDefinitionItem } from "obsidian";
 import type MugsPlugin from "./main";
 import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping } from "./types";
 import type { RepoSummary } from "./providers/types";
@@ -65,6 +65,19 @@ function maskToken(token: string): string {
 export class MugsSettingTab extends PluginSettingTab {
   constructor(private plugin: MugsPlugin) {
     super(plugin.app, plugin);
+  }
+
+  /**
+   * Force Obsidian's legacy display() path on the declarative settings API added in
+   * 1.13.0. The base PluginSettingTab.getSettingDefinitions() reads this.plugin.settings
+   * and, when it returns a non-empty array, makes Obsidian render the tab declaratively
+   * and SKIP display() — blanking our custom UI (MUGS stores settings in plugin.store,
+   * not plugin.settings). Returning an empty array makes every supported Obsidian build
+   * fall back to display(), which renders this pane. Builds older than 1.13 never call
+   * getSettingDefinitions(), so this override is a no-op there.
+   */
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [];
   }
 
   display(): void {
