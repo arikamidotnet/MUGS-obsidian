@@ -84,8 +84,8 @@ export class MugsSettingTab extends PluginSettingTab {
     try {
       this._renderAll();
     } catch (e) {
-      // TEMP DIAGNOSTIC — surface the real runtime error into the settings pane so we
-      // can see exactly what throws on this Obsidian build. Remove after diagnosis.
+      // TEMP DIAGNOSTIC — surface any render error inline so we can confirm the fix
+      // without devtools. Remove once rendering is verified working end-to-end.
       const box = this.containerEl.createDiv({ cls: "mugs-section" });
       box.createEl("h3", { text: "MUGS SETTINGS ERROR" });
       box.createEl("p", { text: String((e as Error)?.stack || e) });
@@ -196,29 +196,14 @@ export class MugsSettingTab extends PluginSettingTab {
           }),
         );
 
-      new Setting(card)
-        .setName("Tie-break for unresolved hunks")
-        .setDesc('When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").')
-        .addField(
-          "",
-          this.selectOption(
-            (v) => {
-              this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
-              void this.plugin.store.save();
-            },
-            [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]],
-          ),
-        );
-
-      new Setting(card)
-        .setName("Auto-accept identical changes")
-        .setDesc("When both sides made the same change, resolve automatically (jj same-change rule).")
-        .addToggle((t) =>
-          t.setValue(sync.sameChangeAccept).onChange(async (v) => {
-            this.plugin.store.setSync({ sameChangeAccept: v });
-            await this.plugin.store.save();
-          }),
-        );
+      card.appendChild(this.field(
+        "Tie-break for unresolved hunks",
+        this.selectOption((v) => {
+          this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
+          void this.plugin.store.save();
+        }, [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]),
+        'When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").',
+      ));
 
       new Setting(card)
         .setName("Resolve by most recent save")
@@ -240,19 +225,14 @@ export class MugsSettingTab extends PluginSettingTab {
       });
 
       const sync = this.plugin.store.getSettings().sync;
-      new Setting(card)
-        .setName("Polling interval")
-        .setDesc("How often to check the remote when the vault is idle. Local edits still propagate immediately via event triggers.")
-        .addField(
-          "",
-          this.selectOption(
-            (v) => {
-              this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
-              void this.plugin.store.save();
-            },
-            INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>,
-          ),
-        );
+      card.appendChild(this.field(
+        "Polling interval",
+        this.selectOption((v) => {
+          this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
+          void this.plugin.store.save();
+        }, INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>),
+        "How often to check the remote when the vault is idle. Local edits still propagate immediately via event triggers.",
+      ));
 
       new Setting(card)
         .setName("Pause vault sync")
@@ -496,8 +476,28 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     addWrap.appendChild(input);
     addWrap.appendChild(addBtn);
   }
+  /** Build a labelled native field row (input + optional description). Mirrors the
+   *  pre-0.3.x credential form, which built fields natively instead of relying on the
+   *  fluent `Setting().addField()` chain that breaks on this Obsidian build. */
+  private field(label: string, input: HTMLInputElement | HTMLSelectElement, desc?: string): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "mugs-field";
+    if (label) {
+      const lbl = document.createElement("label");
+      lbl.textContent = label;
+      wrap.appendChild(lbl);
+    }
+    if (desc) {
+      const d = document.createElement("div");
+      d.className = "mags-muted";
+      d.textContent = desc;
+      wrap.appendChild(d);
+    }
+    wrap.appendChild(input);
+    return wrap;
+  }
 
-  /** Add-credential form as native Setting rows. */
+  /** Add-credential form built with native labelled field rows (no fluent Setting chain). */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = "gitlab";
     let label = "";
@@ -514,8 +514,14 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     const prefilledBaseUrl = (k: Credential["kind"]): string =>
       k === "local" ? "" : defaultBaseUrl(k);
 
-    new Setting(card).setName("Provider").setDesc("The backend this token authenticates against.").addField(
-      "",
+    const grid = document.createElement("div");
+    grid.className = "mugs-form-grid";
+    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
+      grid.appendChild(this.field(name, input));
+    };
+
+    addField(
+      "Provider",
       this.selectOption((v) => {
         kind = v as Credential["kind"];
         setBaseUrlField(prefilledBaseUrl(kind));
@@ -527,17 +533,19 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         ["local", "Local (existing clone)"],
       ]),
     );
-    new Setting(card).setName("Label").setDesc("A friendly name for this credential.").addField("", this.text((v) => { label = v.trim(); }, "Label"));
-    new Setting(card).setName("Username").setDesc("Optional username (GitLab shows the acting user.").addField("", this.text((v) => { username = v.trim(); }, "Username (optional)"));
-    new Setting(card).setName("Token").setDesc("Your API token. Never shown in full; optionally encrypted at rest.").addField("", this.password((v) => { token = v; }, "Token"));
+    addField("Label", this.text((v) => { label = v.trim(); }, "Label"));
+    addField("Username", this.text((v) => { username = v.trim(); }, "Username (optional)"));
+    addField("Token", this.password((v) => { token = v; }, "Token"));
     const baseUrlInputEl = this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)");
     baseUrlInput = baseUrlInputEl;
-    new Setting(card).setName("Base URL").setDesc("Self-hosted instance base URL (include /api/v4 if needed.").addField("", baseUrlInputEl);
+    addField("Base URL", baseUrlInputEl);
 
-    card.appendChild(this.scopeTextareaField(
+    grid.appendChild(this.scopeTextareaField(
       "Allowed repositories (optional, owner/repo per line)",
       (v) => { repos = parseGlobList(v); },
     ));
+
+    card.appendChild(grid);
 
     card.appendChild(this.actions([
       {
@@ -568,7 +576,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
   }
 
   /**
-   * Add-mapping form as native Setting rows. REST providers enumerate repos and each
+   * Add-mapping form built with native labelled field rows (no fluent Setting chain). REST providers enumerate repos and each
    * repo's directory tree, so "Repository", "Remote path" and "Vault folder" are
    * dropdowns (autofill). Selecting a repository stores its id as the mapping id —
    * that is how the driver matches the mapping to a repo at sync time. After a repo
@@ -595,15 +603,16 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let detectedDirs: string[] = [];
     let matches: FolderMatch[] = [];
 
-    // Progressive-disclosure area: .trash toggle + auto-match chips.
-    const suggestionsEl = card.createDiv({ cls: "mugs-suggestions" });
-
-    // --- Native Setting rows -------------------------------------------------
+    const grid = document.createElement("div");
+    grid.className = "mugs-form-grid";
+    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
+      grid.appendChild(this.field(name, input));
+    };
     const providerSel = this.selectOption((v) => {
       providerId = v;
       void refreshMappingDropdowns();
     }, creds.map((c) => [c.id, c.label] as [string, string]), creds.length === 0);
-    new Setting(card).setName("Provider").setDesc("The backend this mapping syncs against.").addField("", providerSel);
+    addField("Provider", providerSel);
 
     const repoSel = document.createElement("select");
     repoSel.className = "mugs-dir-select";
@@ -613,37 +622,43 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       opt.textContent = text;
       repoSel.appendChild(opt);
     };
-    new Setting(card).setName("Repository").setDesc("The repository to sync from.").addField("", repoSel);
+    addField("Repository", repoSel);
 
     const remotePathSel = this.directorySelect(async (v) => {
       remotePath = v;
       await refreshRemoteDirs();
     });
-    new Setting(card).setName("Remote path").setDesc("A folder inside the repository ('' for the whole repo.).").addField("", remotePathSel);
+    addField("Remote path", remotePathSel);
 
     const vaultFolderSel = this.directorySelect((v) => { localFolder = v; });
-    new Setting(card).setName("Vault folder").setDesc("The vault folder to sync into.").addField("", vaultFolderSel);
+    addField("Vault folder", vaultFolderSel);
 
-    new Setting(card).setName("Direction").setDesc("Which way changes flow.").addField(
-      "",
+    addField(
+      "Direction",
       this.selectOption((v) => { direction = v as SyncDirection; }, [
         ["push-pull", "Push + pull"],
         ["pull-only", "Pull only"],
         ["push-only", "Push only"],
       ]),
     );
-    new Setting(card).setName("Branch").setDesc("Optional branch to sync (defaults to the remote default branch.).").addField("", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
+    addField("Branch", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
+    // Sync entire repository — native checkbox. Whole-vault mode disables the
+    // repo/remote/vault selects and maps the whole repo root to ".".
+    const wholeVaultInput = document.createElement("input");
+    wholeVaultInput.type = "checkbox";
+    wholeVaultInput.addEventListener("change", (e: Event) => {
+      wholeVault = (e.target as HTMLInputElement).checked;
+      repoSel.disabled = wholeVault;
+      remotePathSel.disabled = wholeVault;
+      vaultFolderSel.disabled = wholeVault;
+      if (wholeVault) localFolder = ".";
+      void refreshSuggestions();
+    });
+    grid.appendChild(this.field("Sync entire repository", wholeVaultInput));
+    card.appendChild(grid);
 
-    new Setting(card).setName("Sync entire repository").setDesc("Map the whole repo root to the vault root ('.'). Dotfolder options (.trash/.obsidian) appear below.").addToggle((t) =>
-      t.setValue(wholeVault).onChange(async (v) => {
-        wholeVault = v;
-        repoSel.disabled = v;
-        remotePathSel.disabled = v;
-        vaultFolderSel.disabled = v;
-        if (v) localFolder = ".";
-        await refreshSuggestions();
-      }),
-    );
+    // Progressive-disclosure area: .trash toggle + auto-match chips.
+    const suggestionsEl = card.createDiv({ cls: "mugs-suggestions" });
 
     // Append the suggestions area after the core fields.
     card.appendChild(suggestionsEl);
