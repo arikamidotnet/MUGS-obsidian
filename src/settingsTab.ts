@@ -81,6 +81,18 @@ export class MugsSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    try {
+      this._renderAll();
+    } catch (e) {
+      // TEMP DIAGNOSTIC — surface the real runtime error into the settings pane so we
+      // can see exactly what throws on this Obsidian build. Remove after diagnosis.
+      const box = this.containerEl.createDiv({ cls: "mugs-section" });
+      box.createEl("h3", { text: "MUGS SETTINGS ERROR" });
+      box.createEl("p", { text: String((e as Error)?.stack || e) });
+    }
+  }
+
+  private _renderAll(): void {
     const { containerEl } = this;
     containerEl.empty();
 
@@ -107,7 +119,7 @@ export class MugsSettingTab extends PluginSettingTab {
               b.setButtonText("Delete").onClick(() => {
                 this.plugin.store.removeCredential(c.id);
                 void this.plugin.store.save();
-                this.display();
+                this._renderAll();
               }),
             );
         }
@@ -275,7 +287,7 @@ export class MugsSettingTab extends PluginSettingTab {
               this.plugin.store.setObsidianConfigEnabled(v);
               await this.plugin.store.save();
               new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
-              this.display();
+              this._renderAll();
             }),
         );
 
@@ -344,7 +356,7 @@ export class MugsSettingTab extends PluginSettingTab {
           b.setButtonText("Delete").onClick(() => {
             this.plugin.store.removeMapping(m.id);
             void this.plugin.store.save();
-            this.display();
+            this._renderAll();
           }),
         );
 
@@ -370,7 +382,7 @@ export class MugsSettingTab extends PluginSettingTab {
             t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
               this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
               await this.plugin.store.save();
-              this.display();
+              this._renderAll();
             }),
           );
       }
@@ -546,7 +558,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             });
             await this.plugin.store.save();
             new Notice(`MUGS: credential "${label}" saved.`);
-            this.display();
+            this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
           }
@@ -800,7 +812,7 @@ for (const opt of Array.from(remotePathSel.options)) {
             });
             await this.plugin.store.save();
             new Notice(`MUGS: mapping "${label}" saved.`);
-            this.display();
+            this._renderAll();
           } catch (e) {
             // upsertMapping throws for folders under .obsidian/.
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);
