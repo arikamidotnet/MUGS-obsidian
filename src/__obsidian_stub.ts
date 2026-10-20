@@ -44,7 +44,34 @@ export class ItemView {
   onClose(): Promise<void> { return Promise.resolve(); }
 }
 
-/** Base class stub mirroring the parts PluginSettingTab relies on. */
+/** Framework-wrapped element with Obsidian's DOM helpers (createDiv/createEl/etc.).
+ *  Mirrors how the real framework provides containerEl — unlike a bare
+ *  document.createElement("div") from user code, which lacks these helpers. */
+class El {
+  tagName: string;
+  textContent = "";
+  children: unknown[] = [];
+  _classes = new Set<string>();
+  options: unknown[] = [];
+  value = "";
+  placeholder = "";
+  rows = 0;
+  type = "";
+  checked = false;
+  disabled = false;
+  innerHTML = "";
+  style: Record<string, string> = {};
+  constructor(tag: string) { this.tagName = tag.toLowerCase(); }
+  get className() { return [...this._classes].join(" "); }
+  set className(v: string) { this._classes = new Set(v.split(/\s+/).filter(Boolean)); }
+  createDiv(opts?: { cls?: string }) { const e = new El("div"); if (opts?.cls) e.className = opts.cls; this.children.push(e); return e; }
+  createEl(tag: string, opts?: { text?: string; cls?: string; type?: string }) { const e = new El(tag); if (opts?.text != null) e.textContent = opts.text; if (opts?.cls) e.className = opts.cls; if (opts?.type) e.type = opts.type; this.children.push(e); return e; }
+  appendChild(child: unknown) { this.children.push(child); if ((child as { tagName?: string }).tagName === "option" && Array.isArray(this.options)) this.options.push(child); return child; }
+  remove() {}
+  empty() { this.children = []; }
+  addEventListener() {}
+  get classList() { const set = this._classes; return { toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)), contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) }; }
+}
 export class PluginSettingTab {
   app: any;
   plugin: any;
@@ -52,7 +79,7 @@ export class PluginSettingTab {
   constructor(app: any, plugin: any) {
     this.app = app;
     this.plugin = plugin;
-    this.containerEl = document.createElement("div");
+    this.containerEl = new El("div") as unknown as HTMLElement; // test seam: known DOM element shape
   }
   hide(): void {}
   /** Mirror Obsidian 1.13+: the base reads this.plugin.settings and returns a

@@ -77,7 +77,37 @@ const { document } = vi.hoisted(() => {
     }
   }
 
-  const document = { createElement: (tag: string) => new El(tag) };
+    // Real Obsidian 1.14.x: document.createElement returns a raw element WITHOUT
+    // the createEl/createDiv/classList helpers that container.createDiv() provides.
+    // Reproduce that so a section rebuilt with raw createElement throws when body()
+    // calls card.createEl(...) — exactly what blanked the UI in v0.3.5/v0.3.7.
+    class RawEl {
+      tagName: string;
+      children: El[] = [];
+      handlers: Record<string, ((e: unknown) => void)[]> = {};
+      _classes = new Set<string>();
+      options: El[] = [];
+      textContent = "";
+      value = "";
+      placeholder = "";
+      rows = 0;
+      type = "";
+      checked = false;
+      disabled = false;
+      innerHTML = "";
+      style: Record<string, string> = {};
+      constructor(tag: string) { this.tagName = tag.toLowerCase(); }
+      set className(v: string) { this._classes = new Set(v.split(/\s+/).filter(Boolean)); }
+      get classList() {
+        const set = this._classes;
+        return { toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)), contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) };
+      }
+      remove() {}
+      empty() { this.children = []; }
+      appendChild(child: El) { this.children.push(child); if (child.tagName === "option" && Array.isArray(this.options)) this.options.push(child); return child; }
+      addEventListener(type: string, cb: (e: unknown) => void) { (this.handlers[type] ??= []).push(cb); }
+    }
+    const document = { createElement: (tag: string) => new RawEl(tag) };
   return { document };
 });
 (globalThis as any).document = document;
