@@ -150,7 +150,7 @@ function makePlugin() {
   return {
     store,
     app: { vault: { adapter: { list: async () => ({ folders: [] }) } } },
-    manifest: { version: "0.3.5" },
+    manifest: { version: "0.3.8" },
   } as any;
 }
 
