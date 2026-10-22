@@ -22,16 +22,8 @@ import { matchFolderPairs, type FolderMatch } from "./sync/folderMatch";
 // Plugin.addStyleTag in main.ts).
 declare module "obsidian" {
   interface Setting {
-    addSelect(callback: (component: MugsSelectComponent) => void): this;
     addField(label: string, input: HTMLElement): this;
   }
-}
-
-/** Minimal chainable select-builder shape matching Obsidian's SelectComponent. */
-interface MugsSelectComponent {
-  addOption(value: string, displayText?: string): MugsSelectComponent;
-  setValue(value: unknown): MugsSelectComponent;
-  onChange(cb: (value: string) => void | Promise<void>): MugsSelectComponent;
 }
 
 /** Generate a stable id for new credentials/mappings. */
@@ -81,15 +73,7 @@ export class MugsSettingTab extends PluginSettingTab {
   }
 
   display(): void {
-    try {
-      this._renderAll();
-    } catch (e) {
-      // TEMP DIAGNOSTIC — surface any render error inline so we can confirm the fix
-      // without devtools. Remove once rendering is verified working end-to-end.
-      const box = this.containerEl.createDiv({ cls: "mugs-section" });
-      box.createEl("h3", { text: "MUGS SETTINGS ERROR" });
-      box.createEl("p", { text: String((e as Error)?.stack || e) });
-    }
+    this._renderAll();
   }
 
   private _renderAll(): void {
@@ -177,43 +161,47 @@ export class MugsSettingTab extends PluginSettingTab {
         );
     });
 
-    // --- Automatic conflict resolution (Area 2) ---------------------------
+    // --- Automatic conflict resolution (Area 3/4) -------------------------
     this.section(containerEl, (card) => {
       card.createEl("h3", { text: "Automatic Conflict Resolution" });
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "How MUGS resolves divergent files automatically. Every choice is reversible via git history and the .mugs-trash.",
+        text: "When both sides edited the same lines, decide how MUGS merges them automatically.",
       });
 
       const sync = this.plugin.store.getSettings().sync;
       new Setting(card)
-        .setName("Auto-merge clean divergences")
-        .setDesc("3-way merge every divergence and apply results without prompting.")
-        .addToggle((t) =>
+        .setName("Auto-merge when no conflict")
+        .setDesc("Combine edits from both sides into one file whenever they don't touch the same lines.")
+        .addToggle((t) => {
           t.setValue(sync.autoMerge).onChange(async (v) => {
             this.plugin.store.setSync({ autoMerge: v });
             await this.plugin.store.save();
-          }),
-        );
-
-      card.appendChild(this.field(
-        "Tie-break for unresolved hunks",
-        this.selectOption((v) => {
-          this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
-          void this.plugin.store.save();
-        }, [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]),
-        'When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").',
-      ));
+          });
+        });
 
       new Setting(card)
-        .setName("Resolve by most recent save")
-        .setDesc("For a genuine conflict where both sides carry timestamps, keep the more-recently-saved side; otherwise fall back to the tie-break above.")
-        .addToggle((t) =>
+        .setName("Tie-break for unresolved hunks")
+        .setDesc('When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").')
+        .addDropdown((d) => {
+          d.setValue(sync.defaultResolution).onChange(async (v) => {
+            this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
+            await this.plugin.store.save();
+          });
+          for (const [value, text] of [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]) {
+            d.addOption(value, text);
+          }
+        });
+
+      new Setting(card)
+        .setName("Resolve by recency")
+        .setDesc("When a file is edited on both sides at different times, keep the most recent version.")
+        .addToggle((t) => {
           t.setValue(sync.recencyWins).onChange(async (v) => {
             this.plugin.store.setSync({ recencyWins: v });
             await this.plugin.store.save();
-          }),
-        );
+          });
+    });
     });
 
     // --- Sync frequency + maintenance (Area 5/8) --------------------------
@@ -225,27 +213,28 @@ export class MugsSettingTab extends PluginSettingTab {
       });
 
       const sync = this.plugin.store.getSettings().sync;
-      card.appendChild(this.field(
-        "Polling interval",
-        this.selectOption((v) => {
-          this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
-          void this.plugin.store.save();
-        }, INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>),
-        "How often to check the remote when the vault is idle. Local edits still propagate immediately via event triggers.",
-      ));
+      new Setting(card)
+        .setName("Polling interval")
+        .addDropdown((d) => {
+          d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
+            this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
+            await this.plugin.store.save();
+          });
+          for (const [value, text] of INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>) {
+            d.addOption(value, text);
+          }
+        });
 
       new Setting(card)
         .setName("Pause vault sync")
         .setDesc("While paused, MUGS stops all automatic push/pull and event triggers. Use it to make bulk edits safely; resuming runs one catch-up pass.")
-        .addToggle((t) =>
-          t
-            .setValue(sync.paused)
-            .onChange(async (v) => {
-              this.plugin.store.setSync({ paused: v });
-              await this.plugin.store.save();
-              new Notice(`MUGS sync ${v ? "paused" : "resumed"}.`);
-            }),
-        );
+        .addToggle((t) => {
+          t.setValue(sync.paused).onChange(async (v) => {
+            this.plugin.store.setSync({ paused: v });
+            await this.plugin.store.save();
+            new Notice(`MUGS sync ${v ? "paused" : "resumed"}.`);
+          });
+        });
     });
 
     // --- Obsidian config sync (Area 9) ------------------------------------
@@ -253,23 +242,21 @@ export class MugsSettingTab extends PluginSettingTab {
       card.createEl("h3", { text: "Obsidian Config Sync" });
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "Share vault-wide .obsidian/ config (themes, snippets, templates) across your team while keeping user-specific state local.",
+        text: "Share selected Obsidian settings files with your team through the same sync system.",
       });
 
       const obs = this.plugin.store.getSettings().sync.obsidianConfig;
       new Setting(card)
-        .setName("Sync .obsidian/ configuration")
-        .setDesc("When on, vault-wide entries are shared and personal entries stay local (excluded from push/pull). Off means .obsidian/ is never synced.")
-        .addToggle((t) =>
-          t
-            .setValue(obs.enabled)
-            .onChange(async (v) => {
-              this.plugin.store.setObsidianConfigEnabled(v);
-              await this.plugin.store.save();
-              new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
-              this._renderAll();
-            }),
-        );
+        .setName("Enable Obsidian config sync")
+        .setDesc("When on, selected .obsidian/ files are synced alongside your vault folders.")
+        .addToggle((t) => {
+          t.setValue(obs.enabled).onChange(async (v) => {
+            this.plugin.store.setObsidianConfigEnabled(v);
+            await this.plugin.store.save();
+            new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
+            this._renderAll();
+          });
+        });
 
       // Obsidian-Sync-style grouped toggles: each top-level .obsidian/ child gets a
       // personal/vault-wide scope so you can share all settings or only certain components.
@@ -476,28 +463,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     addWrap.appendChild(input);
     addWrap.appendChild(addBtn);
   }
-  /** Build a labelled native field row (input + optional description). Mirrors the
-   *  pre-0.3.x credential form, which built fields natively instead of relying on the
-   *  fluent `Setting().addField()` chain that breaks on this Obsidian build. */
-  private field(label: string, input: HTMLInputElement | HTMLSelectElement, desc?: string): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "mugs-field";
-    if (label) {
-      const lbl = document.createElement("label");
-      lbl.textContent = label;
-      wrap.appendChild(lbl);
-    }
-    if (desc) {
-      const d = document.createElement("div");
-      d.className = "mags-muted";
-      d.textContent = desc;
-      wrap.appendChild(d);
-    }
-    wrap.appendChild(input);
-    return wrap;
-  }
 
-  /** Add-credential form built with native labelled field rows (no fluent Setting chain). */
+  /** Add-credential form using native Obsidian Setting rows (dropdown/text/password/textarea). */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = "gitlab";
     let label = "";
@@ -505,47 +472,65 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let token = "";
     let baseUrl = "";
     let repos: string[] = [];
-    let baseUrlInput: HTMLInputElement | null = null;
+    let baseUrlInputEl: HTMLInputElement | null = null;
 
     const setBaseUrlField = (value: string): void => {
       baseUrl = value;
-      if (baseUrlInput) (baseUrlInput as HTMLInputElement).value = value;
+      if (baseUrlInputEl) baseUrlInputEl.value = value;
     };
     const prefilledBaseUrl = (k: Credential["kind"]): string =>
       k === "local" ? "" : defaultBaseUrl(k);
 
-    const grid = document.createElement("div");
-    grid.className = "mugs-form-grid";
-    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
-      grid.appendChild(this.field(name, input));
-    };
+    new Setting(card)
+      .setName("Provider")
+      .setDesc("The backend this token authenticates against.")
+      .addDropdown((d) => {
+        d.setValue(kind).onChange(async (v) => {
+          kind = v as Credential["kind"];
+          setBaseUrlField(prefilledBaseUrl(kind));
+          await this.plugin.store.save();
+        });
+        for (const [value, text] of [
+          ["gitlab", "GitLab"],
+          ["github", "GitHub"],
+          ["bitbucket", "Bitbucket"],
+          ["gitea", "Gitea / Forgejo"],
+          ["local", "Local (existing clone)"],
+        ] as const) {
+          d.addOption(value, text);
+        }
+      });
 
-    addField(
-      "Provider",
-      this.selectOption((v) => {
-        kind = v as Credential["kind"];
-        setBaseUrlField(prefilledBaseUrl(kind));
-      }, [
-        ["gitlab", "GitLab"],
-        ["github", "GitHub"],
-        ["bitbucket", "Bitbucket"],
-        ["gitea", "Gitea / Forgejo"],
-        ["local", "Local (existing clone)"],
-      ]),
-    );
-    addField("Label", this.text((v) => { label = v.trim(); }, "Label"));
-    addField("Username", this.text((v) => { username = v.trim(); }, "Username (optional)"));
-    addField("Token", this.password((v) => { token = v; }, "Token"));
-    const baseUrlInputEl = this.text((v) => { baseUrl = v.trim(); }, "Base URL (optional, incl. /api/v4)");
-    baseUrlInput = baseUrlInputEl;
-    addField("Base URL", baseUrlInputEl);
+    new Setting(card)
+      .setName("Label")
+      .setDesc("A friendly name for this credential.")
+      .addText((t) => t.setPlaceholder("Label").onChange((v) => { label = v.trim(); }));
 
-    grid.appendChild(this.scopeTextareaField(
-      "Allowed repositories (optional, owner/repo per line)",
-      (v) => { repos = parseGlobList(v); },
-    ));
+    new Setting(card)
+      .setName("Username")
+      .setDesc("Optional username (GitLab shows the acting user).")
+      .addText((t) => t.setPlaceholder("Username (optional)").onChange((v) => { username = v.trim(); }));
 
-    card.appendChild(grid);
+    new Setting(card)
+      .setName("Token")
+      .setDesc("Your API token. Never shown in full; optionally encrypted at rest.")
+      .addText((t) => {
+        t.setPlaceholder("Token").inputEl.type = "password";
+        t.onChange((v) => { token = v; });
+      });
+
+    new Setting(card)
+      .setName("Base URL")
+      .setDesc("Self-hosted instance base URL (include /api/v4 if needed).")
+      .addText((t) => {
+        baseUrlInputEl = t.inputEl;
+        t.setPlaceholder("Base URL (optional, incl. /api/v4)").onChange((v) => { baseUrl = v.trim(); });
+      });
+
+    new Setting(card)
+      .setName("Allowed repositories")
+      .setDesc("Optional owner/repo per line to restrict which repos this credential may access.")
+      .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); }));
 
     card.appendChild(this.actions([
       {
@@ -574,15 +559,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       },
     ]));
   }
-
-  /**
-   * Add-mapping form built with native labelled field rows (no fluent Setting chain). REST providers enumerate repos and each
-   * repo's directory tree, so "Repository", "Remote path" and "Vault folder" are
-   * dropdowns (autofill). Selecting a repository stores its id as the mapping id —
-   * that is how the driver matches the mapping to a repo at sync time. After a repo
-   * is selected, exact-name matches between remote and vault folders surface as
-   * one-click chips, and whole-vault mode reveals .trash/.obsidian dotfolder options.
-   */
   private async addMappingForm(card: HTMLElement): Promise<void> {
     const creds = this.plugin.store.getSettings().credentials;
     let label = "";
@@ -603,64 +579,79 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let detectedDirs: string[] = [];
     let matches: FolderMatch[] = [];
 
-    const grid = document.createElement("div");
-    grid.className = "mugs-form-grid";
-    const addField = (name: string, input: HTMLInputElement | HTMLSelectElement): void => {
-      grid.appendChild(this.field(name, input));
-    };
-    const providerSel = this.selectOption((v) => {
-      providerId = v;
-      void refreshMappingDropdowns();
-    }, creds.map((c) => [c.id, c.label] as [string, string]), creds.length === 0);
-    addField("Provider", providerSel);
+    // Capture the real <select> elements Obsidian creates for each dropdown so the
+    // async population below can populate them directly (native Setting styling).
+    let repoSel!: HTMLSelectElement;
+    let remotePathSel!: HTMLSelectElement;
+    let vaultFolderSel!: HTMLSelectElement;
 
-    const repoSel = document.createElement("select");
-    repoSel.className = "mugs-dir-select";
     const addRepoOption = (value: string, text: string): void => {
       const opt = document.createElement("option");
       opt.value = value;
       opt.textContent = text;
       repoSel.appendChild(opt);
     };
-    addField("Repository", repoSel);
 
-    const remotePathSel = this.directorySelect(async (v) => {
-      remotePath = v;
-      await refreshRemoteDirs();
-    });
-    addField("Remote path", remotePathSel);
+    new Setting(card)
+      .setName("Provider")
+      .setDesc("The backend this mapping authenticates against.")
+      .addDropdown((d) => {
+        d.setValue(providerId).onChange(async (v) => {
+          providerId = v;
+          await refreshMappingDropdowns();
+        });
+        for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
+          d.addOption(value, text);
+        }
+        if (creds.length === 0) d.setDisabled(true);
+      });
 
-    const vaultFolderSel = this.directorySelect((v) => { localFolder = v; });
-    addField("Vault folder", vaultFolderSel);
+    new Setting(card)
+      .setName("Repository")
+      .setDesc("The repository to sync. Its id is stored as the mapping id.")
+      .addDropdown((d) => { repoSel = d.selectEl; });
 
-    addField(
-      "Direction",
-      this.selectOption((v) => { direction = v as SyncDirection; }, [
-        ["push-pull", "Push + pull"],
-        ["pull-only", "Pull only"],
-        ["push-only", "Push only"],
-      ]),
-    );
-    addField("Branch", this.text((v) => { branch = v.trim(); }, "Branch (optional)"));
-    // Sync entire repository — native checkbox. Whole-vault mode disables the
-    // repo/remote/vault selects and maps the whole repo root to ".".
-    const wholeVaultInput = document.createElement("input");
-    wholeVaultInput.type = "checkbox";
-    wholeVaultInput.addEventListener("change", (e: Event) => {
-      wholeVault = (e.target as HTMLInputElement).checked;
-      repoSel.disabled = wholeVault;
-      remotePathSel.disabled = wholeVault;
-      vaultFolderSel.disabled = wholeVault;
-      if (wholeVault) localFolder = ".";
-      void refreshSuggestions();
-    });
-    grid.appendChild(this.field("Sync entire repository", wholeVaultInput));
-    card.appendChild(grid);
+    new Setting(card)
+      .setName("Remote path")
+      .setDesc("Directory within the repository. Leave empty for the whole tree.")
+      .addDropdown((d) => { remotePathSel = d.selectEl; });
+
+    new Setting(card)
+      .setName("Vault folder")
+      .setDesc("Local folder in your vault to sync with.")
+      .addDropdown((d) => { vaultFolderSel = d.selectEl; });
+
+    new Setting(card)
+      .setName("Direction")
+      .setDesc("Which way changes flow between the remote and your vault.")
+      .addDropdown((d) => {
+        d.setValue(direction).onChange((v) => { direction = v as SyncDirection; });
+        for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
+          d.addOption(value, text);
+        }
+      });
+
+    new Setting(card)
+      .setName("Branch")
+      .setDesc("Optional branch to sync. Leave empty for the default branch.")
+      .addText((t) => t.setPlaceholder("Branch (optional)").onChange((v) => { branch = v.trim(); }));
+
+    new Setting(card)
+      .setName("Sync entire repository")
+      .setDesc("Map the whole repo root to the vault root ('.'). Dotfolder options (.trash/.obsidian) appear below.")
+      .addToggle((t) => {
+        t.setValue(wholeVault).onChange(async (v) => {
+          wholeVault = v;
+          repoSel.disabled = v;
+          remotePathSel.disabled = v;
+          vaultFolderSel.disabled = v;
+          if (v) localFolder = ".";
+          await refreshSuggestions();
+        });
+      });
 
     // Progressive-disclosure area: .trash toggle + auto-match chips.
     const suggestionsEl = card.createDiv({ cls: "mugs-suggestions" });
-
-    // Append the suggestions area after the core fields.
     card.appendChild(suggestionsEl);
 
     // Includes / Excludes — collapsible manage panels.
@@ -782,7 +773,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             if (wholeVault) {
               remotePathSel.value = "";
             } else {
-for (const opt of Array.from(remotePathSel.options)) {
+              for (const opt of Array.from(remotePathSel.options)) {
                 if (opt.value === m.remotePath) { remotePathSel.value = m.remotePath; break; }
               }
             }
@@ -839,33 +830,6 @@ for (const opt of Array.from(remotePathSel.options)) {
     void refreshMappingDropdowns();
   }
 
-  /** Create a native <select> wired to an onChange callback. */
-  private selectOption(
-    set: (v: string) => void,
-    options: Array<[string, string]>,
-    disabled = false,
-  ): HTMLSelectElement {
-    const sel = document.createElement("select");
-    if (disabled) sel.disabled = true;
-    for (const [value, label] of options) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
-      sel.appendChild(opt);
-    }
-    sel.addEventListener("change", (e: Event) => set((e.target as HTMLSelectElement).value));
-    return sel;
-  }
-
-  /** An empty directory <select> wired to an optional async onChange. */
-  private directorySelect(onChange?: (v: string) => void | Promise<void>): HTMLSelectElement {
-    const sel = document.createElement("select");
-    sel.className = "mugs-dir-select";
-    if (onChange) {
-      sel.addEventListener("change", (e: Event) => { void onChange((e.target as HTMLSelectElement).value); });
-    }
-    return sel;
-  }
 
   /** Populate a directory <select> with a root option plus child options, keeping
    *  the current selection when it is still among the children. */
@@ -924,39 +888,6 @@ for (const opt of Array.from(remotePathSel.options)) {
     this.fillDirectorySelect(sel, current, folders.map((f) => [f, f]), folders.length ? "(a vault folder)" : "(create a folder in Obsidian first)");
   }
 
-  /** Create a native text <input> wired to an onChange callback. */
-  private text(onChange: (v: string) => void, placeholder = ""): HTMLInputElement {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = placeholder;
-    input.addEventListener("change", (e: Event) => onChange((e.target as HTMLInputElement).value));
-    return input;
-  }
-
-  /** Create a native password <input> wired to an onChange callback. */
-  private password(onChange: (v: string) => void, placeholder = ""): HTMLInputElement {
-    const input = document.createElement("input");
-    input.type = "password";
-    input.placeholder = placeholder;
-    input.addEventListener("change", (e: Event) => onChange((e.target as HTMLInputElement).value));
-    return input;
-  }
-
-  /** A full-width labeled textarea for multi-line gitignore glob lists. */
-  private scopeTextareaField(label: string, onChange: (v: string) => void): HTMLElement {
-    const wrap = document.createElement("div");
-    wrap.className = "mugs-field";
-    const lbl = document.createElement("label");
-    lbl.textContent = label;
-    wrap.appendChild(lbl);
-    const ta = document.createElement("textarea");
-    ta.rows = 3;
-    ta.style.width = "100%";
-    ta.className = "mugs-textarea";
-    ta.addEventListener("change", (e: Event) => onChange((e.target as HTMLTextAreaElement).value));
-    wrap.appendChild(ta);
-    return wrap;
-  }
 
   /** Create a full-width action row containing one or more buttons. */
   private actions(buttons: Array<{ text: string; cta?: boolean; disabled?: boolean; onClick: () => void }>): HTMLElement {

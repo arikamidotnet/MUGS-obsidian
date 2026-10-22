@@ -18,11 +18,42 @@ export class Setting {
   setName(name: string): this { const d = this.el.createDiv(); d.textContent = String(name); return this; }
   setDesc(desc: string): this { const d = this.el.createDiv({ cls: "setting-desc" }); d.textContent = String(desc); return this; }
   addExtraButton(cb: (button: any) => void): this { return this; }
-  addText(cb: (text: any) => void): this { return this; }
-  addTextArea(cb: (text: any) => void): this { return this; }
-  addToggle(cb: (toggle: any) => void): this { return this; }
+  addText(cb: (text: any) => void): this {
+    const input = this.el.createEl("input", { type: "text" });
+    const tc = { inputEl: input, setPlaceholder: (p: string) => { input.placeholder = p; return tc; }, setValue: (v: string) => { input.value = v; return tc; }, onChange: (_cb: (v: string) => void) => tc };
+    cb(tc);
+    return this;
+  }
+  addTextArea(cb: (text: any) => void): this {
+    const ta = this.el.createEl("textarea");
+    const tc = { inputEl: ta, setPlaceholder: (p: string) => { ta.placeholder = p; return tc; }, setValue: (v: string) => { ta.value = v; return tc; }, onChange: (_cb: (v: string) => void) => tc };
+    cb(tc);
+    return this;
+  }
+  addDropdown(cb: (dropdown: any) => void): this {
+    const select = this.el.createEl("select");
+    const dd = {
+      selectEl: select,
+      setValue: (v: string) => { select.value = v; return dd; },
+      onChange: (_cb: (v: string) => void) => dd,
+      addOption: (value: string, text: string) => { const o = document.createElement("option"); o.value = value; o.textContent = text; select.appendChild(o); return dd; },
+      setDisabled: (d: boolean) => { select.disabled = d; return dd; },
+    };
+    cb(dd);
+    return this;
+  }
+  addToggle(cb: (toggle: any) => void): this {
+    const input = this.el.createEl("input", { type: "checkbox" });
+    const tg = { value: false, setValue: (v: boolean) => { input.checked = v; return tg; }, onChange: (_cb: (v: boolean) => void) => tg };
+    cb(tg);
+    return this;
+  }
   addSlider(cb: (slider: any) => void): this { return this; }
-  addButton(cb: (button: any) => void): this { return this; }
+  addButton(cb: (button: any) => void): this {
+    const btn = { setButtonText: (_t: string) => btn, setCta: () => btn, setClass: () => btn, setDisabled: (_d: boolean) => btn, onClick: (_cb: () => void) => btn };
+    cb(btn);
+    return this;
+  }
   addColorPicker(cb: (picker: any) => void): this { return this; }
   addField(_label: string, _input: HTMLElement): this { return this; }
   setClass(_cls: string): this { return this; }
