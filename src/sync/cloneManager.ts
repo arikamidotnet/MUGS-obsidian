@@ -207,9 +207,9 @@ export class CloneManager {
     return r.code === 0 && r.stdout.trim() === "true";
   }
 
-  /** Clone the mapping's repo if it is not already present. */
+  /** Clone the mapping's repo if it is not already present. Scoped links share one clone per repo (keyed by `repoRef`), so all links pointing at the same repo reuse a single working tree. */
   async ensureClone(mapping: FolderMapping, repo: RepoSummary): Promise<string> {
-    const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
+    const dir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? mapping.id);
     if (!(await this.isCloned(dir))) {
       await this.client.clone(repo.httpUrlToRepo, dir);
     }
@@ -218,7 +218,7 @@ export class CloneManager {
 
   /** Run a full sync pass for one mapping against its resolved repo. */
   async syncMapping(mapping: FolderMapping, repo: RepoSummary): Promise<SyncResult> {
-    const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
+    const dir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? mapping.id);
     const branch = resolveSyncBranch(mapping, repo);
     const base = this.syncs.lastRemoteSha(mapping.id) ?? "";
 
@@ -293,7 +293,7 @@ export class CloneManager {
    * divergent files as conflicts. Local content is read from HEAD (committed state).
    */
   private async mergeContents(mapping: FolderMapping, repo: RepoSummary, branch: string, client: GitClient): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[] }> {
-    const dir = cloneDir(this.layout, mapping.providerId, mapping.id);
+    const dir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? mapping.id);
     const remoteRef = `origin/${branch}`;
     const baseSha = await client.mergeBase("HEAD", remoteRef);
     const localPaths = new Set(await client.changedPaths(`${baseSha}...HEAD`));

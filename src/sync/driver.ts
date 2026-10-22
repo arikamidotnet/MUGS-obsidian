@@ -144,7 +144,7 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
         skip(mapping, "could not reach provider"); continue;
       }
     }
-    const repo = repos.find((r) => r.id === mapping.id);
+    const repo = repos.find((r) => (mapping.repoRef ? r.id === mapping.repoRef : r.id === mapping.id));
     if (!repo) { skip(mapping, "repo not found or not accessible"); continue; }
 
     try {

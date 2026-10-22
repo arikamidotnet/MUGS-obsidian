@@ -58,6 +58,11 @@ export interface FolderMapping {
    *  attributed to that agent with an "On-behalf-of" owner trailer so remote blame maps back.
    *  Absent -> normal sync attribution (unchanged). */
   agentId?: string;
+  /** Optional repo reference for scoped links. When set, this link shares a single
+   *  clone with other links pointing at the same repo (resolved by `repoRef`), while
+   *  keeping its own unique `id` for lastSync/conflicts/staging bookkeeping. Absent ->
+   *  whole-repo mapping whose `id` is also the repo id (legacy behaviour). */
+  repoRef?: string;
   direction: SyncDirection;
   /** gitignore-style globs of paths WITHIN the scope that should sync.
    *  Empty or absent means "everything in scope". Composes with {@link excludes}. */

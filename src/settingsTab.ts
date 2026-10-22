@@ -327,6 +327,22 @@ export class MugsSettingTab extends PluginSettingTab {
           }),
         );
 
+      // Editable direction for every card (scoped links and whole-repo alike).
+      new Setting(block)
+        .setName("Direction")
+        .setDesc("Which way changes flow between the remote and your vault.")
+        .addDropdown((d) => {
+          d.setValue(m.direction).onChange(async (v) => {
+            const direction = v as SyncDirection;
+            this.plugin.store.upsertMapping({ ...m, direction });
+            await this.plugin.store.save();
+            this._renderAll();
+          });
+          for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
+            d.addOption(value, text);
+          }
+        });
+
       block.appendChild(this.managePanel(
         "Includes",
         (m.includes ?? []).join("\n"),
@@ -355,7 +371,6 @@ export class MugsSettingTab extends PluginSettingTab {
       }
     }
   }
-
   /** A collapsible labelled panel with a "Manage" button that reveals a textarea.
    *  Mirrors Obsidian Sync's "Excluded folders · Manage" progressive disclosure. */
   private managePanel(title: string, initialText: string, onChange: (v: string) => void, placeholder: string): HTMLElement {
@@ -559,46 +574,42 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       },
     ]));
   }
+  /** Staged assistant for adding mappings: pick a credential → pick (or sync) a repo →
+   *  check the matched top-level folders to link. Each checked folder becomes its own
+   *  individually-editable mapping card scoped to that repo via `repoRef` (they share one
+   *  clone); the whole-repo toggle adds a legacy whole-repo mapping whose id is the repo id.
+   */
   private async addMappingForm(card: HTMLElement): Promise<void> {
     const creds = this.plugin.store.getSettings().credentials;
-    let label = "";
-    let remotePath = "";
-    let localFolder = "";
     let providerId = creds[0]?.id ?? "";
-    let branch = "";
     let direction: SyncDirection = "push-pull";
+    let branch = "";
     let includesText = "";
     let excludesText = "";
-    // REST repo selection: repoSaveId (repo.id) is stored as the mapping id so the
-    // driver can match it; repoKey (pathWithNamespace) is what lists directories.
-    let repoSaveId = "";
+    // REST repo selection: repoRef (repo.id) is stored on scoped links so the driver +
+    // clone manager resolve them against one shared clone; whole-repo mappings keep id === repo.id.
+    let repoRef = "";
     let repoKey = "";
     let reposCache: RepoSummary[] = [];
-    let wholeVault = false;
-    let trashSync = true;
-    let detectedDirs: string[] = [];
+    let wholeRepo = false;
+    let selectedFolders = new Set<string>(); // matched remote paths the user checked to link
     let matches: FolderMatch[] = [];
 
-    // Capture the real <select> elements Obsidian creates for each dropdown so the
-    // async population below can populate them directly (native Setting styling).
-    let repoSel!: HTMLSelectElement;
-    let remotePathSel!: HTMLSelectElement;
-    let vaultFolderSel!: HTMLSelectElement;
-
-    const addRepoOption = (value: string, text: string): void => {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = text;
-      repoSel.appendChild(opt);
+    const isRest = (): boolean => {
+      const cred = creds.find((c) => c.id === providerId);
+      return !!cred && cred.kind !== "local";
     };
 
+    // --- Credential selector -------------------------------------------------
     new Setting(card)
       .setName("Provider")
       .setDesc("The backend this mapping authenticates against.")
       .addDropdown((d) => {
         d.setValue(providerId).onChange(async (v) => {
           providerId = v;
-          await refreshMappingDropdowns();
+          wholeRepo = false;
+          selectedFolders.clear();
+          await refreshRepos();
         });
         for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
           d.addOption(value, text);
@@ -606,21 +617,119 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         if (creds.length === 0) d.setDisabled(true);
       });
 
-    new Setting(card)
-      .setName("Repository")
-      .setDesc("The repository to sync. Its id is stored as the mapping id.")
-      .addDropdown((d) => { repoSel = d.selectEl; });
+    // --- Repository selector -------------------------------------------------
+    const repoSel = card.createEl("select", { cls: "mugs-repo-select" });
+    const refreshRepos = async (): Promise<void> => {
+      wholeRepo = false;
+      selectedFolders.clear();
+      reposCache = [];
+      repoRef = "";
+      repoKey = "";
+      if (!isRest()) {
+        // Local provider has no REST adapter: it syncs one existing clone as a whole-repo mapping.
+        repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
+        await refreshMatches();
+        return;
+      }
+      const cred = creds.find((c) => c.id === providerId);
+      if (!cred) { repoSel.disabled = true; return; }
+      try {
+        const token = this.plugin.store.getToken(providerId) ?? "";
+        if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; return; }
+        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
+        reposCache = await provider.listRepos();
+        if (reposCache.length === 0) {
+          new Notice("MUGS: no accessible repositories for this credential.");
+          repoSel.disabled = true;
+          return;
+        }
+        reposCache.sort((a, b) => a.pathWithNamespace.localeCompare(b.pathWithNamespace));
+        repoSel.innerHTML = "";
+        for (const r of reposCache) {
+          const name = r.name && r.name !== r.pathWithNamespace ? `  ·  ${r.name}` : "";
+          const opt = document.createElement("option");
+          opt.value = r.id;
+          opt.textContent = `${r.pathWithNamespace}${name}`;
+          repoSel.appendChild(opt);
+        }
+        // Auto-select the first repo so matched-folder suggestions appear immediately.
+        const first = reposCache[0];
+        repoRef = first.id;
+        repoKey = first.pathWithNamespace;
+        repoSel.value = first.id;
+        await refreshMatches();
+      } catch (e) {
+        new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
+        repoSel.disabled = true;
+      }
+    };
 
-    new Setting(card)
-      .setName("Remote path")
-      .setDesc("Directory within the repository. Leave empty for the whole tree.")
-      .addDropdown((d) => { remotePathSel = d.selectEl; });
+    // Detect top-level dotfolders (.trash/.obsidian) and compute name matches between the
+    // chosen repo's remote dirs and vault folders, surfaced as checkboxes below.
+    const refreshMatches = async (): Promise<void> => {
+      wholeRepo = false;
+      selectedFolders.clear();
+      if (!isRest() || !repoKey) { matches = []; renderMatches(); return; }
+      const cred = creds.find((c) => c.id === providerId);
+      if (!cred) { matches = []; renderMatches(); return; }
+      try {
+        const detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
+        const vaultTop = await this.listVaultFolders();
+        matches = matchFolderPairs(detectedDirs, vaultTop);
+      } catch (e) {
+        matches = [];
+      }
+      renderMatches();
+    };
 
-    new Setting(card)
-      .setName("Vault folder")
-      .setDesc("Local folder in your vault to sync with.")
-      .addDropdown((d) => { vaultFolderSel = d.selectEl; });
+    repoSel.addEventListener("change", () => {
+      const chosen = reposCache.find((r) => r.id === repoSel.value);
+      if (!chosen) return;
+      wholeRepo = false;
+      selectedFolders.clear();
+      repoRef = chosen.id;
+      repoKey = chosen.pathWithNamespace;
+      void refreshMatches();
+    });
 
+    // --- Matched-folder checkboxes + whole-repo toggle -----------------------
+    const matchesEl = card.createDiv({ cls: "mugs-matches" });
+    const renderMatches = (): void => {
+      matchesEl.innerHTML = "";
+
+      if (isRest() && repoKey) {
+        // Whole-repo toggle: map the entire repository root to the vault root ('.').
+        const wholeRow = matchesEl.createDiv({ cls: "mugs-match-whole" });
+        const wholeInput = document.createElement("input");
+        wholeInput.type = "checkbox";
+        wholeInput.checked = wholeRepo;
+        wholeInput.addEventListener("change", (e: Event) => { wholeRepo = (e.target as HTMLInputElement).checked; renderMatches(); });
+        wholeRow.appendChild(wholeInput);
+        wholeRow.appendChild(document.createTextNode(" Sync the entire repository to the vault root"));
+      }
+
+      if (matches.length > 0) {
+        const head = matchesEl.createEl("div", { cls: "mugs-matches-head" });
+        head.textContent = wholeRepo ? "Or link individual folders:" : "Matched folders — check to link each as its own mapping";
+        for (const m of matches) {
+          const row = matchesEl.createDiv({ cls: "mugs-match-row" });
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = selectedFolders.has(m.remotePath);
+          cb.addEventListener("change", (e: Event) => {
+            if ((e.target as HTMLInputElement).checked) selectedFolders.add(m.remotePath);
+            else selectedFolders.delete(m.remotePath);
+          });
+          row.appendChild(cb);
+          row.appendChild(document.createTextNode(`  ${m.remotePath} → ${m.localFolder}`));
+          matchesEl.appendChild(row);
+        }
+      } else if (!wholeRepo) {
+        matchesEl.createEl("p", { cls: "mags-muted", text: wholeRepo ? "" : "No folders matched between this repo and your vault yet." });
+      }
+    };
+
+    // --- Direction + branch + include/exclude --------------------------------
     new Setting(card)
       .setName("Direction")
       .setDesc("Which way changes flow between the remote and your vault.")
@@ -636,218 +745,56 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setDesc("Optional branch to sync. Leave empty for the default branch.")
       .addText((t) => t.setPlaceholder("Branch (optional)").onChange((v) => { branch = v.trim(); }));
 
-    new Setting(card)
-      .setName("Sync entire repository")
-      .setDesc("Map the whole repo root to the vault root ('.'). Dotfolder options (.trash/.obsidian) appear below.")
-      .addToggle((t) => {
-        t.setValue(wholeVault).onChange(async (v) => {
-          wholeVault = v;
-          repoSel.disabled = v;
-          remotePathSel.disabled = v;
-          vaultFolderSel.disabled = v;
-          if (v) localFolder = ".";
-          await refreshSuggestions();
-        });
-      });
-
-    // Progressive-disclosure area: .trash toggle + auto-match chips.
-    const suggestionsEl = card.createDiv({ cls: "mugs-suggestions" });
-    card.appendChild(suggestionsEl);
-
-    // Includes / Excludes — collapsible manage panels.
     card.appendChild(this.managePanel("Includes", includesText, (v) => { includesText = v; }, "Only these globs sync within the scope (optional). Leave empty for everything."));
     card.appendChild(this.managePanel("Excludes", excludesText, (v) => { excludesText = v; }, "These globs never sync (gitignore-style; '!' re-includes)."));
 
-    // --- Dropdown population + suggestion refresh ---------------------------
-    const isRest = (): boolean => {
-      const cred = creds.find((c) => c.id === providerId);
-      return !!cred && cred.kind !== "local";
-    };
-    const refreshMappingDropdowns = async (): Promise<void> => {
-      reposCache = [];
-      repoSaveId = "";
-      repoKey = "";
-      remotePath = "";
-      if (!isRest()) {
-        // Local: single implicit clone, no REST tree API.
-        repoSel.disabled = true;
-        remotePathSel.disabled = true;
-        repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
-        remotePathSel.innerHTML = '<option value="">(whole clone)</option>';
-        await this.populateVaultFolders(vaultFolderSel, localFolder);
-        void refreshSuggestions();
-        return;
-      }
-      const cred = creds.find((c) => c.id === providerId);
-      if (!cred) { repoSel.disabled = true; remotePathSel.disabled = true; return; }
-      // Populate vault folders up front so they show even if the repo fetch fails.
-      await this.populateVaultFolders(vaultFolderSel, localFolder);
-      try {
-        const token = this.plugin.store.getToken(providerId) ?? "";
-        if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; remotePathSel.disabled = true; return; }
-        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
-        reposCache = await provider.listRepos();
-        if (reposCache.length === 0) {
-          new Notice("MUGS: no accessible repositories for this credential.");
-          repoSel.disabled = true;
-          remotePathSel.disabled = true;
-          return;
-        }
-        repoSel.disabled = false;
-        remotePathSel.disabled = false;
-        reposCache.sort((a, b) => a.pathWithNamespace.localeCompare(b.pathWithNamespace));
-        repoSel.innerHTML = "";
-        for (const r of reposCache) {
-          const name = r.name && r.name !== r.pathWithNamespace ? `  ·  ${r.name}` : "";
-          addRepoOption(r.id, `${r.pathWithNamespace}${name}`);
-        }
-        // Auto-select the first repo so directory autofill is ready immediately.
-        const first = reposCache[0];
-        repoSaveId = first.id;
-        repoKey = first.pathWithNamespace;
-        repoSel.value = first.id;
-        await refreshRemoteDirs();
-        void refreshSuggestions();
-      } catch (e) {
-        new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
-        repoSel.disabled = true;
-        remotePathSel.disabled = true;
-      }
-    };
-    const refreshRemoteDirs = async (): Promise<void> => {
-      if (!repoKey) return;
-      const cred = creds.find((c) => c.id === providerId);
-      if (!cred) return;
-      const dirs = await this.listDirectoriesFor(cred, repoKey, remotePath);
-      const opts: Array<[string, string]> = [];
-      if (remotePath) opts.push([remotePath, `● ${remotePath.split("/").pop()}`]);
-      for (const d of dirs) opts.push([`${remotePath ? `${remotePath}/` : ""}${d}`, d]);
-      this.fillDirectorySelect(remotePathSel, remotePath, opts, remotePath ? "← repository root" : "(repository root)");
-    };
-    // Detect top-level dotfolders (.trash/.obsidian) and compute name matches in the
-    // chosen repo to surface in-context toggles/chips (progressive disclosure).
-    const refreshSuggestions = async (): Promise<void> => {
-      if (!isRest() || !repoKey) { detectedDirs = []; matches = []; renderSuggestions(); return; }
-      const cred = creds.find((c) => c.id === providerId);
-      if (!cred) { detectedDirs = []; matches = []; renderSuggestions(); return; }
-      detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
-      const vaultTop = await this.listVaultFolders();
-      matches = matchFolderPairs(detectedDirs, vaultTop);
-      renderSuggestions();
-    };
-    const renderSuggestions = (): void => {
-      suggestionsEl.innerHTML = "";
-      // .trash toggle (whole-vault + REST repo) — mirrors Obsidian Sync dotfolder UX.
-      if (wholeVault && isRest() && repoKey) {
-        const trashPresent = detectedDirs.includes(".trash");
-        const obsidianPresent = detectedDirs.includes(".obsidian");
-        const box = suggestionsEl.createDiv({ cls: "mugs-dotfolders" });
-        if (trashPresent) {
-          const row = document.createElement("label");
-          row.className = "mugs-dotfolder-toggle";
-          const tInput = document.createElement("input");
-          tInput.type = "checkbox";
-          tInput.checked = trashSync;
-          tInput.addEventListener("change", (e: Event) => { trashSync = (e.target as HTMLInputElement).checked; });
-          row.appendChild(tInput);
-          row.appendChild(document.createTextNode(" Sync the repository's .trash/ folder"));
-          box.appendChild(row);
-        }
-        const p = box.createEl("p", { cls: "mags-muted" });
-        if (obsidianPresent) p.textContent = "This repo has an .obsidian/ folder — configure which settings to share in the 'Obsidian Config Sync' section below.";
-        else if (!trashPresent) p.textContent = "No .trash/ or .obsidian/ folder found in this repo.";
-      }
-      // Auto-match chips.
-      if (matches.length > 0) {
-        const head = suggestionsEl.createEl("div", { cls: "mugs-suggestions-head" });
-        head.textContent = "Matched folders — click to map";
-        for (const m of matches) {
-          const chip = suggestionsEl.createEl("button", { cls: "mugs-match-chip", type: "button" });
-          chip.textContent = `${m.remotePath} → ${m.localFolder}`;
-          chip.addEventListener("click", () => {
-            label = m.label;
-            remotePath = m.remotePath;
-            localFolder = m.localFolder;
-            direction = "push-pull";
-            vaultFolderSel.value = m.localFolder;
-            if (wholeVault) {
-              remotePathSel.value = "";
-            } else {
-              for (const opt of Array.from(remotePathSel.options)) {
-                if (opt.value === m.remotePath) { remotePathSel.value = m.remotePath; break; }
-              }
-            }
-          });
-        }
-      }
-    };
-
-    repoSel.addEventListener("change", (e: Event) => {
-      const chosen = reposCache.find((r) => r.id === (e.target as HTMLSelectElement).value);
-      if (!chosen) return;
-      repoSaveId = chosen.id;
-      repoKey = chosen.pathWithNamespace;
-      remotePath = "";
-      void refreshRemoteDirs();
-      void refreshSuggestions();
-    });
-
+    // --- Save ----------------------------------------------------------------
     card.appendChild(this.actions([
       {
-        text: "Add mapping",
+        text: wholeRepo ? "Add whole-repo mapping" : "Add selected mappings",
         cta: true,
-        disabled: creds.length === 0,
+        disabled: creds.length === 0 || (!isRest() && false),
         onClick: async () => {
-          if (!label) { new Notice("MUGS: enter a label."); return; }
-          if (!wholeVault && !localFolder) { new Notice("MUGS: enter a vault folder."); return; }
-          if (!providerId) { new Notice("MUGS: choose a credential/provider."); return; }
           const cred = creds.find((c) => c.id === providerId);
-          if (cred && cred.kind !== "local" && !repoSaveId) { new Notice("MUGS: choose a repository."); return; }
+          if (!providerId) { new Notice("MUGS: choose a credential/provider."); return; }
+          if (cred && cred.kind !== "local" && !repoRef) { new Notice("MUGS: choose a repository."); return; }
           try {
-            this.plugin.store.upsertMapping({
-              id: repoSaveId || newId(),
-              label,
-              remotePath: wholeVault ? "" : remotePath,
-              localFolder: wholeVault ? "." : localFolder,
-              providerId,
-              branch: branch || undefined,
-              direction,
-              includes: parseGlobList(includesText),
-              excludes: parseGlobList(excludesText),
-              syncTrashFolder: wholeVault && !trashSync ? false : undefined,
-            });
+            const scope = { includes: parseGlobList(includesText), excludes: parseGlobList(excludesText) };
+            // Whole-repo mapping: id === repo.id so the driver matches it (legacy behaviour).
+            if (wholeRepo) {
+              this.plugin.store.upsertMapping({
+                id: repoRef, label: repoKey, remotePath: "", localFolder: ".", providerId,
+                branch: branch || undefined, direction, ...scope,
+              });
+              new Notice(`MUGS: whole-repo mapping for "${repoKey}" saved.`);
+            } else if (selectedFolders.size === 0) {
+              new Notice("MUGS: check at least one folder to link."); return;
+            } else {
+              // Each checked folder becomes its own scoped card sharing the repo's clone via repoRef.
+              let count = 0;
+              for (const remotePath of selectedFolders) {
+                const match = matches.find((m) => m.remotePath === remotePath);
+                if (!match) continue;
+                this.plugin.store.upsertMapping({
+                  id: newId(), label: match.label, remotePath, localFolder: match.localFolder,
+                  providerId, branch: branch || undefined, direction, repoRef, ...scope,
+                });
+                count += 1;
+              }
+              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} saved.`);
+            }
             await this.plugin.store.save();
-            new Notice(`MUGS: mapping "${label}" saved.`);
             this._renderAll();
           } catch (e) {
-            // upsertMapping throws for folders under .obsidian/.
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);
           }
         },
       },
     ]));
 
-    void refreshMappingDropdowns();
+    void refreshRepos();
   }
 
-
-  /** Populate a directory <select> with a root option plus child options, keeping
-   *  the current selection when it is still among the children. */
-  private fillDirectorySelect(sel: HTMLSelectElement, current: string, options: Array<[string, string]>, rootLabel?: string): void {
-    const prev = sel.value;
-    sel.innerHTML = "";
-    const root = document.createElement("option");
-    root.value = "";
-    root.textContent = rootLabel ?? (current ? "← repository root" : "(repository root)");
-    sel.appendChild(root);
-    for (const [value, label] of options) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
-      sel.appendChild(opt);
-    }
-    if (options.some((o) => o[0] === prev)) sel.value = prev;
-  }
 
   /** List child directories of `repoKey` at `path` for a credential's provider. */
   private async listDirectoriesFor(cred: Credential, repoKey: string, path: string): Promise<string[]> {
@@ -881,13 +828,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     }
     return [];
   }
-
-  /** Fill a vault-folder dropdown from existing top-level vault folders. */
-  private async populateVaultFolders(sel: HTMLSelectElement, current: string): Promise<void> {
-    const folders = await this.listVaultFolders();
-    this.fillDirectorySelect(sel, current, folders.map((f) => [f, f]), folders.length ? "(a vault folder)" : "(create a folder in Obsidian first)");
-  }
-
 
   /** Create a full-width action row containing one or more buttons. */
   private actions(buttons: Array<{ text: string; cta?: boolean; disabled?: boolean; onClick: () => void }>): HTMLElement {
