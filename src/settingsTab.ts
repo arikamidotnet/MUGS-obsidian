@@ -591,6 +591,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let repoRef = "";
     let repoKey = "";
     let reposCache: RepoSummary[] = [];
+    let syncTrash = false; // whole-repo sub-option: include the repo's .trash folder in the sync
     let wholeRepo = false;
     let selectedFolders = new Set<string>(); // matched remote paths the user checked to link
     let matches: FolderMatch[] = [];
@@ -606,8 +607,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setDesc("The backend this mapping authenticates against.")
       .addDropdown((d) => {
         d.setValue(providerId).onChange(async (v) => {
-          providerId = v;
           wholeRepo = false;
+          syncTrash = false;
           selectedFolders.clear();
           await refreshRepos();
         });
@@ -621,6 +622,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     const repoSel = card.createEl("select", { cls: "mugs-repo-select" });
     const refreshRepos = async (): Promise<void> => {
       wholeRepo = false;
+      syncTrash = false;
       selectedFolders.clear();
       reposCache = [];
       repoRef = "";
@@ -664,10 +666,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       }
     };
 
-    // Detect top-level dotfolders (.trash/.obsidian) and compute name matches between the
-    // chosen repo's remote dirs and vault folders, surfaced as checkboxes below.
+    // Detect name matches between the chosen repo's remote dirs and vault folders, surfaced as
+    // checkboxes below. Dotfolders (.obsidian/.trash) are filtered out here: .obsidian linking is
+    // deprecated (handled by the Obsidian Config Sync section), and .trash is a whole-repo sub-option.
     const refreshMatches = async (): Promise<void> => {
       wholeRepo = false;
+      syncTrash = true;
       selectedFolders.clear();
       if (!isRest() || !repoKey) { matches = []; renderMatches(); return; }
       const cred = creds.find((c) => c.id === providerId);
@@ -675,7 +679,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       try {
         const detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
         const vaultTop = await this.listVaultFolders();
-        matches = matchFolderPairs(detectedDirs, vaultTop);
+        matches = matchFolderPairs(detectedDirs, vaultTop).filter((m) => m.remotePath !== ".obsidian" && m.remotePath !== ".trash");
       } catch (e) {
         matches = [];
       }
@@ -686,6 +690,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       const chosen = reposCache.find((r) => r.id === repoSel.value);
       if (!chosen) return;
       wholeRepo = false;
+      syncTrash = false;
       selectedFolders.clear();
       repoRef = chosen.id;
       repoKey = chosen.pathWithNamespace;
@@ -695,8 +700,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     // --- Matched-folder checkboxes + whole-repo toggle -----------------------
     const matchesEl = card.createDiv({ cls: "mugs-matches" });
     const renderMatches = (): void => {
-      matchesEl.innerHTML = "";
-
       if (isRest() && repoKey) {
         // Whole-repo toggle: map the entire repository root to the vault root ('.').
         const wholeRow = matchesEl.createDiv({ cls: "mugs-match-whole" });
@@ -704,8 +707,15 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         wholeInput.type = "checkbox";
         wholeInput.checked = wholeRepo;
         wholeInput.addEventListener("change", (e: Event) => { wholeRepo = (e.target as HTMLInputElement).checked; renderMatches(); });
-        wholeRow.appendChild(wholeInput);
-        wholeRow.appendChild(document.createTextNode(" Sync the entire repository to the vault root"));
+        wholeRow.createEl("span", { text: "Sync the entire repository to the vault root" });
+        const trashRow = matchesEl.createDiv({ cls: "mugs-match-trash" });
+        trashRow.style.marginLeft = "24px";
+        const trashInput = document.createElement("input");
+        trashInput.type = "checkbox";
+        trashInput.checked = syncTrash;
+        trashInput.addEventListener("change", (e: Event) => { syncTrash = (e.target as HTMLInputElement).checked; });
+        trashRow.appendChild(trashInput);
+        trashRow.createEl("span", { text: "Include the repository's .trash/ folder" });
       }
 
       if (matches.length > 0) {
@@ -721,7 +731,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             else selectedFolders.delete(m.remotePath);
           });
           row.appendChild(cb);
-          row.appendChild(document.createTextNode(`  ${m.remotePath} → ${m.localFolder}`));
+          const label = row.createEl("span", { cls: "mugs-match-label" });
+          label.textContent = m.remotePath;
+          label.title = `${m.remotePath} → ${m.localFolder}`;
+          row.createEl("span", { cls: "mugs-match-arrow", text: "→" });
+          row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
           matchesEl.appendChild(row);
         }
       } else if (!wholeRepo) {
@@ -765,6 +779,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               this.plugin.store.upsertMapping({
                 id: repoRef, label: repoKey, remotePath: "", localFolder: ".", providerId,
                 branch: branch || undefined, direction, ...scope,
+                syncTrashFolder: syncTrash ? undefined : false,
               });
               new Notice(`MUGS: whole-repo mapping for "${repoKey}" saved.`);
             } else if (selectedFolders.size === 0) {

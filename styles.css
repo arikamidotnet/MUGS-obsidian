@@ -163,6 +163,97 @@
   margin-top: 2px;
 }
 
+/* --- Add mapping assistant (credential → repo → matched folders) ---------- */
+
+.mugs-repo-select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.mugs-repo-select:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.mugs-matches {
+  margin: 4px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.mugs-matches-head {
+  margin: 6px 0 8px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mugs-match-whole,
+.mugs-match-trash {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.mugs-match-trash {
+  margin-left: 22px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-match-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  transition: background-color 0.1s ease;
+}
+
+.mugs-match-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.mugs-match-label {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.mugs-match-arrow {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  user-select: none;
+}
+
+.mugs-match-local {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 45%;
+}
+
 /* --- Diff view ------------------------------------------------------------- */
 
 .mugs-diff-view {
