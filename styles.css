@@ -253,6 +253,135 @@
   min-width: 0;
   max-width: 45%;
 }
+/* --- Settings: collapsible section headers ------------------------------- */
+
+.mugs-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mugs-section-header:hover {
+  background: var(--background-modifier-hover);
+  border-radius: 6px;
+}
+
+.mugs-section-chevron {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  width: 1em;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.mugs-section-header h3 {
+  margin: 0;
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+}
+
+/* Collapsed sections hide their body. */
+.mugs-section.is-collapsed .mugs-section-body {
+  display: none;
+}
+
+/* --- Settings: unsaved-changes banner ------------------------------------ */
+
+.mugs-unsaved-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--interactive-accent);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+}
+
+.mugs-unsaved-note {
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+}
+
+.mugs-unsaved-apply {
+  flex-shrink: 0;
+}
+
+/* --- Settings: mapping card header (status dot + name) ------------------- */
+
+.mugs-mapping-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.mugs-mapping-name {
+  font-weight: 600;
+  font-size: var(--font-ui-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Sync-status dot — colors are theme variables so they adapt to light/dark. */
+.mugs-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mugs-status-none,
+.mugs-dot.mugs-status-none {
+  background: var(--text-faint);
+}
+
+.mugs-status-ok,
+.mugs-dot.mugs-status-ok {
+  background: var(--text-success, #3fb950);
+}
+
+.mugs-status-warning,
+.mugs-dot.mugs-status-warning {
+  background: var(--text-warning, #d29922);
+}
+
+.mugs-status-error,
+.mugs-dot.mugs-status-error {
+  background: var(--text-error, #f85149);
+}
+
+/* --- Settings: matched-folder rows (disabled when already mapped) -------- */
+
+.mugs-match-taken {
+  opacity: 0.5;
+}
+
+.mugs-match-taken .mugs-match-label {
+  text-decoration: line-through;
+}
+
+.mugs-match-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--background-modifier-form-field);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+}
 
 /* --- Diff view ------------------------------------------------------------- */
 

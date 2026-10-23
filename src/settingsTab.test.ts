@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { MugsSettingTab } from "./settingsTab";
-
+vi.mock("./providers/factory", () => ({
+  buildProvider: vi.fn(() => ({
+    listRepos: async () => [{ id: "r1", pathWithNamespace: "team/repo" }],
+    listDirectories: async (_repoKey: string, _path: string) => ["Notes"],
+  })),
+}));
 /**
  * The Obsidian 1.14.x blank-UI bug (v0.3.5) left every settings section as an
  * empty <div> because cards were built with document.createElement instead of the
@@ -13,6 +18,7 @@ import { MugsSettingTab } from "./settingsTab";
 
 // --- Minimal DOM shim -------------------------------------------------------
 const { document } = vi.hoisted(() => {
+  const attrRe = new RegExp('^\\[(\\w+)="([^"]*)"\\]$');
   class El {
     tagName: string;
     children: El[] = [];
@@ -75,8 +81,34 @@ const { document } = vi.hoisted(() => {
         remove: (c: string) => set.delete(c),
       };
     }
+    querySelectorAll(selector: string): El[] {
+      const matches = (el: El) => {
+        if (selector.startsWith(".")) return el._classes.has(selector.slice(1));
+        const attrMatch = selector.match(attrRe);
+        if (attrMatch) {
+          const [, name, value] = attrMatch;
+          if (name === "type") return el.type === value;
+          if (name === "class") return el._classes.has(value);
+          return false;
+        }
+        return false;
+      };
+      const out: El[] = [];
+      const walk = (el: unknown) => {
+        for (const c of (el as El).children ?? []) {
+          if (matches(c as El)) out.push(c);
+          walk(c);
+        }
+      };
+      walk(this);
+      return out;
+    }
+    querySelector(selector: string): El | null {
+      const [first] = this.querySelectorAll(selector);
+      return first ?? null;
+    }
+    click(): void { this.handlers.click?.forEach((cb) => cb({ type: "click" })); if (this.tagName === "input" && this.type === "checkbox") this.handlers.change?.forEach((cb) => cb({ type: "change" })); }
   }
-
     // Real Obsidian 1.14.x: document.createElement returns a raw element WITHOUT
     // the createEl/createDiv/classList helpers that container.createDiv() provides.
     // Reproduce that so a section rebuilt with raw createElement throws when body()
@@ -290,5 +322,99 @@ describe("MugsSettingTab — Obsidian 1.13+ declarative API (blank-settings guar
     const { path, text } = obsidianOpenTab(tab);
     expect(path).toBe("declarative");
     expect(text).not.toContain("Getting Started");
+  });
+});
+describe("deferred persistence", () => {
+  it("does not persist a setting change until Apply is clicked", async () => {
+    const plugin = makePlugin();
+    let saveCalls = 0;
+    plugin.store.save = vi.fn(async () => { saveCalls += 1; });
+
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    // Toggle autoMerge off. Deferred persistence: the in-memory setter runs, but
+    // markUnsaved() must NOT persist to disk yet — only show the banner.
+    const toggle = tab.containerEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(toggle).toBeTruthy();
+    toggle.click();
+
+    expect(saveCalls).toBe(0);
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeTruthy();
+
+    // Click Apply → now it persists and the banner disappears.
+    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
+    await flush();
+
+    expect(saveCalls).toBe(1);
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+  });
+
+  it("hides the banner after Apply and clears unsaved state", async () => {
+    const plugin = makePlugin();
+    plugin.store.save = vi.fn(async () => {});
+
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    // No changes yet → no banner.
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+
+    // Make a change then apply it.
+    tab.containerEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeTruthy();
+
+    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
+    await flush();
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+  });
+});
+
+describe("add-mapping assistant", () => {
+  it("disables matched folders whose localFolder is already mapped, with a Mapped badge", async () => {
+    const plugin = makePlugin();
+    // REST provider so refreshMatches runs the name-match path.
+    const baseGet = plugin.store.getSettings;
+    plugin.store.getSettings = () => ({
+      ...baseGet(),
+      credentials: [{ id: "c1", label: "Test", kind: "gitlab", token: "t" }],
+      mappings: [{ id: "m1", label: "Existing", remotePath: "", localFolder: "Notes", direction: "push-pull" as const }],
+    });
+
+    // Match a top-level remote dir named "Notes" against the vault folder "Notes".
+    vi.spyOn(plugin.store, "getToken").mockReturnValue("t");
+
+    const tab = new MugsSettingTab(plugin);
+    // Vault must expose a top-level "Notes" folder so the remote dir matches it.
+    plugin.app.vault.adapter.list = async () => ({ folders: ["Notes"] });
+
+    tab.display();
+    await flush();
+
+    // The matched row for "Notes" must be disabled with a Mapped badge.
+    const takenRow = tab.containerEl.querySelector(".mugs-match-taken");
+    expect(takenRow).toBeTruthy();
+    expect(collectText(takenRow!)).toContain("Mapped");
+  });
+
+  it("renders the add-mapping form above existing mapping cards", async () => {
+    const plugin = makePlugin();
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    // The Folder Mappings section contains the add form first, then mapping cards.
+    const section = Array.from(tab.containerEl.querySelectorAll(".mugs-section"))
+      .find((s) => collectText(s).includes("Folder Mappings")) as HTMLElement;
+    expect(section).toBeTruthy();
+    const all = Array.from(section.querySelectorAll("*"));
+    const addFormIdx = all.findIndex((c) => c.classList.contains("mugs-matches"));
+    const mappingCardIdx = all.findIndex((c) => c.classList.contains("mugs-mapping"));
+
+    expect(addFormIdx).toBeGreaterThanOrEqual(0);
+    expect(mappingCardIdx).toBeGreaterThanOrEqual(0);
+    expect(addFormIdx).toBeLessThan(mappingCardIdx);
   });
 });

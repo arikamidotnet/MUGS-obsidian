@@ -8,7 +8,7 @@
  */
 import { PluginSettingTab, Setting, Notice, type SettingDefinitionItem } from "obsidian";
 import type MugsPlugin from "./main";
-import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping } from "./types";
+import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping, SyncStatus } from "./types";
 import type { RepoSummary } from "./providers/types";
 import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
@@ -76,16 +76,58 @@ export class MugsSettingTab extends PluginSettingTab {
     this._renderAll();
   }
 
+  /** True when settings changed in-memory but not yet persisted to disk via Apply.
+   *  Live preview works regardless: store setters mutate the in-memory store
+   *  immediately, so the scheduler/sync runner already see edits; only the on-disk
+   *  write is deferred until the user applies them (see applySettings). */
+  private unsavedChanges = false;
+
+  /** Reused single instance of the top-of-pane unsaved-changes banner. Kept as a
+   *  persistent element rather than rebuilt each render so toggling it never
+   *  rebuilds text inputs and steals focus/caret position. */
+  private unsavedBannerEl: HTMLElement | null = null;
+
+  /** Create the single unsaved-changes banner if it does not yet exist. */
+  private ensureUnsavedBanner(): void {
+    if (this.unsavedBannerEl) return;
+    const el = this.containerEl.createDiv({ cls: "mugs-unsaved-banner" });
+    el.style.display = "none"; // hidden until there are unsaved changes
+    el.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved changes — not yet applied." });
+    const applyBtn = el.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
+    applyBtn.addEventListener("click", () => void this.applySettings());
+    this.unsavedBannerEl = el;
+  }
+
+  /** Flag that a setting changed so it is not persisted until the user applies.
+   *  Toggles only the banner's visibility (no full re-render) so text inputs keep
+   *  focus and caret position. */
+  private markUnsaved(): void {
+    this.unsavedChanges = true;
+    if (!this.unsavedBannerEl) this.ensureUnsavedBanner();
+    if (this.unsavedBannerEl) this.unsavedBannerEl.style.display = "";
+  }
+
+  /** Persist the current in-memory settings to disk and clear the unsaved flag. */
+  private async applySettings(): Promise<void> {
+    if (this.unsavedBannerEl) this.unsavedBannerEl.remove();
+    this.unsavedBannerEl = null;
+    this.unsavedChanges = false;
+    await this.plugin.store.save();
+    new Notice("MUGS: settings saved.");
+  }
+
   private _renderAll(): void {
     const { containerEl } = this;
+    // Reuse a single unsaved-changes banner across renders so toggling it never
+    // rebuilds text inputs (which would steal focus). Insert at the top after empty().
     containerEl.empty();
+    if (this.unsavedBannerEl) containerEl.appendChild(this.unsavedBannerEl);
 
     // --- Getting Started (startup documentation) ----------------------------
     this.gettingStarted(containerEl);
 
     // --- Credentials / providers -------------------------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Credentials & Providers" });
+    this.section(containerEl, "Credentials & Providers", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "Store per-user tokens inside this vault. Tokens are never shown in full and can be encrypted at rest.",
@@ -102,7 +144,7 @@ export class MugsSettingTab extends PluginSettingTab {
             .addButton((b) =>
               b.setButtonText("Delete").onClick(() => {
                 this.plugin.store.removeCredential(c.id);
-                void this.plugin.store.save();
+                this.markUnsaved();
                 this._renderAll();
               }),
             );
@@ -114,27 +156,30 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     // --- Folder mappings ----------------------------------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Folder Mappings" });
+    // Reordered so the add-mapping form ("Available to map") sits above the existing
+    // mapping cards ("Mapped folders"): users see what they can link first.
+    this.section(containerEl, "Folder Mappings", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "Map remote paths to vault folders for fine-grained, per-user sync.",
       });
 
+      // Available to map — the add-mapping assistant.
+      this.addMappingForm(card);
+
+      card.createEl("div", { cls: "mugs-divider" });
+
+      // Mapped folders — existing mapping cards with status dots + controls.
       const mappings = this.plugin.store.getDisplaySettings().mappings;
       if (mappings.length === 0) {
-        card.createEl("p", { cls: "mags-muted", text: "No mappings yet. Add one below." });
+        card.createEl("p", { cls: "mags-muted", text: "No mappings yet." });
       } else {
         this.renderMappings(card, mappings);
       }
-
-      card.createEl("div", { cls: "mugs-divider" });
-      void this.addMappingForm(card);
     });
 
     // --- Security -----------------------------------------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Security & Credentials" });
+    this.section(containerEl, "Security & Credentials", (card) => {
       new Setting(card)
         .setName("Encrypt credentials at rest")
         .setDesc("When on, stored tokens are encrypted in data.json instead of saved as-is.")
@@ -143,7 +188,7 @@ export class MugsSettingTab extends PluginSettingTab {
             .setValue(this.plugin.store.getSettings().security.encryptCredentials)
             .onChange(async (v) => {
               this.plugin.store.setSecurity({ encryptCredentials: v });
-              await this.plugin.store.save();
+              await this.markUnsaved();
               new Notice(`MUGS credentials ${v ? "encrypted" : "unencrypted"} at rest.`);
             }),
         );
@@ -156,14 +201,13 @@ export class MugsSettingTab extends PluginSettingTab {
             .setValue(this.plugin.store.getSettings().security.encryptionKeyHint ?? "")
             .onChange(async (v) => {
               this.plugin.store.setSecurity({ encryptionKeyHint: v });
-              await this.plugin.store.save();
+              await this.markUnsaved();
             }),
         );
     });
 
     // --- Automatic conflict resolution (Area 3/4) -------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Automatic Conflict Resolution" });
+    this.section(containerEl, "Automatic Conflict Resolution", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "When both sides edited the same lines, decide how MUGS merges them automatically.",
@@ -176,7 +220,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(sync.autoMerge).onChange(async (v) => {
             this.plugin.store.setSync({ autoMerge: v });
-            await this.plugin.store.save();
+            await this.markUnsaved();
           });
         });
 
@@ -186,7 +230,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addDropdown((d) => {
           d.setValue(sync.defaultResolution).onChange(async (v) => {
             this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
-            await this.plugin.store.save();
+            await this.markUnsaved();
           });
           for (const [value, text] of [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]) {
             d.addOption(value, text);
@@ -199,14 +243,13 @@ export class MugsSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(sync.recencyWins).onChange(async (v) => {
             this.plugin.store.setSync({ recencyWins: v });
-            await this.plugin.store.save();
+            await this.markUnsaved();
           });
     });
     });
 
     // --- Sync frequency + maintenance (Area 5/8) --------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Sync Frequency & Maintenance" });
+    this.section(containerEl, "Sync Frequency & Maintenance", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "How often MUGS polls for remote changes while idle, and a global pause for bulk edits.",
@@ -218,7 +261,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addDropdown((d) => {
           d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
             this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
-            await this.plugin.store.save();
+            await this.markUnsaved();
           });
           for (const [value, text] of INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>) {
             d.addOption(value, text);
@@ -231,15 +274,31 @@ export class MugsSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(sync.paused).onChange(async (v) => {
             this.plugin.store.setSync({ paused: v });
-            await this.plugin.store.save();
+            await this.markUnsaved();
             new Notice(`MUGS sync ${v ? "paused" : "resumed"}.`);
           });
-        });
+    });
+
+      // Whole-vault mappings expose a per-mapping .trash/ toggle.
+      const mappings = this.plugin.store.getSettings().mappings;
+      for (const m of mappings) {
+        if (m.remotePath === "" && m.localFolder === ".") {
+          new Setting(card)
+            .setName("Sync the repository's .trash/ folder")
+            .setDesc("Shared across all users via the single git path, like Obsidian's trash. Turn off to keep deletions local to this device.")
+            .addToggle((t) =>
+              t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
+                this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
+                await this.markUnsaved();
+                this._renderAll();
+              }),
+            );
+        }
+      }
     });
 
     // --- Obsidian config sync (Area 9) ------------------------------------
-    this.section(containerEl, (card) => {
-      card.createEl("h3", { text: "Obsidian Config Sync" });
+    this.section(containerEl, "Obsidian Config Sync", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "Share selected Obsidian settings files with your team through the same sync system.",
@@ -252,7 +311,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(obs.enabled).onChange(async (v) => {
             this.plugin.store.setObsidianConfigEnabled(v);
-            await this.plugin.store.save();
+            await this.markUnsaved();
             new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
             this._renderAll();
           });
@@ -296,13 +355,24 @@ export class MugsSettingTab extends PluginSettingTab {
     });
   }
 
-  /** Wrap children in a single grouped settings card. */
-  private section(containerEl: HTMLElement, body: (card: HTMLElement) => void): void {
+  /** Wrap children in a single grouped settings card with a collapsible header.
+   *  The title is rendered as the clickable header (with a chevron); body() receives
+   *  the content area element. Toggling only flips an `is-collapsed` class, so live-
+   *  preview re-renders never rebuild text inputs and steal focus. */
+  private section(containerEl: HTMLElement, title: string, body: (card: HTMLElement) => void): void {
     // Build the card with Obsidian's native createDiv so it is guaranteed to expose
     // createEl/createDiv/etc. In Obsidian 1.14.x a raw document.createElement("div")
     // element does not reliably inherit those helpers, which left every section blank.
     const card = containerEl.createDiv({ cls: "mugs-section" });
-    body(card);
+    const header = card.createEl("div", { cls: "mugs-section-header" });
+    const chevron = header.createEl("span", { cls: "mugs-section-chevron", text: "▸" });
+    header.createEl("h3", { text: title });
+    const content = card.createDiv({ cls: "mugs-section-body" });
+    header.addEventListener("click", () => {
+      const collapsed = card.classList.toggle("is-collapsed");
+      chevron.textContent = collapsed ? "▸" : "▾";
+    });
+    body(content);
     return;
   }
 
@@ -311,21 +381,39 @@ export class MugsSettingTab extends PluginSettingTab {
     return d === "push-pull" ? "Push + pull" : d === "pull-only" ? "Pull only" : "Push only";
   }
 
+  /** CSS class name for a sync-status dot, or "" when no status is recorded.
+   *  Colors are theme variables so they adapt to light/dark/custom themes:
+   *  error = red, conflict/pending = yellow, ok/up-to-date = green, none = gray. */
+  private statusDotClass(status?: SyncStatus): string {
+    switch (status) {
+      case "error": return "mugs-status-error";
+      case "conflict":
+      case "pending": return "mugs-status-warning";
+      case "ok":
+      case "up-to-date": return "mugs-status-ok";
+      default: return "mugs-status-none";
+    }
+  }
+
   /** Render each stored mapping as a card with native Setting rows, collapsible
-   *  include/exclude managers and (for whole-vault mappings) a .trash/ toggle. */
+   *  include/exclude managers. The whole-vault .trash/ toggle lives in the
+   *  Sync Frequency & Maintenance section instead. */
   private renderMappings(card: HTMLElement, mappings: FolderMapping[]): void {
     for (const m of mappings) {
       const block = card.createDiv({ cls: "mugs-mapping" });
-      new Setting(block)
-        .setName(m.label)
-        .setDesc(`${m.remotePath || "(repo root)"} → ${m.localFolder} · ${this.directionText(m.direction)}`)
-        .addButton((b) =>
-          b.setButtonText("Delete").onClick(() => {
-            this.plugin.store.removeMapping(m.id);
-            void this.plugin.store.save();
-            this._renderAll();
-          }),
-        );
+
+      // Header row: status dot + label + delete button. Rendered manually so the
+      // sync-status dot sits beside the name (native Setting has no leading icon slot).
+      const header = block.createDiv({ cls: "mugs-mapping-header" });
+      const dot = header.createEl("span", { cls: `mugs-dot ${this.statusDotClass(this.plugin.store.getSettings().lastSync[m.id]?.status)}` });
+      header.createEl("span", { cls: "mugs-mapping-name", text: m.label });
+      new Setting(header).addButton((b) =>
+        b.setButtonText("Delete").onClick(() => {
+          this.plugin.store.removeMapping(m.id);
+          this.markUnsaved();
+          this._renderAll();
+        }),
+      );
 
       // Editable direction for every card (scoped links and whole-repo alike).
       new Setting(block)
@@ -335,7 +423,7 @@ export class MugsSettingTab extends PluginSettingTab {
           d.setValue(m.direction).onChange(async (v) => {
             const direction = v as SyncDirection;
             this.plugin.store.upsertMapping({ ...m, direction });
-            await this.plugin.store.save();
+            await this.markUnsaved();
             this._renderAll();
           });
           for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
@@ -356,19 +444,6 @@ export class MugsSettingTab extends PluginSettingTab {
         "These globs never sync (gitignore-style; '!' re-includes).",
       ));
 
-      // Whole-vault mappings expose a per-mapping .trash/ toggle.
-      if (m.remotePath === "" && m.localFolder === ".") {
-        new Setting(block)
-          .setName("Sync the repository's .trash/ folder")
-          .setDesc("Shared across all users via the single git path, like Obsidian's trash. Turn off to keep deletions local to this device.")
-          .addToggle((t) =>
-            t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
-              this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
-              await this.plugin.store.save();
-              this._renderAll();
-            }),
-          );
-      }
     }
   }
   /** A collapsible labelled panel with a "Manage" button that reveals a textarea.
@@ -419,7 +494,7 @@ export class MugsSettingTab extends PluginSettingTab {
     const current = this.plugin.store.getSettings().mappings.find((x) => x.id === id);
     if (!current) return;
     this.plugin.store.upsertMapping({ ...current, ...patch });
-    void this.plugin.store.save();
+    this.markUnsaved();
   }
 
   /**
@@ -433,7 +508,7 @@ export class MugsSettingTab extends PluginSettingTab {
     const effective = Array.from(effectiveObsidianEntries(obs).values()).map((e) => structuredClone(e));
     const persist = (entries: ObsidianEntryPolicy[]): void => {
       this.plugin.store.setObsidianConfig({ enabled: obs.enabled, entries });
-      void this.plugin.store.save();
+      this.markUnsaved();
     };
 
     for (const group of categorizeObsidianEntries(effective)) {
@@ -503,7 +578,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         d.setValue(kind).onChange(async (v) => {
           kind = v as Credential["kind"];
           setBaseUrlField(prefilledBaseUrl(kind));
-          await this.plugin.store.save();
+          await this.markUnsaved();
         });
         for (const [value, text] of [
           ["gitlab", "GitLab"],
@@ -564,7 +639,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               baseUrl: baseUrl || undefined,
               repos: repos.length ? repos : undefined,
             });
-            await this.plugin.store.save();
+            await this.markUnsaved();
             new Notice(`MUGS: credential "${label}" saved.`);
             this._renderAll();
           } catch (e) {
@@ -596,6 +671,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let selectedFolders = new Set<string>(); // matched remote paths the user checked to link
     let matches: FolderMatch[] = [];
 
+    // Local folders already claimed by an existing mapping. Matched folders whose
+    // localFolder is in this set are shown as disabled rows with a "Mapped" badge so
+    // users see what's taken and why, rather than silently losing the choice.
+    const usedLocalFolders = new Set(
+      this.plugin.store.getSettings().mappings.map((x) => x.localFolder),
+    );
     const isRest = (): boolean => {
       const cred = creds.find((c) => c.id === providerId);
       return !!cred && cred.kind !== "local";
@@ -723,9 +804,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         head.textContent = wholeRepo ? "Or link individual folders:" : "Matched folders — check to link each as its own mapping";
         for (const m of matches) {
           const row = matchesEl.createDiv({ cls: "mugs-match-row" });
+          const taken = usedLocalFolders.has(m.localFolder);
+          if (taken) row.classList.add("mugs-match-taken");
           const cb = document.createElement("input");
           cb.type = "checkbox";
-          cb.checked = selectedFolders.has(m.remotePath);
+          cb.checked = !taken && selectedFolders.has(m.remotePath);
+          cb.disabled = taken;
           cb.addEventListener("change", (e: Event) => {
             if ((e.target as HTMLInputElement).checked) selectedFolders.add(m.remotePath);
             else selectedFolders.delete(m.remotePath);
@@ -733,7 +817,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           row.appendChild(cb);
           const label = row.createEl("span", { cls: "mugs-match-label" });
           label.textContent = m.remotePath;
-          label.title = `${m.remotePath} → ${m.localFolder}`;
+          label.title = taken ? `${m.localFolder} is already mapped` : `${m.remotePath} → ${m.localFolder}`;
+          if (taken) label.createEl("span", { cls: "mugs-match-badge", text: "Mapped" });
           row.createEl("span", { cls: "mugs-match-arrow", text: "→" });
           row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
           matchesEl.appendChild(row);
@@ -798,7 +883,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               }
               new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} saved.`);
             }
-            await this.plugin.store.save();
+            await this.markUnsaved();
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);

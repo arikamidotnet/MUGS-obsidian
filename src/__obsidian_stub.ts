@@ -36,7 +36,7 @@ export class Setting {
       selectEl: select,
       setValue: (v: string) => { select.value = v; return dd; },
       onChange: (_cb: (v: string) => void) => dd,
-      addOption: (value: string, text: string) => { const o = document.createElement("option"); o.value = value; o.textContent = text; select.appendChild(o); return dd; },
+      addOption: (value: string, text: string) => { const o = this.el.createEl("option", { text }); o.value = value; select.appendChild(o); return dd; },
       setDisabled: (d: boolean) => { select.disabled = d; return dd; },
     };
     cb(dd);
@@ -44,14 +44,23 @@ export class Setting {
   }
   addToggle(cb: (toggle: any) => void): this {
     const input = this.el.createEl("input", { type: "checkbox" });
-    const tg = { value: false, setValue: (v: boolean) => { input.checked = v; return tg; }, onChange: (_cb: (v: boolean) => void) => tg };
+    let onChangeCb: ((v: boolean) => void) | null = null;
+    const tg = {
+      value: false,
+      setValue: (v: boolean) => { input.checked = v; return tg; },
+      onChange: (cb: (v: boolean) => void) => { onChangeCb = cb; return tg; },
+    };
     cb(tg);
+    input.addEventListener("change", () => { if (onChangeCb) onChangeCb(input.checked); });
     return this;
   }
   addSlider(cb: (slider: any) => void): this { return this; }
   addButton(cb: (button: any) => void): this {
-    const btn = { setButtonText: (_t: string) => btn, setCta: () => btn, setClass: () => btn, setDisabled: (_d: boolean) => btn, onClick: (_cb: () => void) => btn };
-    cb(btn);
+    const btn = document.createElement("button");
+    let onClickCb: (() => void) | null = null;
+    const b = { setButtonText: (_t: string) => { btn.textContent = _t; return b; }, setCta: () => b, setClass: () => b, setDisabled: (_d: boolean) => { btn.disabled = _d; return b }, onClick: (cb: () => void) => { onClickCb = cb; return b } };
+    cb(b);
+    btn.addEventListener("click", () => { if (onClickCb) onClickCb(); });
     return this;
   }
   addColorPicker(cb: (picker: any) => void): this { return this; }
@@ -92,16 +101,49 @@ class El {
   disabled = false;
   innerHTML = "";
   style: Record<string, string> = {};
+  private _handlers: Record<string, ((e: unknown) => void)[]> = {};
+  parent: El | null = null;
   constructor(tag: string) { this.tagName = tag.toLowerCase(); }
   get className() { return [...this._classes].join(" "); }
-  set className(v: string) { this._classes = new Set(v.split(/\s+/).filter(Boolean)); }
-  createDiv(opts?: { cls?: string }) { const e = new El("div"); if (opts?.cls) e.className = opts.cls; this.children.push(e); return e; }
-  createEl(tag: string, opts?: { text?: string; cls?: string; type?: string }) { const e = new El(tag); if (opts?.text != null) e.textContent = opts.text; if (opts?.cls) e.className = opts.cls; if (opts?.type) e.type = opts.type; this.children.push(e); return e; }
-  appendChild(child: unknown) { this.children.push(child); if ((child as { tagName?: string }).tagName === "option" && Array.isArray(this.options)) this.options.push(child); return child; }
-  remove() {}
-  empty() { this.children = []; }
-  addEventListener() {}
+  set className(v: string) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
   get classList() { const set = this._classes; return { toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)), contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) }; }
+  createDiv(opts?: { cls?: string }) { const e = new El("div"); if (opts?.cls) e.className = opts.cls; this.children.push(e); e.parent = this; return e; }
+  createEl(tag: string, opts?: { text?: string; cls?: string; type?: string }) { const e = new El(tag); if (opts?.text != null) e.textContent = opts.text; if (opts?.cls) e.className = opts.cls; if (opts?.type) e.type = opts.type; this.children.push(e); e.parent = this; return e; }
+  empty(): void { this.children = []; }
+  appendChild(child: unknown) { this.children.push(child); (child as El).parent = this; return child; }
+  remove() { if (this.parent) { const i = this.parent.children.indexOf(this); if (i >= 0) this.parent.children.splice(i, 1); this.parent = null; } }
+  addEventListener(type: string, cb: (e: unknown) => void): void {
+    (this._handlers[type] ??= []).push(cb);
+  }
+  click(): void { this._handlers.click?.forEach((cb) => cb({ type: "click" })); if (this.tagName === "input" && this.type === "checkbox") this._handlers.change?.forEach((cb) => cb({ type: "change" })); }
+  input(): void { this._handlers.input?.forEach((cb) => cb({ type: "input" })); }
+  querySelectorAll(selector: string): unknown[] {
+    const matches = (el: El) => {
+      if (selector === "*") return true;
+      if (selector.startsWith(".")) return el._classes.has(selector.slice(1));
+    const attrRe = new RegExp('^\\w*\\[(\\w+)="([^"]*)"\\]$');
+    const attrMatch = selector.match(attrRe);
+      if (attrMatch) {
+        const [, name, value] = attrMatch;
+        if (name === "type") return el.type === value;
+        if (name === "class") return el._classes.has(value);
+        return false;
+      }
+      return false;
+    };
+    const out: unknown[] = [];
+    const walk = (el: unknown) => {
+      for (const c of (el as El).children ?? []) {
+        if (matches(c as El)) out.push(c);
+        walk(c);
+      }
+    };
+    walk(this);
+    return out;
+  }
+  querySelector(selector: string): unknown {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
 }
 export class PluginSettingTab {
   app: any;
