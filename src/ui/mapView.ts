@@ -1,46 +1,32 @@
 /**
  * MUGS — Map view (`mugs-map`).
  *
- * Obsidian glue only: it asks the injected {@link MapDataSource} for rows, turns
- * them into a graph with the pure {@link buildMapGraph}, and renders that graph.
- * All logic lives in mapModel.ts (unit-tested); this file never runs under vitest
- * because it imports the Obsidian DOM API (like settingsTab.ts). It uses native
- * SVG DOM (createElementNS/setAttribute) rather than a fluent builder so it does
- * not depend on any Obsidian-only typings.
+ * Obsidian glue only: it asks the injected {@link MapDataSource} for rows and renders
+ * them as a card-based mapping overview. All logic lives in mapModel.ts (unit-tested);
+ * this file never runs under vitest because it imports the Obsidian DOM API.
  */
 import { ItemView, Notice } from "obsidian";
-import { buildMapGraph, type MapContext, type MapEdge, type MapGraph, type MapNode } from "./mapModel";
+import { buildMapGraph, type MapContext, type MapEdge, type MapNode, type MapGraph } from "./mapModel";
 import { getMugsContext } from "./dataSources";
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-const NODE_W = 150;
-const NODE_H = 40;
-const ROW_H = 56;
-const PAD_TOP = 18;
-const PAD_LEFT = 24;
-const LEFT_X = 72; // folder node center x
-const RIGHT_X = 300; // repo node center x
+/** Status icon glyph shown on each mapping card. */
+const STATUS_ICON: Record<string, string> = {
+  ok: "✓",
+  "up-to-date": "✓",
+  pending: "⋯",
+  conflict: "!",
+  error: "×",
+};
 
-/** Direction glyph shown on the edge between the two nodes. */
-const DIRECTION_GLYPH: Record<string, string> = {
-  "push-pull": "⇄",
-  "pull-only": "↓",
-  "push-only": "↑",
+/** Direction label + icon for a mapping card. */
+const DIRECTION_LABEL: Record<string, string> = {
+  "push-pull": "⇄ Push + pull",
+  "pull-only": "↓ Pull only",
+  "push-only": "↑ Push only",
 };
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
-}
-
-/** Create an SVG child element (namespaced) and append it to `parent`. */
-function svgChild(parent: Node, tag: string): Element {
-  const el = document.createElementNS(SVG_NS, tag);
-  parent.appendChild(el);
-  return el;
-}
-
-function setAttrs(el: Element, attrs: Record<string, string | number>): void {
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
 }
 
 export class MapView extends ItemView {
@@ -81,29 +67,40 @@ export class MapView extends ItemView {
     }
   }
 
-  private render(graph: MapGraph, rows: { status: string; lastPushAt?: number; lastPullAt?: number }[]): void {
+  private render(graph: MapGraph, rows: Array<{ status: string; lastPushAt?: number; lastPullAt?: number; mapping: { id: string } }>): void {
+    this.contentEl.empty();
     this.renderLegend();
 
     if (rows.length === 0) {
-      this.contentEl.createEl("p", { text: "No folder mappings yet. Add one in the MUGS settings." });
+      const empty = this.contentEl.createDiv({ cls: "mugs-empty-state" });
+      empty.createEl("h3", { text: "No folder mappings yet" });
+      empty.createEl("p", {
+        text: "Add a credential and create your first folder mapping in the MUGS settings to see it here.",
+        cls: "mugs-muted",
+      });
       return;
     }
 
-    const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-    this.renderFooter(rows);
+    this.renderSummary(rows);
 
-    const svg = this.contentEl.createSvg("svg");
-    svg.addClass("mugs-map-svg");
-    const laneCount = Math.max(graph.edges.length, 1);
-    svg.setAttribute("height", String(PAD_TOP * 2 + laneCount * ROW_H));
+    const grid = this.contentEl.createDiv({ cls: "mugs-map-grid" });
+    // Build a lookup from edge → row for status/last-sync info.
+    const rowByMappingId = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) {
+      const m = graph.edges.find((e) => e.mappingId === r.mapping.id);
+      if (m) rowByMappingId.set(m.mappingId, r);
+    }
 
-    for (let i = 0; i < graph.edges.length; i++) {
-      this.renderLane(svg, graph.edges[i], byId, i);
+    // Render one card per mapping edge. Each card shows the folder→repo relationship.
+    for (const edge of graph.edges) {
+      const folder = graph.nodes.find((n) => n.id === edge.from)!;
+      const repo = graph.nodes.find((n) => n.id === edge.to)!;
+      this.renderCard(grid, edge, folder, repo, rowByMappingId.get(edge.mappingId));
     }
   }
 
-  /** Compact footer: mapping count, in-sync count, and the most recent sync time. */
-  private renderFooter(rows: { status: string; lastPushAt?: number; lastPullAt?: number }[]): void {
+  /** Compact summary bar: mapping count, in-sync count, last sync time. */
+  private renderSummary(rows: Array<{ status: string; lastPushAt?: number; lastPullAt?: number }>): void {
     const inSync = rows.filter((r) => r.status === "ok" || r.status === "up-to-date").length;
     let latest = 0;
     for (const r of rows) {
@@ -111,83 +108,63 @@ export class MapView extends ItemView {
       if (r.lastPullAt && r.lastPullAt > latest) latest = r.lastPullAt;
     }
 
-    const footer = this.contentEl.createDiv({ cls: "mugs-map-footer" });
-    footer.createSpan({ text: `${rows.length} mapping${rows.length === 1 ? "" : "s"}`, cls: "mugs-map-footer-item" });
-    footer.createSpan({ text: `${inSync} in sync`, cls: "mugs-map-footer-item mugs-map-footer-good" });
+    const summary = this.contentEl.createDiv({ cls: "mugs-map-summary" });
+    const totalChip = summary.createSpan({ cls: "mugs-chip mugs-chip-muted", text: `${rows.length} mapping${rows.length === 1 ? "" : "s"}` });
+    const syncChip = summary.createSpan({
+      cls: `mugs-chip ${inSync === rows.length ? "mugs-chip-success" : "mugs-chip-warning"}`,
+      text: `${inSync}/${rows.length} in sync`,
+    });
     if (latest) {
-      footer.createSpan({ text: `last sync ${relativeTime(Date.now() - latest)}`, cls: "mugs-map-footer-item" });
+      summary.createSpan({ text: `last sync ${relativeTime(Date.now() - latest)}`, cls: "mugs-chip mugs-chip-muted" });
     }
   }
 
-  private renderLane(svg: SVGElement, edge: MapEdge, byId: Map<string, MapNode>, index: number): void {
-    const folder = byId.get(edge.from);
-    const repo = byId.get(edge.to);
-    if (!folder || !repo) return;
+  private renderCard(
+    grid: HTMLElement,
+    edge: MapEdge,
+    folder: MapNode,
+    repo: MapNode,
+    row?: { status: string; lastPushAt?: number; lastPullAt?: number },
+  ): void {
+    const card = grid.createDiv({ cls: "mugs-map-card" });
 
-    const y = PAD_TOP + index * ROW_H;
-    // Repo node color is the single source of truth (mapModel: status-then-direction).
-    const accent = repo.color;
-
-    // Connecting edge (colored by status) with a direction glyph.
-    setAttrs(svgChild(svg, "line"), {
-      x1: String(PAD_LEFT + NODE_W / 2 + 8),
-      y1: String(y + NODE_H / 2),
-      x2: String(RIGHT_X + NODE_W / 2),
-      y2: String(y + NODE_H / 2),
-      stroke: accent,
-      "stroke-width": "2",
+    // Status accent bar + icon.
+    const header = card.createDiv({ cls: "mugs-map-card-header" });
+    const statusIcon = header.createSpan({
+      cls: `mugs-status-icon mugs-status-${row?.status ?? "pending"}`,
+      text: STATUS_ICON[row?.status ?? "pending"] ?? "⋯",
     });
 
-    const glyph = svgChild(svg, "text");
-    setAttrs(glyph, {
-      x: String((LEFT_X + RIGHT_X) / 2),
-      y: String(y + NODE_H / 2 - 4),
-      "text-anchor": "middle",
-      "font-size": "16",
-      fill: "var(--text-faint)",
-    });
-    glyph.textContent = DIRECTION_GLYPH[edge.direction] ?? "↔";
+    // Folder name (left side).
+    const folderCol = header.createDiv({ cls: "mugs-map-card-folder" });
+    folderCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(folder.label, 30) });
+    if (folder.owner) {
+      folderCol.createEl("span", { cls: "mugs-map-card-owner", text: `owned by ${folder.owner}` });
+    }
 
-    this.renderNode(svg, folder, LEFT_X, y, "var(--border-color)");
-    this.renderNode(svg, repo, RIGHT_X, y, accent);
-  }
+    // Direction glyph (center).
+    header.createSpan({ cls: "mugs-map-card-direction", text: DIRECTION_LABEL[edge.direction] ?? edge.direction });
 
-  private renderNode(svg: SVGElement, node: MapNode, centerX: number, y: number, accent: string): void {
-    const x = centerX - NODE_W / 2;
-    const rect = svgChild(svg, "rect");
-    setAttrs(rect, {
-      x: String(x),
-      y: String(y),
-      width: String(NODE_W),
-      height: String(NODE_H),
-      rx: "8",
-      fill: "var(--background-secondary)",
-      stroke: node.kind === "repo" ? accent : "var(--border-color)",
-      "stroke-width": "1.5",
-    });
-    // Hover tooltip reveals the full (untruncated) label and owner.
-    svgChild(rect, "title").textContent = node.owner ? `${node.label} · ${node.owner}` : node.label;
+    // Repo name (right side) with branch.
+    const repoCol = header.createDiv({ cls: "mugs-map-card-repo" });
+    repoCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(repo.label, 30) });
+    if (edge.branch) {
+      repoCol.createEl("span", { cls: "mugs-map-card-branch", text: `branch: ${edge.branch}` });
+    } else {
+      repoCol.createEl("span", { cls: "mugs-map-card-detail", text: edge.remotePath || "whole repository" });
+    }
 
-    const title = svgChild(svg, "text");
-    setAttrs(title, {
-      x: String(centerX),
-      y: String(y + 18),
-      "text-anchor": "middle",
-      "font-weight": "600",
-      fill: "var(--text-normal)",
-    });
-    title.textContent = truncate(node.label, 20);
+    // Footer with last sync times.
+    if (row) {
+      const footer = card.createDiv({ cls: "mugs-map-card-footer" });
+      const parts: string[] = [];
+      if (row.lastPushAt) parts.push(`pushed ${relativeTime(Date.now() - row.lastPushAt)}`);
+      if (row.lastPullAt) parts.push(`pulled ${relativeTime(Date.now() - row.lastPullAt)}`);
+      footer.createEl("span", { cls: "mugs-map-card-sync-times", text: parts.length ? parts.join(" · ") : "never synced" });
 
-    const detail = node.owner ? `${node.owner} · ${truncate(node.detail, 18)}` : truncate(node.detail, 24);
-    const sub = svgChild(svg, "text");
-    setAttrs(sub, {
-      x: String(centerX),
-      y: String(y + 35),
-      "text-anchor": "middle",
-      "font-size": "11",
-      fill: node.owner ? "var(--text-muted)" : "var(--text-faint)",
-    });
-    sub.textContent = truncate(detail, 26);
+      const statusLabel = (row.status ?? "pending").replace(/-/g, " ");
+      footer.createSpan({ cls: `mugs-chip mugs-chip-${statusChipClass(row.status)}`, text: statusLabel });
+    }
   }
 
   private renderLegend(): void {
@@ -203,6 +180,21 @@ export class MapView extends ItemView {
       chip.createSpan({ cls: "mugs-map-legend-swatch", attr: { style: `background:${statusColor(status)}` } });
       chip.createSpan({ text: label });
     }
+  }
+}
+
+function statusChipClass(status?: string): string {
+  switch (status) {
+    case "ok":
+    case "up-to-date":
+      return "success";
+    case "conflict":
+    case "pending":
+      return "warning";
+    case "error":
+      return "error";
+    default:
+      return "muted";
   }
 }
 

@@ -14,7 +14,7 @@ import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
-import { matchFolderPairs, type FolderMatch } from "./sync/folderMatch";
+import { matchFolderPairs, matchFolderPairsFuzzy, type FolderMatch } from "./sync/folderMatch";
 
 // The shipped obsidian typings (pinned "latest" at an older snapshot) omit
 // addSelect/addField from Setting even though both are real runtime APIs.
@@ -135,12 +135,15 @@ export class MugsSettingTab extends PluginSettingTab {
 
       const creds = this.plugin.store.getDisplaySettings().credentials;
       if (creds.length === 0) {
-        card.createEl("p", { cls: "mags-muted", text: "No credentials yet." });
+        card.createEl("p", { cls: "mugs-muted", text: "No credentials yet." });
       } else {
         for (const c of creds) {
+          const descParts = [`token: ${maskToken(c.token)}`];
+          if (c.username) descParts.push(`user: ${c.username}`);
+          if (c.baseUrl) descParts.push(`url: ${c.baseUrl}`);
           new Setting(card)
             .setName(`${c.label} (${c.kind})`)
-            .setDesc(`token: ${maskToken(c.token)}`)
+            .setDesc(descParts.join(" · "))
             .addButton((b) =>
               b.setButtonText("Delete").onClick(() => {
                 this.plugin.store.removeCredential(c.id);
@@ -172,7 +175,7 @@ export class MugsSettingTab extends PluginSettingTab {
       // Mapped folders — existing mapping cards with status dots + controls.
       const mappings = this.plugin.store.getDisplaySettings().mappings;
       if (mappings.length === 0) {
-        card.createEl("p", { cls: "mags-muted", text: "No mappings yet." });
+        card.createEl("p", { cls: "mugs-muted", text: "No mappings yet." });
       } else {
         this.renderMappings(card, mappings);
       }
@@ -290,7 +293,6 @@ export class MugsSettingTab extends PluginSettingTab {
               t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
                 this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
                 await this.markUnsaved();
-                this._renderAll();
               }),
             );
         }
@@ -326,7 +328,7 @@ export class MugsSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "About" });
     containerEl.createEl("p", {
       text: `MUGS — Multi-User Git Sync · v${this.plugin.manifest.version}`,
-      cls: "mags-muted",
+      cls: "mugs-muted",
     });
     containerEl.createEl("p", {
       text: "Add a credential, then map a remote path to a vault folder. Use the ribbon icons or the 'MUGS' commands to sync and view changes.",
@@ -424,7 +426,6 @@ export class MugsSettingTab extends PluginSettingTab {
             const direction = v as SyncDirection;
             this.plugin.store.upsertMapping({ ...m, direction });
             await this.markUnsaved();
-            this._renderAll();
           });
           for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
             d.addOption(value, text);
@@ -669,7 +670,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let syncTrash = false; // whole-repo sub-option: include the repo's .trash folder in the sync
     let wholeRepo = false;
     let selectedFolders = new Set<string>(); // matched remote paths the user checked to link
-    let matches: FolderMatch[] = [];
+    let matches: FolderMatch[] = [];       // exact name matches (top-level only)
+    let fuzzyMatches: Array<{ remotePath: string; localFolder: string; label: string; score: number }> = [];
 
     // Local folders already claimed by an existing mapping. Matched folders whose
     // localFolder is in this set are shown as disabled rows with a "Mapped" badge so
@@ -696,27 +698,32 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
           d.addOption(value, text);
         }
-        if (creds.length === 0) d.setDisabled(true);
       });
 
     // --- Repository selector -------------------------------------------------
+    const repoSelWrap = card.createDiv({ cls: "mugs-repo-select-wrap" });
+    const loadingEl = repoSelWrap.createDiv({ cls: "mugs-loading-row", text: "" });
+    const spinner = loadingEl.createEl("span", { cls: "mugs-loading" });
+    loadingEl.createEl("span", { text: "Loading repositories…" });
+    loadingEl.style.display = "none";
     const repoSel = card.createEl("select", { cls: "mugs-repo-select" });
+
     const refreshRepos = async (): Promise<void> => {
-      wholeRepo = false;
-      syncTrash = false;
+      loadingEl.style.display = "";
+      spinner.style.display = "inline-block";
       selectedFolders.clear();
       reposCache = [];
       repoRef = "";
       repoKey = "";
-      if (!isRest()) {
-        // Local provider has no REST adapter: it syncs one existing clone as a whole-repo mapping.
-        repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
-        await refreshMatches();
-        return;
-      }
-      const cred = creds.find((c) => c.id === providerId);
-      if (!cred) { repoSel.disabled = true; return; }
       try {
+        if (!isRest()) {
+          // Local provider has no REST adapter: it syncs one existing clone as a whole-repo mapping.
+          repoSel.innerHTML = '<option value="">Local clone (single repo)</option>';
+          await refreshMatches();
+          return;
+        }
+        const cred = creds.find((c) => c.id === providerId);
+        if (!cred) { repoSel.disabled = true; return; }
         const token = this.plugin.store.getToken(providerId) ?? "";
         if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; return; }
         const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
@@ -744,6 +751,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       } catch (e) {
         new Notice(`MUGS: could not list repositories — ${errorMessage(e)}`);
         repoSel.disabled = true;
+      } finally {
+        loadingEl.style.display = "none";
+        spinner.style.display = "none";
       }
     };
 
@@ -754,15 +764,23 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       wholeRepo = false;
       syncTrash = true;
       selectedFolders.clear();
+      fuzzyMatches = [];
       if (!isRest() || !repoKey) { matches = []; renderMatches(); return; }
       const cred = creds.find((c) => c.id === providerId);
       if (!cred) { matches = []; renderMatches(); return; }
       try {
         const detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
         const vaultTop = await this.listVaultFolders();
-        matches = matchFolderPairs(detectedDirs, vaultTop).filter((m) => m.remotePath !== ".obsidian" && m.remotePath !== ".trash");
+        // Filter out dotfolders (.obsidian/.trash): .obsidian linking is deprecated (handled by the
+        // Obsidian Config Sync section), and .trash is a whole-repo sub-option.
+        const remoteDirs = detectedDirs.filter((d) => d !== ".obsidian" && d !== ".trash");
+        matches = matchFolderPairs(remoteDirs, vaultTop);
+        // Also compute fuzzy suggestions for near-misses (e.g., "Notes" → "My Notes").
+        const fuzzy = matchFolderPairsFuzzy(remoteDirs, vaultTop).filter((m) => m.score < 1 && m.remotePath !== ".obsidian" && m.remotePath !== ".trash");
+        fuzzyMatches = fuzzy.map((m) => ({ remotePath: m.remotePath, localFolder: m.localFolder, label: m.label, score: m.score }));
       } catch (e) {
         matches = [];
+        fuzzyMatches = [];
       }
       renderMatches();
     };
@@ -798,7 +816,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         trashRow.appendChild(trashInput);
         trashRow.createEl("span", { text: "Include the repository's .trash/ folder" });
       }
-
+      // --- Exact matches (checkboxes) -------------------------------------------
       if (matches.length > 0) {
         const head = matchesEl.createEl("div", { cls: "mugs-matches-head" });
         head.textContent = wholeRepo ? "Or link individual folders:" : "Matched folders — check to link each as its own mapping";
@@ -823,8 +841,28 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
           matchesEl.appendChild(row);
         }
-      } else if (!wholeRepo) {
-        matchesEl.createEl("p", { cls: "mags-muted", text: wholeRepo ? "" : "No folders matched between this repo and your vault yet." });
+      } else if (!wholeRepo && !fuzzyMatches.length) {
+        matchesEl.createEl("p", { cls: "mugs-muted", text: wholeRepo ? "" : "No folders matched between this repo and your vault yet." });
+      }
+
+      // --- Fuzzy suggestions (one-click auto-match chips) -----------------------
+      if (!wholeRepo && fuzzyMatches.length > 0) {
+        const head = matchesEl.createEl("div", { cls: "mugs-suggestions-head" });
+        head.textContent = "Did you mean?";
+        for (const fm of fuzzyMatches) {
+          // Only show suggestions where the vault folder isn't already mapped.
+          if (usedLocalFolders.has(fm.localFolder)) continue;
+          const chip = matchesEl.createEl("button", { type: "button", cls: "mugs-match-chip" });
+          chip.setAttribute("title", `Link "${fm.remotePath}" → "${fm.localFolder}" (${Math.round(fm.score * 100)}% match)`);
+          chip.textContent = `${fm.remotePath} → ${fm.localFolder}`;
+          chip.addEventListener("click", (e: MouseEvent) => {
+            e.preventDefault();
+            // Add the remote path to selectedFolders so it gets created as a mapping.
+            selectedFolders.add(fm.remotePath);
+            // Re-render to show it checked in the exact matches list below.
+            renderMatches();
+          });
+        }
       }
     };
 
@@ -894,8 +932,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     void refreshRepos();
   }
-
-
   /** List child directories of `repoKey` at `path` for a credential's provider. */
   private async listDirectoriesFor(cred: Credential, repoKey: string, path: string): Promise<string[]> {
     const token = this.plugin.store.getToken(cred.id) ?? cred.token ?? "";
