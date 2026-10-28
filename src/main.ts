@@ -24,9 +24,9 @@ import {
 import type { MugsSettings, FolderMapping, Agent } from "./types";
 import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
-import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor } from "./sync/driver";
-import { decideRun, debounceFireTimes, type RunDecision } from "./sync/schedule";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
+import { decideRun, debounceFireTimes, type RunDecision } from "./sync/schedule";
 import type { WorkingTreeWriter } from "./sync/cloneManager";
 import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
@@ -43,7 +43,7 @@ declare module "obsidian" {
   interface Plugin {
     addStyleTag(css: string): void;
     /** Obsidian's MCP host hook (newer builds). Augmented here because the shipped typings
-     *  predate MCP support; guarded by `typeof` at the call site so older builds are fine. */
+     * predate MCP support; guarded by `typeof` at the call site so older builds are fine. */
     registerMcpServer?(definition: { name: string; version: string; tools?: unknown[] }): EventRef;
   }
 }
@@ -198,38 +198,41 @@ export default class MugsPlugin extends Plugin {
     const cloneRoot = this.cloneRoot();
     const settings = this.store.getSettings();
 
-    const outcomes = await syncAllMappings({
-      mappings: settings.mappings,
-      credentials: settings.credentials,
-      getToken: (id) => this.store.getToken(id),
-      buildProvider,
-      cloneRoot,
-      runner: new ChildProcessRunner(),
-      lastSync: storeWritableAccessor(this.store),
-      workingTree: this.workingTreeWriter(),
-      conflicts: storeConflictAccessor(this.store),
-      // Opt-in `.obsidian/` config sync scope (Area 9): when enabled, personal vs
-      // vault-wide classification gates which .obsidian/ files are pulled/pushed.
-      obsidianConfig: settings.sync.obsidianConfig,
-      editorOpen: this.editorOpen,
-      trash: this.trashStore(),
-      heldPaths: storeHeldAccessor(this.store).heldPaths,
-      pickAgent: this.pickAgent,
-    });
+    let outcomes: SyncOutcome[];
+    try {
+      outcomes = await syncAllMappings({
+        mappings: settings.mappings,
+        credentials: settings.credentials,
+        getToken: (id) => this.store.getToken(id),
+        buildProvider,
+        cloneRoot,
+        runner: new ChildProcessRunner(),
+        lastSync: storeWritableAccessor(this.store),
+        workingTree: this.workingTreeWriter(),
+        conflicts: storeConflictAccessor(this.store),
+        obsidianConfig: settings.sync.obsidianConfig,
+        editorOpen: this.editorOpen,
+        trash: this.trashStore(),
+        heldPaths: storeHeldAccessor(this.store).heldPaths,
+        pickAgent: this.pickAgent,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      new Notice(`MUGS sync failed:\n${msg}`, 8000);
+      if (!quiet) console.error("MUGS: runSync threw", err);
+      this.updateStatusBar("idle");
+      return;
+    }
+
     await this.store.save();
 
-    if (quiet) return;
-
+    // Report per-mapping outcomes as notices (manual runs only).
     for (const o of outcomes.filter((o) => o.status === "conflict")) {
       const n = o.conflicts?.length ?? 0;
       new Notice(`MUGS — ${o.label} needs a manual merge (${n} file${n === 1 ? "" : "s"} diverged). Open the Diff view to resolve.`);
     }
     for (const o of outcomes.filter((o) => o.status === "ok")) {
-      const dir = o.push ? "push + pull" : "pull";
-      new Notice(`MUGS ✓ ${o.label}: ${dir}`);
-    }
-    for (const o of outcomes.filter((o) => o.status === "skipped")) {
-      new Notice(`MUGS ⏭ ${o.label}: ${o.reason ?? "skipped"}`);
+      if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
     }
   }
 
