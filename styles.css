@@ -1,6 +1,6 @@
 /*
  * MUGS — Multi-User Git Sync
- * Stylesheet for the Map view, Diff view and settings UI.
+ * Stylesheet for the Map view, Diff view, Conflicts panel and settings UI.
  *
  * Uses Obsidian's built-in theme CSS variables (--text-normal,
  * --background-modifier-border, --interactive-accent, …) so the plugin adapts to
@@ -9,14 +9,108 @@
  * required when installing the plugin.
  */
 
-/* --- Shared ---------------------------------------------------------------- */
+/* --- Shared utilities ------------------------------------------------------ */
 
-.mags-muted {
+.mugs-muted {
   color: var(--text-muted);
   font-style: italic;
 }
 
-/* Getting Started documentation card (top of settings) */
+.mugs-text-success { color: var(--text-success, #3fb950); }
+.mugs-text-warning { color: var(--text-warning, #d29922); }
+.mugs-text-error   { color: var(--text-error, #f85149); }
+
+/* Chip component — used in map summary, legend, diff badges. */
+.mugs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+}
+
+.mugs-chip-muted    { background: var(--background-modifier-form-field); color: var(--text-muted); }
+.mugs-chip-success  { background: hsl(134, 40%, 87%); color: var(--text-success, #3fb950); }
+.mugs-chip-warning  { background: hsl(42, 90%, 85%); color: var(--text-warning, #d29922); }
+.mugs-chip-error    { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
+
+/* Status icon — circular badge with a glyph. */
+.mugs-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: var(--font-ui-smaller);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.mugs-status-ok, .mugs-status-icon.mugs-status-ok      { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
+.mugs-status-pending, .mugs-status-icon.mugs-status-pending { background: hsl(42, 90%, 85%); color: var(--text-warning, #d29922); }
+.mugs-status-conflict, .mugs-status-icon.mugs-status-conflict { background: hsl(18, 75%, 85%); color: #e45b3d; }
+.mugs-status-error, .mugs-status-icon.mugs-status-error     { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
+
+/* --- Card component -------------------------------------------------------- */
+
+.mugs-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: var(--background-secondary);
+}
+
+.mugs-card:hover {
+  border-color: var(--interactive-accent);
+}
+
+.mugs-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.mugs-card-title {
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.mugs-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+/* --- Empty state ----------------------------------------------------------- */
+
+.mugs-empty-state {
+  text-align: center;
+  padding: 32px 16px;
+  color: var(--text-muted);
+}
+
+.mugs-empty-state h3 {
+  margin: 0 0 8px;
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+/* --- Getting Started card (top of settings) ------------------------------- */
+
 .mugs-getting-started {
   border: 1px solid var(--interactive-accent);
   border-left-width: 4px;
@@ -32,7 +126,7 @@
   font-weight: 600;
 }
 
-.mugs-gs-intro {
+.mugs-gs-intro, .mugs-note {
   margin: 0 0 10px;
   color: var(--text-normal);
   font-size: var(--font-ui-smaller);
@@ -46,58 +140,15 @@
 }
 
 .mugs-note {
-  margin: 8px 0 0;
   padding: 8px 12px;
   border-radius: 6px;
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
-  color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   line-height: 1.5;
 }
 
-/* --- Map view -------------------------------------------------------------- */
-
-.mugs-maps-view {
-  padding: 8px 14px 12px;
-}
-
-.mugs-map-svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.mugs-map-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  align-items: center;
-  margin-bottom: 10px;
-}
-
-.mugs-map-legend-label {
-  font-weight: 600;
-  color: var(--text-normal);
-}
-
-.mugs-map-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.mugs-map-legend-swatch {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  border: 1px solid var(--background-modifier-border);
-}
-
-/* --- Settings -------------------------------------------------------------- */
+/* --- Settings sections ----------------------------------------------------- */
 
 .mugs-section {
   border: 1px solid var(--background-modifier-border);
@@ -107,11 +158,32 @@
   background: var(--background-modifier-hover);
 }
 
-.mugs-section h3 {
-  margin: 6px 0 4px;
+.mugs-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mugs-section-header:hover { background: var(--background-modifier-hover); border-radius: 6px; }
+
+.mugs-section-chevron {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  width: 1em;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.mugs-section-header h3 {
+  margin: 0;
   font-size: var(--font-ui-medium);
   font-weight: 600;
 }
+
+.mugs-section.is-collapsed .mugs-section-body { display: none; }
 
 .mugs-desc {
   margin: 0 0 14px;
@@ -125,49 +197,82 @@
   margin: 14px 0;
 }
 
-/* Multi-field add forms: responsive two-column grid. */
-.mugs-form-grid {
+/* --- Unsaved-changes banner ----------------------------------------------- */
+
+.mugs-unsaved-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--interactive-accent);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: var(--background-modifier-hover);
+}
+
+.mugs-unsaved-note { color: var(--text-normal); font-size: var(--font-ui-smaller); font-weight: 500; }
+.mugs-unsaved-apply { flex-shrink: 0; }
+
+/* --- Map view -------------------------------------------------------------- */
+
+.mugs-maps-view { padding: 12px 16px; }
+
+.mugs-map-summary { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+
+.mugs-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.mugs-map-legend-label { font-weight: 600; color: var(--text-normal); }
+
+.mugs-map-legend-item { display: inline-flex; gap: 6px; align-items: center; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+
+.mugs-map-legend-swatch {
+  display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+/* Card-based map grid */
+.mugs-map-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px 16px;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
 }
 
-@media (max-width: 720px) {
-  .mugs-form-grid {
-    grid-template-columns: 1fr;
-  }
-}
+.mugs-map-card { border-radius: 10px; padding: 12px 16px; }
 
-.mugs-field {
+.mugs-map-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+
+.mugs-map-card-folder, .mugs-map-card-repo {
   display: flex;
   flex-direction: column;
-  gap: 5px;
   min-width: 0;
 }
 
-.mugs-field label {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
+.mugs-map-card-folder { flex: 1; }
+.mugs-map-card-title { font-size: var(--font-ui-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mugs-map-card-owner, .mugs-map-card-branch, .mugs-map-card-detail { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+
+.mugs-map-card-direction {
+  flex-shrink: 0;
+  text-align: center;
+  font-weight: 600;
+  color: var(--interactive-accent);
+  min-width: 120px;
 }
 
-.mugs-field input,
-.mugs-field select {
-  width: 100%;
-  min-width: 0;
-}
-
-.mugs-actions {
-  grid-column: 1 / -1;
-  display: flex;
-  gap: 8px;
-  margin-top: 2px;
-}
+.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- Diff view ------------------------------------------------------------- */
 
-.mugs-diff-view {
-  padding: 8px 4px 16px;
-}
+.mugs-diff-view { padding: 12px 8px 16px; }
 
 .mugs-diff-controls {
   display: flex;
@@ -179,9 +284,33 @@
   margin-bottom: 12px;
 }
 
-.mugs-diff-output {
-  width: 100%;
+.mugs-diff-mapping-select, .mugs-diff-ref-input {
+  min-width: 0;
+  flex-shrink: 0;
 }
+
+.mugs-diff-ref-input {
+  width: 140px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.mugs-diff-ref-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+.mugs-diff-range-label, .mugs-diff-mapping-name, .mugs-diff-range-hint { font-size: var(--font-ui-smaller); }
+.mugs-diff-range-label { color: var(--text-muted); }
+.mugs-diff-range-hint { color: var(--text-faint); margin-left: 6px; }
+
+.mugs-diff-output { width: 100%; }
 
 /* Conflict resolution banner */
 .mugs-conflicts {
@@ -193,356 +322,199 @@
   margin-bottom: 14px;
 }
 
-.mugs-conflicts-title {
-  margin: 0 0 8px;
-  font-weight: 600;
-  color: var(--text-error);
-}
+.mugs-conflicts-title { margin: 0 0 8px; font-weight: 600; color: var(--text-error); }
 
-.mugs-conflict-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-}
-
+/* Conflict row */
+.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
 .mugs-conflict-path {
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 60%;
+  font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
 }
 
 /* Diff file blocks */
-.mugs-diff-file {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  margin-bottom: 12px;
-  overflow: hidden;
+.mugs-diff-file { border: 1px solid var(--background-modifier-border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+
+.mugs-diff-file-header {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  font-size: var(--font-ui-small); font-weight: 600; background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border); overflow: hidden;
 }
 
-.mugs-diff-filename {
-  margin: 0;
-  padding: 8px 12px;
-  font-size: var(--font-ui-small);
-  font-weight: 600;
-  background: var(--background-secondary);
-  border-bottom: 1px solid var(--background-modifier-border);
-}
+.mugs-diff-filename { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 
-.mugs-diff-author {
-  padding: 4px 12px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-}
+.mugs-diff-summary { display: inline-flex; gap: 6px; align-items: center; }
 
-.mugs-diff-author-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--background-modifier-form-field);
-  color: var(--text-accent);
-}
+.mugs-diff-count { font-size: var(--font-ui-smaller); font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+.mugs-diff-count-added   { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
+.mugs-diff-count-removed { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
 
-.mugs-diff-hunk {
-  width: 100%;
-  border-collapse: collapse;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-}
+/* Author badges */
+.mugs-diff-author-badge, .mugs-conflict-action { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: var(--font-ui-smaller); font-weight: 500; }
 
-.mugs-diff-hunk td {
-  padding: 0 8px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.5;
-}
+.mugs-diff-author-badge { background: var(--background-modifier-form-field); color: var(--text-accent); border: 1px solid var(--background-modifier-border); }
+.mugs-conflict-action    { border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); }
 
-.mugs-diff-sign {
-  width: 1%;
-  min-width: 20px;
-  text-align: center;
-  user-select: none;
-  color: var(--text-muted);
-}
+.mugs-diff-author-badge[data-email]:hover, .mugs-conflict-action:hover { opacity: 0.85; }
 
-/* Diff line-number gutter + added/removed row highlighting */
-.mugs-diff-hunk td.mugs-diff-lineno {
-  width: 1%;
-  min-width: 34px;
-  text-align: right;
-  user-select: none;
-  color: var(--text-faint);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  padding-right: 10px;
-}
+/* Diff hunk table */
+.mugs-diff-hunk { width: 100%; border-collapse: collapse; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
 
-.mugs-diff-hunk tr.mugs-diff-row-added td.mugs-diff-content {
-  background: var(--background-modifier-success-hover);
-}
+.mugs-diff-hunk td { padding: 0 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.mugs-diff-sign     { width: 1%; min-width: 24px; text-align: center; user-select: none; color: var(--text-muted); }
 
-.mugs-diff-hunk tr.mugs-diff-row-removed td.mugs-diff-content {
-  background: var(--background-modifier-error-hover);
-}
+.mugs-diff-lineno    { width: 1%; min-width: 38px; text-align: right; user-select: none; color: var(--text-faint); padding-right: 10px; }
+.mugs-diff-row-added   td.mugs-diff-content { background: var(--background-modifier-success-hover); }
+.mugs-diff-row-removed td.mugs-diff-content { background: var(--background-modifier-error-hover); }
 
-.mugs-diff-added {
-  color: var(--text-on-emphasis, #3fb950);
-}
+.mugs-diff-added   { color: var(--text-on-emphasis, #3fb950); }
+.mugs-diff-removed { color: var(--text-error, #f85149); }
+.mugs-diff-content { padding-left: 8px; }
 
-.mugs-diff-removed {
-  color: var(--text-error, #f85149);
-}
+/* Collapsible hunk header */
+.mugs-diff-hunk-header { display: flex; align-items: center; gap: 6px; padding: 4px 10px; margin: 6px 0; border-radius: 5px; background: var(--background-secondary); cursor: pointer; user-select: none; }
+.mugs-diff-hunk-header:hover { background: var(--background-modifier-hover); }
+.mugs-diff-chevron { width: 1ch; transition: transform 0.1s ease; }
 
-.mugs-diff-content {
-  padding-left: 8px;
-}
+/* --- Conflict action labels (ours/theirs did X) --------------------------- */
 
-/* Collapsible hunk header (folding) */
-.mugs-diff-hunk-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  margin: 6px 0;
-  border: 1px solid var(--background-modifier-border);
-  border-left-width: 3px;
-  border-radius: 5px;
-  background: var(--background-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.mugs-diff-hunk-header:hover {
-  background: var(--background-modifier-hover);
-}
-
-.mugs-diff-chevron {
-  width: 1ch;
-  transition: transform 0.1s ease;
-}
-
-.mugs-diff-hunk-label {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-}
-
-/* Conflict action labels (ours/theirs did X) */
-.mugs-conflict-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  flex: 1;
-  min-width: 0;
-}
-
-.mugs-conflict-action {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  padding: 1px 7px;
-  border-radius: 10px;
-  font-size: var(--font-ui-smaller);
-  border: 1px solid var(--background-modifier-border);
-  background: var(--background-modifier-form-field);
-}
-
-.mugs-conflict-action-ours {
-  border-color: var(--text-success, #3fb950);
-}
-
-.mugs-conflict-action-theirs {
-  border-color: var(--text-accent);
-}
-
-.mugs-conflict-action-side {
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.mugs-conflict-action-detail {
-  color: var(--text-normal);
-}
+.mugs-conflict-actions { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.mugs-conflict-action-side   { font-weight: 600; color: var(--text-muted); }
+.mugs-conflict-action-detail { color: var(--text-normal); }
 
 /* Conflict resolution buttons */
-.mugs-conflict-buttons {
-  display: inline-flex;
-  gap: 5px;
-}
+.mugs-conflict-buttons { display: inline-flex; gap: 5px; }
+.mugs-conflict-btn     { padding: 2px 9px; font-size: var(--font-ui-smaller); border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
+.mugs-conflict-btn:hover { opacity: 0.85; }
 
-.mugs-conflict-btn {
-  padding: 2px 9px;
-  font-size: var(--font-ui-smaller);
-  border-radius: 5px;
-}
+/* --- Conflicts sidebar panel ---------------------------------------------- */
 
-.mugs-conflict-btn-ours {
-  border-color: var(--text-success, #3fb950) !important;
-}
+.mugs-conflicts-panel { padding: 12px; }
 
-.mugs-conflict-btn-theirs {
-  border-color: var(--text-accent) !important;
-}
+.mugs-conflicts-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.mugs-conflicts-panel-title   { margin: 0; font-size: var(--font-ui-medium); font-weight: 600; }
+.mugs-conflicts-panel-refresh { font-size: var(--font-ui-smaller); }
 
-/* Conflicts sidebar panel */
-.mugs-conflicts-panel {
-  padding: 8px 12px 16px;
-}
+.mugs-conflicts-panel-group    { border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; background: var(--background-modifier-hover); }
+.mugs-conflicts-panel-group-title { margin: 2px 0 6px; font-size: var(--font-ui-small); font-weight: 600; }
 
-.mugs-conflicts-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
+/* --- Review Queue ---------------------------------------------------------- */
 
-.mugs-conflicts-panel-title {
-  margin: 0;
-  font-size: var(--font-ui-medium);
-  font-weight: 600;
-}
+.mugs-review-view { padding: 12px; }
 
-.mugs-conflicts-panel-refresh {
-  font-size: var(--font-ui-smaller);
-}
+.mugs-review-legend { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: var(--background-modifier-hover); }
+.mugs-review-legend-text { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 
-.mugs-conflicts-panel-group {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-  background: var(--background-modifier-hover);
-}
+/* Review queue filter tabs */
+.mugs-review-filters { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+.mugs-filter-tab { padding: 4px 12px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer; }
+.mugs-filter-tab:hover { background: var(--background-modifier-hover); }
+.mugs-filter-tab-active { background: var(--interactive-accent); color: var(--text-on-accent, #ffffff); border-color: var(--interactive-accent); }
 
-.mugs-conflicts-panel-group-title {
-  margin: 2px 0 6px;
-  font-size: var(--font-ui-small);
-  font-weight: 600;
-}
+/* Review queue change row */
+.mugs-review-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--background-modifier-border); }
+.mugs-review-row:last-child { border-bottom: none; }
 
-/* Review Queue legend — one-line explanation of Stage/Hold/Clear */
-.mugs-review-legend {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: var(--background-modifier-hover);
-}
+.mugs-review-path    { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.mugs-state-badge     { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: var(--font-ui-smaller); font-weight: 500; }
 
-.mugs-review-legend-text {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
+.mugs-state-unstaged { background: hsl(210, 20%, 85%); color: var(--text-muted); }
+.mugs-state-staged   { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
+.mugs-state-held     { background: hsl(42, 90%, 85%); color: var(--text-warning, #d29922); }
 
-/* Map footer — compact sync summary chips */
-.mugs-map-footer {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  align-items: center;
-  margin-bottom: 8px;
-}
+.mugs-review-actions { display: inline-flex; gap: 4px; }
 
-.mugs-map-footer-item {
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
+/* --- Settings: mapping cards ---------------------------------------------- */
 
-.mugs-map-footer-good {
-  color: var(--text-success, #3fb950);
-}
+.mugs-mapping-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.mugs-mapping-name   { font-weight: 600; font-size: var(--font-ui-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 
-/* --- Whole-vault + dotfolder selector ------------------------------------ */
+/* Sync-status dot */
+.mugs-dot, .mugs-status-none, .mugs-status-ok, .mugs-status-warning, .mugs-status-error { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 
-.mugs-dotfolders {
-  grid-column: 1 / -1;
-  margin: 6px 0 0;
-  padding: 10px 12px;
-  border: 1px dashed var(--background-modifier-border);
-  border-radius: 6px;
-  background: var(--background-secondary);
-  font-size: var(--font-ui-smaller);
-}
+.mugs-dot.mugs-status-none   { background: var(--text-faint); }
+.mugs-dot.mugs-status-ok      { background: var(--text-success, #3fb950); }
+.mugs-dot.mugs-status-warning { background: var(--text-warning, #d29922); }
+.mugs-dot.mugs-status-error   { background: var(--text-error, #f85149); }
 
-.mugs-dotfolders > p {
-  margin: 6px 0 0;
-  color: var(--text-muted);
-}
+/* Manage (include/exclude) collapsible panels — Obsidian Sync "Manage" pattern */
+.mugs-manage    { margin: 6px 2px; }
+.mugs-manage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; }
+.mugs-manage-title { font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-normal); }
+.mugs-manage-btn    { font-size: var(--font-ui-smaller); padding: 2px 10px; border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
+.mugs-manage-btn:hover { border-color: var(--interactive-accent); color: var(--text-accent); }
 
-.mugs-dotfolder-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-normal);
-}
+.mugs-manage-panel    { margin-top: 6px; }
+.mugs-manage-panel.is-collapsed { display: none; }
 
-.mugs-dotfolder-toggle input {
-  width: auto;
-}
+.mugs-textarea { width: 100%; min-width: 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); font-family: var(--font-monospace); font-size: var(--font-ui-smaller); resize: vertical; }
 
-/* Obsidian per-entry selector */
-.mugs-obsidian-entries {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
+/* --- Settings: add-mapping assistant -------------------------------------- */
 
-.mugs-obsidian-entry {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 6px;
-  background: var(--background-secondary);
-}
+.mugs-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 16px; }
+@media (max-width: 720px) { .mugs-form-grid { grid-template-columns: 1fr; } }
 
-.mugs-obsidian-name {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  color: var(--text-normal);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.mugs-field           { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.mugs-field label      { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.mugs-field input, .mugs-field select { width: 100%; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); font-size: var(--font-ui-smaller); }
 
-.mugs-obsidian-entry select {
-  width: auto;
-  min-width: 128px;
-}
+.mugs-actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 2px; }
 
-.mugs-obsidian-add {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
+/* Repo select */
+.mugs-repo-select, .mugs-dir-select { width: 100%; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); font-size: var(--font-ui-smaller); }
+.mugs-repo-select:focus, .mugs-dir-select:focus { outline: none; border-color: var(--interactive-accent); box-shadow: 0 0 0 1px var(--interactive-accent); }
 
-.mugs-obsidian-add input {
-  flex: 1;
-  min-width: 0;
-}
+/* Matched-folder rows */
+.mugs-matches      { margin: 8px 0; padding: 12px 14px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
+.mugs-matches-head { margin: 6px 0 8px; font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-muted); }
 
-/* Ghost-style link buttons (Remove / Add entry) */
-.mugs-link-btn {
-  font-size: var(--font-ui-smaller);
-  padding: 3px 9px;
-  border-radius: 5px;
-  border: 1px solid var(--background-modifier-border);
-  background: var(--background-modifier-form-field);
-  color: var(--text-normal);
-}
+.mugs-match-row    { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; transition: background-color 0.1s ease; }
+.mugs-match-row:hover { background: var(--background-modifier-hover); }
 
-.mugs-link-btn:hover {
-  border-color: var(--text-error, #f85149);
-  color: var(--text-error, #f85149);
-}
+.mugs-match-label   { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.mugs-match-arrow    { color: var(--text-muted); font-size: var(--font-ui-smaller); user-select: none; }
+.mugs-match-local    { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 45%; }
+
+.mugs-match-taken        { opacity: 0.5; }
+.mugs-match-taken .mugs-match-label { text-decoration: line-through; }
+.mugs-match-badge       { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; background: var(--background-modifier-form-field); color: var(--text-muted); font-size: var(--font-ui-smaller); font-weight: 500; }
+
+.mugs-match-whole, .mugs-match-trash { display: flex; align-items: center; gap: 8px; padding: 5px 0; color: var(--text-normal); font-size: var(--font-ui-smaller); }
+.mugs-match-trash { margin-left: 24px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
+/* Loading spinner */
+.mugs-loading { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--background-modifier-border); border-top-color: var(--interactive-accent); border-radius: 50%; animation: mugs-spin 0.7s linear infinite; }
+@keyframes mugs-spin { to { transform: rotate(360deg); } }
+
+.mugs-loading-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
+/* --- Settings: obsidian config toggles ------------------------------------ */
+
+.mugs-obsidian-group-head { margin: 14px 0 6px; font-size: var(--font-ui-small); font-weight: 600; color: var(--text-muted); }
+.mugs-obsidian-group-head:first-child { margin-top: 6px; }
+
+.mugs-obsidian-add { display: flex; gap: 8px; margin-top: 12px; }
+.mugs-obsidian-add input { flex: 1; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); font-size: var(--font-ui-smaller); }
+
+/* --- Settings: auto-match suggestions ------------------------------------- */
+
+.mugs-suggestions { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
+.mugs-suggestions-head { margin-top: 4px; font-size: var(--font-ui-smaller); font-weight: 600; color: var(--text-normal); }
+
+.mugs-match-chip { display: inline-flex; align-items: center; gap: 6px; margin: 2px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--background-modifier-border); background: var(--interactive-accent); color: var(--text-on-accent, #ffffff); font-size: var(--font-ui-smaller); font-weight: 500; cursor: pointer; }
+.mugs-match-chip:hover { filter: brightness(1.08); }
+
+/* --- Link-style buttons ---------------------------------------------------- */
+
+.mugs-link-btn { font-size: var(--font-ui-smaller); padding: 3px 9px; border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
+.mugs-link-btn:hover { border-color: var(--text-error, #f85149); color: var(--text-error, #f85149); }
+
+/* --- Dotfolder selector ---------------------------------------------------- */
+
+.mugs-dotfolders       { grid-column: 1 / -1; margin: 6px 0 0; padding: 10px 12px; border: 1px dashed var(--background-modifier-border); border-radius: 6px; background: var(--background-secondary); font-size: var(--font-ui-smaller); }
+.mugs-dotfolders > p   { margin: 6px 0 0; color: var(--text-muted); }
+.mugs-dotfolder-toggle { display: flex; align-items: center; gap: 8px; color: var(--text-normal); }
+.mugs-dotfolder-toggle input { width: auto; }
+
+/* --- Status bar ------------------------------------------------------------ */
+
+.mugs-status-bar { font-size: var(--font-ui-smaller); color: var(--text-muted); }

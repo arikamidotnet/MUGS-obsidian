@@ -13,7 +13,7 @@ import type { ChangeState, StagedChange } from "../types";
 
 const STATE_LABEL: Record<ChangeState, string> = { unstaged: "Pending", staged: "Staged", held: "Held" };
 
-/** What each queue action does — shown as a hover tooltip and in the legend above. */
+/** What each queue action does — shown as a hover tooltip. */
 const STATE_TOOLTIP: Record<ChangeState, string> = {
   staged: "Stage this file — it will be pushed on the next sync.",
   held: "Hold this file — skip it on the next sync (deferred).",
@@ -21,6 +21,9 @@ const STATE_TOOLTIP: Record<ChangeState, string> = {
 };
 
 export class ReviewQueueView extends ItemView {
+  /** Which state filter is currently active. */
+  private activeFilter: ChangeState | "all" = "all";
+
   constructor(private plugin: MugsPlugin, leaf: WorkspaceLeaf) {
     super(leaf);
   }
@@ -52,52 +55,101 @@ export class ReviewQueueView extends ItemView {
   private render(): void {
     const settings = this.plugin.store.getSettings();
     const byLabel = new Map<string, FolderLike>();
+
     for (const mapping of settings.mappings) {
       const changes = settings.staging[mapping.id] ?? [];
       if (changes.length === 0) continue;
       const key = mapping.label || mapping.id;
-      if (!byLabel.has(key)) byLabel.set(key, { label: key, changes: [] });
+      if (!byLabel.has(key)) byLabel.set(key, { label: key, id: mapping.id, changes: [] });
       byLabel.get(key)!.changes.push(...changes);
     }
 
-    if (byLabel.size === 0) {
-      this.contentEl.createEl("p", { text: "No curated changes. Edits are synced automatically; use the queue to hold or stage specific files.", cls: "mags-muted" });
+    // Count totals for filter badges.
+    let totalPending = 0;
+    let totalStaged = 0;
+    let totalHeld = 0;
+    for (const group of byLabel.values()) {
+      for (const c of group.changes) {
+        if (c.state === "staged") totalStaged++;
+        else if (c.state === "held") totalHeld++;
+        else totalPending++;
+      }
+    }
+
+    // Empty state.
+    const total = totalPending + totalStaged + totalHeld;
+    if (total === 0) {
+      const empty = this.contentEl.createDiv({ cls: "mugs-empty-state" });
+      empty.createEl("h3", { text: "No curated changes" });
+      empty.createEl("p", {
+        text: "Edits are synced automatically; use the queue to hold or stage specific files.",
+        cls: "mugs-muted",
+      });
       return;
     }
 
+    // Title + filter tabs.
     this.contentEl.createEl("h2", { text: "Review Queue", cls: "mugs-conflicts-panel-title" });
+
+    const filters = this.contentEl.createDiv({ cls: "mugs-review-filters" });
+    this.renderFilterTab(filters, "all", "All", total, true);
+    this.renderFilterTab(filters, "staged", `Staged (${totalStaged})`, totalStaged, false);
+    this.renderFilterTab(filters, "held", `Held (${totalHeld})`, totalHeld, false);
+    this.renderFilterTab(filters, "unstaged", `Pending (${totalPending})`, totalPending, false);
+
     const legend = this.contentEl.createDiv({ cls: "mugs-review-legend" });
-    legend.createSpan({
-      text: "Stage = include in next push · Hold = skip next sync · Clear = let it sync automatically",
-      cls: "mugs-review-legend-text",
-    });
-    for (const group of byLabel.values()) this.renderGroup(group);
-  }
+    legend.createSpan({ text: "Stage = include in next push · Hold = skip next sync · Clear = let it auto-sync", cls: "mugs-review-legend-text" });
 
-  private renderGroup(group: { label: string; changes: StagedChange[] }): void {
-    const section = this.contentEl.createDiv({ cls: "mugs-conflicts-panel-group" });
-    section.createEl("h3", { text: group.label, cls: "mugs-conflicts-panel-group-title" });
-
-    for (const change of group.changes) {
-      const row = section.createDiv({ cls: "mugs-conflict-row" });
-      row.createSpan({ text: change.path, cls: "mugs-conflict-path" });
-      const chip = row.createSpan({ text: STATE_LABEL[change.state], cls: "mugs-conflict-action mugs-conflict-action-theirs" });
-      this.button(row, "Stage", change.mappingId, change.path, "staged");
-      this.button(row, "Hold", change.mappingId, change.path, "held");
-      this.button(row, "Clear", change.mappingId, change.path, "unstaged");
+    for (const group of byLabel.values()) {
+      this.renderGroup(group);
     }
   }
 
-  private button(host: HTMLElement, text: string, mappingId: string, path: string, state: ChangeState): void {
-    const el = host.createEl("button", {
-      type: "button",
-      text,
-      cls: `mugs-conflict-btn mugs-conflict-btn-${state}`,
+  /** Render a filter tab button. */
+  private renderFilterTab(host: HTMLElement, state: string, label: string, count: number, active: boolean): void {
+    const tab = host.createEl("button", { type: "button", text: label, cls: `mugs-filter-tab${active ? " mugs-filter-tab-active" : ""}` });
+    if (!count && state !== "all") tab.disabled = true;
+    tab.addEventListener("click", () => {
+      this.activeFilter = (state === "all" ? "all" : state) as ChangeState | "all";
+      void this.render();
     });
-    // Native title + Obsidian's aria-tooltip both drive hover popovers.
-    const tip = STATE_TOOLTIP[state];
-    el.setAttribute("title", tip);
-    el.setAttr("aria-tooltip", tip);
+  }
+
+  private renderGroup(group: FolderLike): void {
+    // Filter changes by active filter.
+    const visible = group.changes.filter((c) => this.activeFilter === "all" || c.state === this.activeFilter);
+    if (visible.length === 0) return;
+
+    const section = this.contentEl.createDiv({ cls: "mugs-conflicts-panel-group" });
+    section.createEl("h3", { text: group.label, cls: "mugs-conflicts-panel-group-title" });
+
+    for (const change of visible) {
+      this.renderChangeRow(section, group.id, change);
+    }
+  }
+
+  private renderChangeRow(host: HTMLElement, mappingId: string, change: StagedChange): void {
+    const row = host.createDiv({ cls: "mugs-review-row" });
+
+    // Path.
+    row.createSpan({ text: change.path, cls: "mugs-review-path" });
+
+    // State badge.
+    const stateLabel = STATE_LABEL[change.state];
+    const stateClass = `mugs-state-${change.state}`;
+    row.createSpan({ text: stateLabel, cls: `mugs-state-badge ${stateClass}` });
+
+    // Action buttons — only show the ones that change TO a different state.
+    const actions = row.createDiv({ cls: "mugs-review-actions" });
+    if (change.state !== "staged") this.renderActionButton(actions, "Stage", mappingId, change.path, "staged");
+    if (change.state !== "held") this.renderActionButton(actions, "Hold", mappingId, change.path, "held");
+    if (change.state !== "unstaged") this.renderActionButton(actions, "Clear", mappingId, change.path, "unstaged");
+  }
+
+  private renderActionButton(host: HTMLElement, text: string, mappingId: string, path: string, state: ChangeState): void {
+    const el = host.createEl("button", { type: "button", text });
+    el.setAttribute("title", STATE_TOOLTIP[state]);
+    el.setAttr("aria-tooltip", STATE_TOOLTIP[state]);
     el.addEventListener("click", () => void this.setChangeState(mappingId, path, state));
   }
 
@@ -116,5 +168,6 @@ export class ReviewQueueView extends ItemView {
 /** Structural shape of a mapping needed to group the queue by label. */
 interface FolderLike {
   label: string;
+  id: string;
   changes: StagedChange[];
 }

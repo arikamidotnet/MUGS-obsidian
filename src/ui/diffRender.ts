@@ -32,13 +32,33 @@ export function renderConflictRow(
   const { ours, theirs } = describeConflictActions(c);
 
   const row = container.createDiv({ cls: "mugs-conflict-row" });
-  row.createSpan({ text: c.path, cls: "mugs-conflict-path" });
+  const pathEl = row.createSpan({ text: c.path, cls: "mugs-conflict-path" });
+  if (c.oursSavedAt || c.theirsModifiedAt) {
+    // Show a small timestamp hint for recency-based conflicts.
+    let when = "";
+    if (c.oursSavedAt) when += `saved ${relativeTime(Date.now() - c.oursSavedAt)}`;
+    if (c.theirsModifiedAt && c.oursSavedAt) when += " · ";
+    if (c.theirsModifiedAt) when += `remote ${relativeTime(Date.now() - c.theirsModifiedAt * 1000)}`;
+    pathEl.setAttr("title", when);
+  }
 
   const labels = row.createDiv({ cls: "mugs-conflict-actions" });
   renderActionLabel(labels, ours);
   renderActionLabel(labels, theirs);
 
   new ConflictButtons(row, c, onResolve).mount();
+}
+
+/** Human-friendly relative time. */
+function relativeTime(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
 }
 
 /** A single "ours/theirs did X" chip. */
@@ -64,11 +84,21 @@ class ConflictButtons {
   }
 
   private button(wrap: HTMLElement, text: string, choice: ResolveChoice): void {
-    wrap.createEl("button", {
+    const btn = wrap.createEl("button", {
       type: "button",
       text,
       cls: `mugs-conflict-btn mugs-conflict-btn-${choice}`,
-    }).addEventListener("click", () => this.onResolve(this.c, choice));
+    });
+    // Native title tooltip for hover accessibility.
+    btn.setAttribute("title", `${choice === "ours" ? "Keep our version of this file" : choice === "theirs" ? "Use their version of this file" : "Merge both versions where possible"}`);
+    btn.addEventListener("click", () => {
+      // Visual feedback: disable the clicked button briefly.
+      btn.disabled = true;
+      void Promise.resolve().then(() => {
+        this.onResolve(this.c, choice);
+        btn.disabled = false;
+      });
+    });
   }
 }
 
@@ -84,8 +114,6 @@ export function renderConflicts(
     text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need manual resolution`,
     cls: "mugs-conflicts-title",
   });
-  // Each row binds its own conflict via ConflictButtons, so the same resolver works
-  // for every row.
   for (const c of conflicts) renderConflictRow(box, c, onResolve);
 }
 
@@ -103,62 +131,68 @@ export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<s
   const palette = colors ?? assignAuthorColors(parsed.files.flatMap((f) => f.hunks.map((h) => h.author).filter(Boolean) as string[]));
 
   for (const file of parsed.files) {
-    const block = host.createDiv({ cls: "mugs-diff-file" });
-    // Warp-style file summary: repo path + +/- counts + author badges.
-    let added = 0;
-    let removed = 0;
-    const authors = new Set<string>();
-    for (const hunk of file.hunks) {
-      for (const line of hunk.lines) {
-        if (line.type === "added") added++;
-        else if (line.type === "removed") removed++;
-      }
-      if (hunk.author) authors.add(hunk.author);
-    }
-    const header = block.createDiv({ cls: "mugs-diff-file-header" });
-    header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
-    const summary = header.createSpan({ cls: "mugs-diff-summary" });
-    summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
-    summary.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
-    for (const author of authors) {
-      const color = palette.get(author) ?? authorAccent(author);
-      header.createSpan({
-        text: author,
-        cls: "mugs-diff-author-badge",
-        attr: { style: `background:${paleTint(color)};color:${color};border-color:${color}` },
-      });
-    }
-
-    let lineNo = 0;
-    for (const hunk of file.hunks) {
-      const authorColor = hunk.author ? palette.get(hunk.author) ?? authorAccent(hunk.author) : undefined;
-      // The header and its body table are toggled as one unit; renderDiff appends
-      // the actual lines to the returned body.
-      const body = renderHunkHeader(block, hunk, authorColor);
-      for (const line of hunk.lines) {
-        lineNo++;
-        const row = body.insertRow();
-        if (line.type !== "context") row.addClass(`mugs-diff-row-${line.type}`);
-        row.insertCell().createSpan({ text: String(lineNo), cls: "mugs-diff-lineno" });
-        const sign = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
-        const signEl = row.insertCell().createSpan({ text: sign, cls: `mugs-diff-sign mugs-diff-${line.type}` });
-        const contentEl = row.insertCell().createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
-        if (authorColor && line.type !== "context") {
-          signEl.style.borderLeftColor = authorColor;
-          contentEl.style.backgroundColor = paleTint(authorColor);
-        }
-      }
-    }
+    renderFileBlock(file, host, palette);
   }
 }
 
-/** A collapsible hunk header: section title + line range, toggling the body below. Returns the body table so callers can append lines. */
-function renderHunkHeader(
-  block: HTMLElement,
-  hunk: ParsedDiff["files"][number]["hunks"][number],
-  authorColor?: string,
-): HTMLTableElement {
-  // Per-hunk +/- counts (Warp-style) so a collapsed header still tells you the size.
+/** Render one file's diff block with a collapsible header showing +/- counts and author badges. */
+function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, palette: Map<string, string>): void {
+  const block = host.createDiv({ cls: "mugs-diff-file" });
+
+  // File summary row — always visible even when hunks are collapsed.
+  let added = 0;
+  let removed = 0;
+  const authors = new Set<string>();
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      if (line.type === "added") added++;
+      else if (line.type === "removed") removed++;
+    }
+    if (hunk.author) authors.add(hunk.author);
+  }
+
+  const header = block.createDiv({ cls: "mugs-diff-file-header" });
+  header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
+  const summary = header.createSpan({ cls: "mugs-diff-summary" });
+  summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
+  summary.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
+  for (const author of authors) {
+    const color = palette.get(author) ?? authorAccent(author);
+    const badge = header.createSpan({
+      text: author,
+      cls: "mugs-diff-author-badge",
+      attr: { style: `background:${paleTint(color)};color:${color};border-color:${color}` },
+    });
+    if (author) badge.setAttr("title", `@ ${author}`);
+  }
+
+  // File-level collapse toggle.
+  const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
+  let fileOpen = true;
+  const body = block.createDiv({ cls: "mugs-diff-file-body" });
+  body.style.display = "";
+
+  // Click the file header to collapse/expand all hunks.
+  header.addEventListener("click", (e) => {
+    e.stopPropagation();
+    fileOpen = !fileOpen;
+    chevron.textContent = fileOpen ? "▾" : "▸";
+    body.style.display = fileOpen ? "" : "none";
+  });
+
+  // Render hunks into the collapsible body.
+  for (const hunk of file.hunks) {
+    const authorColor = hunk.author ? palette.get(hunk.author) ?? authorAccent(hunk.author) : undefined;
+    renderHunk(body, hunk, authorColor);
+  }
+
+  // The chevron rotation is handled by the header click. But we need to make sure
+  // clicking a hunk header doesn't trigger file collapse — add stopPropagation there too.
+}
+
+/** A collapsible hunk: section title + line range, toggling the body below. Returns nothing (appends directly). */
+function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks"][number], authorColor?: string): void {
+  // Per-hunk +/- counts so a collapsed header still tells you the size.
   let added = 0;
   let removed = 0;
   for (const line of hunk.lines) {
@@ -168,7 +202,7 @@ function renderHunkHeader(
 
   const header = block.createDiv({ cls: "mugs-diff-hunk-header" });
   if (authorColor) header.style.borderLeftColor = authorColor;
-  // Start expanded; the user collapses hunks they don't need to inspect.
+
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
 
   const label = header.createSpan({ cls: "mugs-diff-hunk-label" });
@@ -182,14 +216,46 @@ function renderHunkHeader(
 
   const body = block.createEl("table", { cls: "mugs-diff-hunk mugs-diff-hunk-body" });
   let open = true;
-  const setOpen = () => {
+  const setOpen = (e?: Event) => {
+    e?.stopPropagation(); // don't trigger file-level collapse
     open = !open;
     chevron.textContent = open ? "▾" : "▸";
     header.classList.toggle("mugs-diff-hunk-open", open);
     body.style.display = open ? "" : "none";
   };
+
   header.addEventListener("click", setOpen);
-  return body;
+
+  // Render lines with proper old/new line numbers.
+  let oldNo = hunk.oldStart;
+  let newNo = hunk.newStart;
+  for (const line of hunk.lines) {
+    const row = body.insertRow();
+    if (line.type !== "context") row.addClass(`mugs-diff-row-${line.type}`);
+
+    // Old-side line number (for removed/context lines).
+    const oldCell = row.insertCell();
+    oldCell.createSpan({ text: String(line.type === "added" ? "" : oldNo), cls: "mugs-diff-lineno mugs-diff-lineno-old" });
+
+    // New-side line number (for added/context lines).
+    const newCell = row.insertCell();
+    newCell.createSpan({ text: String(line.type === "removed" ? "" : newNo), cls: "mugs-diff-lineno mugs-diff-lineno-new" });
+
+    // Sign column.
+    const signEl = row.insertCell().createSpan({ text: line.type === "added" ? "+" : line.type === "removed" ? "-" : " ", cls: `mugs-diff-sign mugs-diff-${line.type}` });
+
+    // Content with author tint for changed lines.
+    const contentEl = row.insertCell().createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
+    if (authorColor && line.type !== "context") {
+      signEl.style.borderLeftColor = authorColor;
+      contentEl.style.backgroundColor = paleTint(authorColor);
+    }
+
+    // Advance the appropriate counter.
+    if (line.type === "added") newNo++;
+    else if (line.type === "removed") oldNo++;
+    else { oldNo++; newNo++; }
+  }
 }
 
 /** Parse + attribute a raw diff string, then render it into `host`. Convenience for views. */
