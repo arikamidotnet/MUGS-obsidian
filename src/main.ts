@@ -234,6 +234,14 @@ export default class MugsPlugin extends Plugin {
     for (const o of outcomes.filter((o) => o.status === "ok")) {
       if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
     }
+    // Skipped mappings are the silent-failure path: the driver returns status
+    // "skipped" (not a throw) for no-credential / missing-token / repo-not-found /
+    // could-not-reach-provider. Surface them with their reason so users see why sync
+    // did nothing instead of getting zero feedback after clicking Sync.
+    for (const o of outcomes.filter((o) => o.status === "skipped")) {
+      const reason = o.reason ? ` — ${o.reason}` : "";
+      new Notice(`MUGS — ${o.label} skipped${reason}`, quiet ? 0 : 6000);
+    }
   }
 
   /** Writes merged file content into a clone's working tree via the vault adapter. */
