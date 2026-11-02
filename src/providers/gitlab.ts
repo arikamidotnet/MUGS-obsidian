@@ -135,7 +135,7 @@ export class GitLabProvider implements Provider {
     if (this.allowedRepos && this.allowedRepos.length > 0) {
       return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
     }
-    const url = withQuery(`${this.baseUrl}/projects`, { per_page: 100 });
+    const url = withQuery(`${this.baseUrl}/projects`, { membership: true, per_page: 100 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((p) => mapProject(p as GitLabProject));
   }
