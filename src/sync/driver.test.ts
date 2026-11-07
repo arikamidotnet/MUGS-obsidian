@@ -187,6 +187,52 @@ describe("syncAllMappings — skips", () => {
   });
 });
 
+describe("syncAllMappings — legacy folder-scoped repo resolution", () => {
+  it("resolves a legacy no-repoRef mapping to the credential's single visible repo instead of skipping", async () => {
+    // Regression: mappings created before repoRef existed (or after a load stripped it)
+    // carry a random id that matches no repo id; with exactly one accessible repo the
+    // link must still resolve, else every such mapping skips with "repo not found".
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const { accessor, state } = spyAccessor("L1"); // base == localSha -> clean fast-forward
+    const legacy: FolderMapping = {
+      id: "1a5c9571-7db0-471e-bc33-2e16db582c3b", label: "01 concepts",
+      remotePath: "01 concepts", localFolder: "01 concepts",
+      providerId: "c1", direction: "push-pull",
+    };
+    const outcomes = await syncAllMappings({
+      mappings: [legacy],
+      credentials: [credential({ repos: ["fbr-rom/FBR-WRK"] })],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("fbr-rom/FBR-WRK")), // allowlisted synth: id IS the path
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: accessor,
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: legacy.id, status: "ok", pull: "fast-forward" });
+    expect(state.pull).toEqual([[legacy.id, "R1"]]);
+  });
+
+  it("still skips a legacy mapping when several repos are visible (ambiguous)", async () => {
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping({ id: "legacy-uuid", remotePath: "notes", localFolder: "notes" })], // matches neither repo
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => ({
+        kind: "gitlab",
+        async listRepos() { return [fakeRepo("r1"), fakeRepo("r2")]; },
+        async getBranches() { return []; },
+        async getMembers() { return []; },
+        async listDirectories() { return []; },
+      }),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor().accessor,
+    });
+    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: /repo not found/ });
+  });
+});
+
 describe("syncAllMappings — sync outcomes", () => {
   it("threads the credential's allowed repos into the provider built for sync", async () => {
     // Regression: the sync-time provider build must forward allowedRepos so a

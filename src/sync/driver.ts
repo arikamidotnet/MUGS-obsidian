@@ -79,6 +79,26 @@ export interface SyncDriverDeps {
   heldPaths?: (mappingId: string) => ReadonlySet<string> | undefined;
 }
 
+/**
+ * Resolve the repo a mapping points at within the credential's visible repos.
+ *
+ * Match order: pinned `repoRef` (scoped links share one clone per repo), then the
+ * legacy whole-repo form whose `id` IS the repo id, then — for legacy folder-scoped
+ * links created before `repoRef` existed (random ids that match no repo id) — the
+ * credential's single visible repo when exactly one is accessible. That fallback is
+ * unambiguous: a credential scoped to one repo can only be pointing that mapping at
+ * it. With several visible repos a legacy link stays unresolved rather than guessed.
+ */
+export function resolveRepo(
+  repos: RepoSummary[],
+  mapping: Pick<FolderMapping, "id" | "repoRef">,
+): RepoSummary | undefined {
+  const direct = repos.find((r) => (mapping.repoRef ? r.id === mapping.repoRef : r.id === mapping.id));
+  if (direct) return direct;
+  if (!mapping.repoRef && repos.length === 1) return repos[0];
+  return undefined;
+}
+
 /** Run one sync pass over every mapping and return a per-mapping outcome list. */
 export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome[]> {
   const client = new GitClient(deps.runner);
@@ -144,7 +164,7 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
         skip(mapping, "could not reach provider"); continue;
       }
     }
-    const repo = repos.find((r) => (mapping.repoRef ? r.id === mapping.repoRef : r.id === mapping.id));
+    const repo = resolveRepo(repos, mapping);
     if (!repo) { skip(mapping, "repo not found or not accessible"); continue; }
 
     try {

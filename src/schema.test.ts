@@ -69,6 +69,13 @@ describe("data-plane schema (contract)", () => {
     const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "", localFolder: ".", providerId: "c1", syncTrashFolder: false }] });
     expect(s.mappings[0].syncTrashFolder).toBe(false);
   });
+
+  it("preserves a scoped link's repoRef through parse (else links lose their shared clone)", () => {
+    // Regression: repoRef was missing from the schema, so Zod stripped it on load and
+    // scoped links silently degraded to the legacy id-based repo match on reload.
+    const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "d", localFolder: "notes", providerId: "c1", repoRef: "42" }] });
+    expect(s.mappings[0].repoRef).toBe("42");
+  });
 });
 
 describe("credential redaction invariant", () => {

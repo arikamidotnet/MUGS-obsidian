@@ -46,6 +46,10 @@ export const folderMappingSchema = z.object({
   branch: z.string().optional(),
   /** Optional pinned agent sub-user id (Area 10); absent -> normal sync attribution. */
   agentId: z.string().optional(),
+  /** Optional repo reference for scoped links sharing one clone per repo. Must be
+   *  declared here or Zod strips it on load, silently degrading scoped links to the
+   *  legacy id-based repo match (which never hits for random mapping ids). */
+  repoRef: z.string().optional(),
   direction: syncDirectionSchema.default("push-pull"),
   includes: z.array(z.string()).default([]),
   excludes: z.array(z.string()).default([]),
