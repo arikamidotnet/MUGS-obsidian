@@ -392,6 +392,10 @@ export class CloneManager {
       }
     }
 
+    // A fully clean pass supersedes any previously recorded conflicts: the merge
+    // re-evaluates every in-scope file each pass, so stale records (from an older
+    // divergent state, since resolved or overwritten) would only clutter the UI.
+    if (this.conflicts) this.conflicts.setConflicts(mapping.id, []);
     this.syncs.recordPull(mapping.id, remoteSha);
     return { mappingId: mapping.id, pull: decision.pull, push: pushed, needsConflictResolution: false, newRemoteSha: remoteSha, conflicts: [], renames: [] };
   }
@@ -445,6 +449,8 @@ export class CloneManager {
     const newHead = await c.currentHead();
     this.syncs.recordPush(mapping.id, newHead);
     this.syncs.recordPull(mapping.id, newHead);
+    // A completed init supersedes any previously recorded conflicts for the mapping.
+    if (this.conflicts) this.conflicts.setConflicts(mapping.id, []);
     return { mappingId: mapping.id, pull: "none", push: pushed, needsConflictResolution: false, newRemoteSha: newHead, conflicts: [], renames: [] };
   }
 

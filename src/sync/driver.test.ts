@@ -427,6 +427,25 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(state.pull).toEqual([["m1", "R1"]]);
   });
 
+  it("clears previously-recorded conflicts once a pass completes cleanly", async () => {
+    // Stale records from an older divergent state must not haunt the Diff view after
+    // a clean pass — the merge re-evaluates every in-scope file each sync.
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const store = memoryConflictStore([{ path: "notes/old.md", base: "b", ours: "O", theirs: "T" }]);
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor, // clean fast-forward, nothing diverged
+      conflicts: store.store,
+    });
+    expect(outcomes[0].status).toBe("ok");
+    expect(store.getState()).toEqual([]); // superseded by the clean pass
+  });
+
   it("accumulates new divergent files onto previously-recorded conflicts", async () => {
     const { runner } = makeRunner({
       head: "L2", remote: "R1", ancestor: false, cloned: true, // diverged again on a second run
