@@ -70,6 +70,12 @@ describe("GitClient — command construction", () => {
     await client(r).push();
     expect(last(r).args).toEqual(["push", "origin"]);
   });
+
+  it("mixed-resets to a ref", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).reset("origin/main");
+    expect(last(r).args).toEqual(["reset", "origin/main"]);
+  });
 });
 
 describe("GitClient — query parsing and errors", () => {
@@ -101,6 +107,13 @@ describe("GitClient — query parsing and errors", () => {
     expect(await client(r).diff("base", "HEAD")).toBe("diff --git...");
     expect(last(r).args).toEqual(["diff", "base...HEAD"]);
   });
+
+  it("workingTreePaths lists modified and untracked paths, resolving renames", async () => {
+    const out = [" M notes/a.md", "?? notes/new.md", "R  notes/old.md -> notes/moved.md"].join("\n");
+    const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
+    expect(await client(r).workingTreePaths()).toEqual(["notes/a.md", "notes/new.md", "notes/moved.md"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "status", "--porcelain"]);
+  });
 });
 
 describe("GitClient — recentAuthors", () => {
@@ -118,7 +131,7 @@ describe("GitClient — recentAuthors", () => {
       .join(RS);
     const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
     const authors = await client(r).recentAuthors("base..HEAD", 50);
-    expect(last(r).args).toEqual(["log", "--limit=50", "--format=%an%x1f%ae%x1f%at", "base..HEAD"]);
+    expect(last(r).args).toEqual(["log", "--max-count=50", "--format=%an%x1f%ae%x1f%at", "base..HEAD"]);
     expect(authors).toEqual([
       { name: "Grace Hopper", email: "grace@example.com", commitCount: 2, lastActivityAt: 3000 },
       { name: "Ada Lovelace", email: "ada@example.com", commitCount: 1, lastActivityAt: 2000 },

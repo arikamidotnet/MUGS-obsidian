@@ -85,6 +85,7 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         if (content === undefined) return { code: 128, stdout: "", stderr: "" };
         return { code: 0, stdout: content, stderr: "" };
       }
+      if (cmd === "-c") return { code: 0, stdout: changedPaths.map((p) => ` M ${p}`).join("\n"), stderr: "" }; // status --porcelain (push staging)
       if (cmd === "diff") return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
       return { code: 0, stdout: "", stderr: "" }; // fetch / pull / add / commit / push
     },
@@ -330,7 +331,7 @@ describe("syncAllMappings — sync outcomes", () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
     const store = memoryConflictStore();
-    const { runner } = makeRunner({
+    const { runner, calls } = makeRunner({
       head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged but non-overlapping edits
       changedPaths: ["notes/todo.md"],
       showMap: {
@@ -354,6 +355,11 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "ok", pull: "rebase", push: true, newRemoteSha: "R1" });
     // Clean merge written into the clone's working tree at <cloneRoot>/<providerId>/<id>/<path>.
     expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    // The branch is re-pointed at the remote tip before staging, so the commit + push
+    // land as a fast-forward instead of on the old diverged HEAD (non-FF rejection).
+    const resetIdx = calls.findIndex((c) => c[0] === "reset");
+    expect(calls[resetIdx]).toEqual(["reset", "origin/main"]);
+    expect(calls.findIndex((c) => c[0] === "commit")).toBeGreaterThan(resetIdx);
     expect(store.getState()).toEqual([]); // no conflicts recorded
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "R1"]]);

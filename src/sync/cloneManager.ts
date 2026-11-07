@@ -251,7 +251,13 @@ export class CloneManager {
         this.conflicts?.setConflicts(mapping.id, all);
         return { mappingId: mapping.id, pull: "rebase", push: false, needsConflictResolution: true, conflicts: merged.conflicts, renames: merged.renames };
       }
-      // Clean merge is now in the working tree; fall through to commit + push below.
+      // Clean merge is now in the working tree. Re-point the branch at the remote tip
+      // (mixed reset keeps the working tree) so the local side's unique commits ride
+      // along as content and the commit + push below fast-forwards — committing the
+      // merged content on the old diverged HEAD would leave the push non-fast-forward
+      // and git would reject it.
+      await c.reset(`origin/${branch}`);
+      // Fall through to commit + push below.
     } else if (decision.pull !== "none") {
       await c.pull("origin", branch, "ff");
     }

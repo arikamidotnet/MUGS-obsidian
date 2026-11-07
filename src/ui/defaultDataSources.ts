@@ -127,7 +127,7 @@ export class StoreDiffDataSource implements DiffDataSource {
 
       const diffText = await client.diff(base, to);
       const range = `${base}...${to}`;
-      const log = await client.run(["log", `--limit=300`, `--name-only`, `--format=%an%x1f%ae%x1e`, range]);
+      const log = await client.run(["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, range]);
       const authorsByFile: AuthorsByFile = log.code === 0 ? authorsByFileFromLog(log.stdout) : {};
       return { diffText, authorsByFile };
     } catch {

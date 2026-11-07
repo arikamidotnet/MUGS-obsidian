@@ -87,6 +87,13 @@ export class GitClient {
     return this.must(branch ? ["push", remote, branch] : ["push", remote]);
   }
 
+  /** Mixed-reset the branch to `ref`: moves HEAD and the index, keeps the working
+   *  tree. Used after a clean file-level divergence merge so the merged content is
+   *  committed on the remote tip and the push fast-forwards. */
+  async reset(ref: string): Promise<GitResult> {
+    return this.must(["reset", ref]);
+  }
+
   /** Resolve a ref to its full SHA. */
   async revParse(ref: string): Promise<string> {
     const r = await this.run(["rev-parse", ref]);
@@ -123,7 +130,7 @@ export class GitClient {
    */
   async recentAuthors(range: string, limit = 100): Promise<AuthorActivity[]> {
     const fmt = "%an%x1f%ae%x1f%at";
-    const r = await this.run(["log", `--limit=${limit}`, `--format=${fmt}`, range]);
+    const r = await this.run(["log", `--max-count=${limit}`, `--format=${fmt}`, range]);
     if (r.code !== 0) throw new Error(`git log ${range} failed (${r.code}): ${r.stderr.trim()}`);
     const byName = new Map<string, AuthorActivity>();
     for (const rec of r.stdout.split("\u001e").filter((l) => l.length > 0)) {
@@ -164,12 +171,23 @@ export class GitClient {
     return r.stdout.trim();
   }
 
-  /** Paths with uncommitted changes vs HEAD (staged + unstaged), one per line. Used
-   *  to stage only in-scope working-tree changes on push. */
+  /** Paths with working-tree changes vs HEAD (staged + unstaged + untracked), one per
+   *  line. Used to stage in-scope working-tree changes on push. Untracked entries are
+   *  included so locally-added files — e.g. after a divergence merge re-points the
+   *  branch at the remote tip, leaving local-only adds untracked — are never stranded. */
   async workingTreePaths(): Promise<string[]> {
-    const r = await this.run(["diff", "--name-only", "HEAD"]);
-    if (r.code !== 0) throw new Error(`git diff --name-only HEAD failed (${r.code}): ${r.stderr.trim()}`);
-    return r.stdout.split("\n").filter((l) => l.length > 0);
+    // -c core.quotePath=false keeps non-ASCII paths unquoted in porcelain output.
+    const r = await this.run(["-c", "core.quotePath=false", "status", "--porcelain"]);
+    if (r.code !== 0) throw new Error(`git status --porcelain failed (${r.code}): ${r.stderr.trim()}`);
+    const out: string[] = [];
+    for (const line of r.stdout.split("\n")) {
+      if (!line) continue;
+      // Porcelain v1: "XY <path>" (either status char may be a space). Renames render
+      // as "R  old -> new" — take the destination so the moved path is staged.
+      const path = line.slice(3);
+      out.push(path.includes(" -> ") ? path.split(" -> ").pop()! : path);
+    }
+    return out;
   }
 
   /** Paths changed across a `base...HEAD`-style range, one per line. */

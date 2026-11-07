@@ -890,7 +890,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       {
         text: wholeRepo ? "Add whole-repo mapping" : "Add selected mappings",
         cta: true,
-        disabled: creds.length === 0 || (!isRest() && false),
+        disabled: creds.length === 0,
         onClick: async () => {
           const cred = creds.find((c) => c.id === providerId);
           if (!providerId) { new Notice("MUGS: choose a credential/provider."); return; }

@@ -129,6 +129,73 @@ describe("local provider — real git end-to-end", () => {
     expect(store.getConflicts("map-synced-notes").map((c) => c.path)).toContain("Notes/diary.md");
   });
 
+  it("pushes a clean divergence by re-pointing the branch at the remote tip (fast-forward)", async () => {
+    // Isolated bare remote + clone root so this scenario cannot interfere with the
+    // shared fixtures above (and vice versa).
+    const base = join(tmpdir(), "mugs-e2e-diverge");
+    const remotePlain = join(base, "remote.git");
+    const work = join(base, "work");
+    const cloneRoot = join(base, "clones");
+    rmSync(base, { recursive: true, force: true });
+
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nbase line\n");
+    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+    rmSync(work, { recursive: true, force: true });
+
+    const cred: Credential = { id: "cred-diverge", label: "Local", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
+    const mappingId = "map-diverge";
+    const deps = () => ({
+      mappings: [{ id: mappingId, label: "Notes", remotePath: "", localFolder: "Synced", providerId: "cred-diverge", direction: "push-pull" as const }],
+      credentials: [cred],
+      getToken: () => "t",
+      buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
+      cloneRoot,
+      runner: new ChildProcessRunner(),
+      // Production parity: main.ts always injects a working-tree writer so merged
+      // content is materialized in the clone before the branch is re-pointed.
+      workingTree: { writeFile: (p: string, c: string) => { writeFileSync(p, c); return Promise.resolve(); } },
+      lastSync: storeWritableAccessor(new MugsStore(new MemoryIO())),
+      conflicts: storeConflictAccessor(new MugsStore(new MemoryIO())),
+    });
+
+    // Sync #1: clone + record the baseline.
+    await syncAllMappings(deps());
+
+    // Another device advances the remote with a non-overlapping new file.
+    const scratch = join(base, "scratch");
+    execSync(`git clone -q "${remotePlain}" "${scratch}"`);
+    writeFileSync(join(scratch, "Notes", "remote-addition.md"), "remote addition\n");
+    execSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+    execSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "remote addition"`);
+    execSync(`git -C "${scratch}" push -q "${remotePlain}" main`);
+    rmSync(scratch, { recursive: true, force: true });
+
+    // The MUGS clone commits its own non-overlapping new file -> histories diverge.
+    const cp = cloneDir({ root: cloneRoot }, "cred-diverge", mappingId);
+    writeFileSync(join(cp, "Notes", "local-addition.md"), "local addition\n");
+    execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+    execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local addition"`);
+
+    // Sync #2: the divergence resolves as a clean merge; the branch re-points at the
+    // remote tip so the push fast-forwards. Before the fix, git rejected this push as
+    // non-fast-forward (the merged content was committed on the old diverged HEAD).
+    const outcomes = await syncAllMappings(deps());
+    console.log("clean-divergence outcome:", JSON.stringify(outcomes[0]));
+    expect(outcomes[0].status).toBe("ok");
+
+    // The remote now carries BOTH sides' content, and nothing was lost.
+    const check = join(base, "check");
+    execSync(`git clone -q "${remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "Notes", "remote-addition.md"), "utf8")).toBe("remote addition\n");
+    expect(readFileSync(join(check, "Notes", "local-addition.md"), "utf8")).toBe("local addition\n");
+    expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("base line");
+    rmSync(base, { recursive: true, force: true });
+  });
+
   it("excludes .trash/ from push when syncTrashFolder is false, includes it when true", async () => {
     // Isolated bare remote + clone root per scenario so the two gates don't interfere.
     for (const syncTrashFolder of [false, true]) {
