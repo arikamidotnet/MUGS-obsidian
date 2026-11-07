@@ -4,14 +4,14 @@
  * so they prove `git clone`/`fetch`/`rebase`/`push` + the clone-dir layout actually work.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
-import { cloneDir } from "./cloneManager";
+import { cloneDir, type VaultMirror } from "./cloneManager";
 import type { FolderMapping, Credential } from "../types";
 
 const REMOTE_URL = "file://" + join(tmpdir(), "mugs-e2e-shared.git"); // clone SOURCE (as the driver's baseUrl)
@@ -252,5 +252,203 @@ describe("local provider — real git end-to-end", () => {
       rmSync(check, { recursive: true, force: true });
       rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+describe("vault mirror + first-sync direction — real git end-to-end", () => {
+  /** A filesystem VaultMirror over a "vault" dir with a "Synced" folder, exactly the
+   *  seam main.ts wires from the Obsidian vault adapter (text files only). */
+  function fsVaultMirror(vaultRoot: string): VaultMirror {
+    const folderPath = (rel: string) => join(vaultRoot, "Synced", rel);
+    const walk = (dir: string, base = ""): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        if (entry.startsWith(".")) continue; // dot-folders are excluded, like getFiles()
+        const abs = join(dir, entry);
+        const rel = base ? `${base}/${entry}` : entry;
+        if (statSync(abs).isDirectory()) out.push(...walk(abs, rel));
+        else out.push(rel);
+      }
+      return out;
+    };
+    return {
+      // Like vault.getFiles(): a missing folder is an empty list, never a throw.
+      list: async () => {
+        const dir = join(vaultRoot, "Synced");
+        return existsSync(dir) ? walk(dir) : [];
+      },
+      read: async (_folder, rel) => readFileSync(folderPath(rel), "utf8"),
+      write: async (_folder, rel, content) => {
+        const p = folderPath(rel);
+        mkdirSync(p.slice(0, p.lastIndexOf("/")), { recursive: true });
+        writeFileSync(p, content);
+      },
+      remove: async (_folder, rel) => {
+        if (existsSync(folderPath(rel))) unlinkSync(folderPath(rel));
+      },
+    };
+  }
+
+  /** Isolated fixture: bare remote (seeded by the caller) + empty clone root + vault dir. */
+  function fixture(name: string): { base: string; remotePlain: string; cloneRoot: string; vaultRoot: string; syncedVault: string } {
+    const base = join(tmpdir(), `mugs-e2e-${name}`);
+    rmSync(base, { recursive: true, force: true });
+    const out = {
+      base,
+      remotePlain: join(base, "remote.git"),
+      cloneRoot: join(base, "clones"),
+      vaultRoot: join(base, "vault"),
+      get syncedVault() { return join(out.vaultRoot, "Synced"); },
+    };
+    mkdirSync(join(out.vaultRoot, "Synced"), { recursive: true });
+    return out;
+  }
+
+  /** Commit a work dir's tree into a fresh bare remote on main. */
+  function seedRemoteFrom(work: string, remotePlain: string): void {
+    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  /** Deps for one sync pass over a folder mapping with the vault mirror wired. */
+  const depsFor = (f: ReturnType<typeof fixture>, store: MugsStore, firstSync: "pull" | "push") => ({
+    mappings: [{ id: "map-mirror", label: "Notes", remotePath: "", localFolder: "Synced", providerId: "cred-mirror", direction: "push-pull" as const }],
+    credentials: [{ id: "cred-mirror", label: "Local", kind: "local" as const, token: "t", baseUrl: "file://" + f.remotePlain }],
+    getToken: () => "t",
+    buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
+    cloneRoot: f.cloneRoot,
+    runner: new ChildProcessRunner(),
+    workingTree: {
+      // Production parity: main.ts's writer creates parent folders (a --no-checkout
+      // clone has no directories on disk until the mirror writes them).
+      writeFile: (p: string, c: string) => {
+        mkdirSync(p.slice(0, p.lastIndexOf("/")), { recursive: true });
+        writeFileSync(p, c);
+        return Promise.resolve();
+      },
+      readFile: (p: string) => Promise.resolve(existsSync(p) ? readFileSync(p, "utf8") : undefined),
+      deleteFile: (p: string) => { if (existsSync(p)) unlinkSync(p); return Promise.resolve(); },
+    },
+    vaultMirror: fsVaultMirror(f.vaultRoot),
+    rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
+    firstSyncDirection: firstSync,
+    lastSync: storeWritableAccessor(store),
+    conflicts: storeConflictAccessor(store),
+  });
+
+  it("pull-first init populates the vault folder from the remote", async () => {
+    const f = fixture("pull-init");
+    const work = join(f.base, "work");
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nfrom remote\n");
+    writeFileSync(join(work, "README.md"), "# readme\n");
+    seedRemoteFrom(work, f.remotePlain);
+
+    const store = new MugsStore(new MemoryIO());
+    const outcomes = await syncAllMappings(depsFor(f, store, "pull"));
+    expect(outcomes[0].status).toBe("ok");
+    // The remote's whole tree landed under the vault's Synced folder.
+    expect(readFileSync(join(f.syncedVault, "Notes", "diary.md"), "utf8")).toContain("from remote");
+    expect(readFileSync(join(f.syncedVault, "README.md"), "utf8")).toContain("readme");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
+  it("push-first init uploads the vault without downloading history; vault wins overlaps, remote-only files kept", async () => {
+    const f = fixture("push-init");
+    // Remote: a STALE version of diary.md plus a file the vault does not have.
+    const work = join(f.base, "work");
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nSTALE remote content\n");
+    writeFileSync(join(work, "Notes", "remote-only.md"), "remote only\n");
+    seedRemoteFrom(work, f.remotePlain);
+
+    // Vault: the up-to-date content the user wants to push.
+    mkdirSync(join(f.syncedVault, "Notes"), { recursive: true });
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), "# Diary\n\nFRESH vault content\n");
+    writeFileSync(join(f.syncedVault, "new-note.md"), "brand new from vault\n");
+
+    const store = new MugsStore(new MemoryIO());
+    const outcomes = await syncAllMappings(depsFor(f, store, "push"));
+    expect(outcomes[0].status).toBe("ok");
+
+    // The remote now carries the vault content (overlap wins) AND the remote-only file.
+    const check = join(f.base, "check");
+    execSync(`git clone -q "${f.remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("FRESH vault content");
+    expect(readFileSync(join(check, "Notes", "remote-only.md"), "utf8")).toBe("remote only\n");
+    expect(readFileSync(join(check, "new-note.md"), "utf8")).toBe("brand new from vault\n");
+    // The push was additive: the vault folder was NOT populated with remote-only content.
+    expect(existsSync(join(f.syncedVault, "Notes", "remote-only.md"))).toBe(false);
+
+    // Sync #2 (baseline now recorded) runs the regular push-pull flow: the remote-only
+    // file pulls down into the vault, and nothing conflicts.
+    const outcomes2 = await syncAllMappings(depsFor(f, store, "push"));
+    expect(outcomes2[0].status).toBe("ok");
+    expect(readFileSync(join(f.syncedVault, "Notes", "remote-only.md"), "utf8")).toBe("remote only\n");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
+  it("refuses a push-first init when the vault folder is empty (never wipes a populated remote)", async () => {
+    const f = fixture("push-refuse");
+    const work = join(f.base, "work");
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "important.md"), "do not delete\n");
+    seedRemoteFrom(work, f.remotePlain);
+    // Vault Synced folder left empty.
+
+    const store = new MugsStore(new MemoryIO());
+    const outcomes = await syncAllMappings(depsFor(f, store, "push"));
+    expect(outcomes[0].status).toBe("skipped");
+    expect(outcomes[0].reason).toContain("first-sync push refused");
+    // The remote was untouched.
+    const check = join(f.base, "check");
+    execSync(`git clone -q "${f.remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "Notes", "important.md"), "utf8")).toBe("do not delete\n");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
+  it("pushes a vault edit and pulls a remote edit on later syncs (both directions, no history loss)", async () => {
+    const f = fixture("roundtrip");
+    const work = join(f.base, "work");
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nbase\n");
+    seedRemoteFrom(work, f.remotePlain);
+
+    const store = new MugsStore(new MemoryIO());
+    // Init: pull the base into the vault.
+    await syncAllMappings(depsFor(f, store, "pull"));
+    expect(readFileSync(join(f.syncedVault, "Notes", "diary.md"), "utf8")).toContain("base");
+
+    // Vault edit (the normal user flow: edit a note in Obsidian).
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), "# Diary\n\nbase + vault edit\n");
+    const o2 = await syncAllMappings(depsFor(f, store, "pull"));
+    expect(o2[0].status).toBe("ok");
+
+    // Another device edits a DIFFERENT file and pushes.
+    const scratch = join(f.base, "scratch");
+    execSync(`git clone -q "${f.remotePlain}" "${scratch}"`);
+    writeFileSync(join(scratch, "Notes", "peer.md"), "from another device\n");
+    execSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+    execSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m peer`);
+    execSync(`git -C "${scratch}" push -q origin main`);
+    rmSync(scratch, { recursive: true, force: true });
+
+    // Sync #3: the vault keeps its edit AND receives the peer's file.
+    const o3 = await syncAllMappings(depsFor(f, store, "pull"));
+    expect(o3[0].status).toBe("ok");
+    expect(readFileSync(join(f.syncedVault, "Notes", "diary.md"), "utf8")).toContain("base + vault edit");
+    expect(readFileSync(join(f.syncedVault, "Notes", "peer.md"), "utf8")).toBe("from another device\n");
+
+    // The remote carries the vault edit too.
+    const check = join(f.base, "check");
+    execSync(`git clone -q "${f.remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("base + vault edit");
+    rmSync(f.base, { recursive: true, force: true });
   });
 });

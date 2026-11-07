@@ -9,6 +9,7 @@ const policy = (over: Partial<SyncPolicy> = {}): SyncPolicy => ({
   recencyWins: true,
   paused: false,
   intervalSeconds: 300,
+  firstSyncDirection: "pull",
   obsidianConfig: { enabled: false, entries: [] },
   ...over,
 });

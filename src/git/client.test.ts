@@ -4,9 +4,9 @@ import type { GitResult, GitRunner } from "./types";
 
 /** Fake runner that records calls and returns canned results. */
 class FakeRunner implements GitRunner {
-  readonly calls: { args: string[]; opts?: { cwd: string } }[] = [];
+  readonly calls: { args: string[]; opts?: { cwd?: string; env?: Record<string, string> } }[] = [];
   constructor(private responder: (args: string[]) => GitResult) {}
-  async run(args: string[], opts?: { cwd: string }): Promise<GitResult> {
+  async run(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult> {
     this.calls.push({ args, opts });
     return this.responder(args);
   }
@@ -75,6 +75,108 @@ describe("GitClient — command construction", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).reset("origin/main");
     expect(last(r).args).toEqual(["reset", "origin/main"]);
+  });
+});
+
+describe("GitClient — HTTP(S) credentials", () => {
+  const HELPER_ARGS = ["-c", "credential.helper=", "-c", "credential.helper=!f() { echo username=$MUGS_GIT_USER; echo password=$MUGS_GIT_TOKEN; }; f"];
+
+  it("attaches a per-invocation credential helper to clone without touching the URL", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).withAuth({ username: "oauth2", token: "glpat-secret" }).clone("https://gitlab.com/x/y.git", "/c/y");
+    const call = last(r);
+    // The URL in argv stays clean — no embedded token anywhere in the args…
+    expect(call.args).toContain("https://gitlab.com/x/y.git");
+    for (const a of call.args) expect(a).not.toContain("glpat-secret");
+    // …the inherited helpers are cleared and ours (env-fed) is registered instead…
+    expect(call.args.slice(0, 5)).toEqual([...HELPER_ARGS, "clone"]);
+    // …and the secret reaches git only through the environment.
+    expect(call.opts?.env).toMatchObject({ MUGS_GIT_USER: "oauth2", MUGS_GIT_TOKEN: "glpat-secret", GIT_TERMINAL_PROMPT: "0" });
+    // No remote surgery: nothing is ever written into .git/config.
+    expect(r.calls.some((c) => c.args.includes("set-url"))).toBe(false);
+  });
+
+  it("attaches the same helper to fetch and push, keeping the named remote", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    const c = client(r, "/c/y").withAuth({ username: "u", token: "t" });
+    await c.fetch();
+    expect(last(r).args).toEqual([...HELPER_ARGS, "fetch", "origin"]);
+    expect(last(r).opts?.env).toMatchObject({ MUGS_GIT_TOKEN: "t" });
+    await c.push("origin", "main");
+    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+  });
+
+  it("leaves network commands untouched when no auth is set (local provider)", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).fetch();
+    expect(last(r).args).toEqual(["fetch", "origin"]);
+    expect(last(r).opts?.env).toBeUndefined();
+  });
+
+  it("carries the helper on every command of an authed client (blobless lazy fetches need creds)", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    const bound = client(r).withAuth({ username: "u", token: "t" }).at("/c/y");
+    await bound.push("origin", "main");
+    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+    expect(last(r).opts).toMatchObject({ cwd: "/c/y", env: { MUGS_GIT_TOKEN: "t" } });
+    // Even a local read like rev-parse carries the helper: on a blobless clone a
+    // lazy blob fetch can trigger from any content-touching command.
+    await bound.revParse("HEAD");
+    expect(last(r).args).toEqual([...HELPER_ARGS, "rev-parse", "HEAD"]);
+    expect(last(r).opts?.env).toMatchObject({ MUGS_GIT_TOKEN: "t" });
+    // An unauthed client stays completely bare.
+    const plain = client(r).at("/c/y");
+    await plain.revParse("HEAD");
+    expect(last(r).args).toEqual(["rev-parse", "HEAD"]);
+    expect(last(r).opts).toEqual({ cwd: "/c/y" });
+  });
+
+  it("throws readable errors that omit the credential-helper prefix", async () => {
+    const r = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad" }));
+    await expect(client(r).withAuth({ username: "u", token: "t" }).fetch()).rejects.toThrow(
+      "git fetch origin failed (128): fatal: bad",
+    );
+  });
+});
+
+describe("GitClient — clone options", () => {
+  it("adds blobless + no-checkout flags for http(s) clones", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).clone("https://gitlab.com/x/y.git", "/c/y", { filter: "blob:none", noCheckout: true });
+    expect(last(r).args).toEqual(["clone", "--filter=blob:none", "--no-checkout", "https://gitlab.com/x/y.git", "/c/y"]);
+  });
+
+  it("adds only the filter for a blobless checkout clone", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).clone("https://gitlab.com/x/y.git", "/c/y", { filter: "blob:none" });
+    expect(last(r).args).toEqual(["clone", "--filter=blob:none", "https://gitlab.com/x/y.git", "/c/y"]);
+  });
+
+  it("skips the filter for local path remotes (server may not allow it)", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).clone("/srv/shared.git", "/c/y", { filter: "blob:none", noCheckout: true });
+    expect(last(r).args).toEqual(["clone", "--no-checkout", "/srv/shared.git", "/c/y"]);
+  });
+});
+
+describe("GitClient — first-init topology helpers", () => {
+  it("currentHead resolves '' for an unborn HEAD instead of throwing", async () => {
+    const unborn = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad revision" }));
+    expect(await client(unborn).currentHead()).toBe("");
+    const born = new FakeRunner(() => ({ code: 0, stdout: "abc123\n", stderr: "" }));
+    expect(await client(born).currentHead()).toBe("abc123");
+  });
+
+  it("lsFiles lists tracked paths", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
+    expect(await client(r).lsFiles()).toEqual(["a.md", "sub/b.md"]);
+    expect(last(r).args).toEqual(["ls-files"]);
+  });
+
+  it("deletedPaths asks git for the deleted-only diff of a range", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\n", stderr: "" }));
+    expect(await client(r).deletedPaths("OLD..HEAD")).toEqual(["gone.md"]);
+    expect(last(r).args).toEqual(["diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
   });
 });
 

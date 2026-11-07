@@ -8,6 +8,7 @@
  * (`sync/schedule.ts`); everything here is thin Obsidian glue.
  */
 import { Plugin, Notice, type EventRef } from "obsidian";
+import { rmSync } from "node:fs";
 import { MugsStore, MemoryIO } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
@@ -26,8 +27,9 @@ import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
-import { decideRun, debounceFireTimes, type RunDecision } from "./sync/schedule";
-import type { WorkingTreeWriter } from "./sync/cloneManager";
+import { decideRun, debounceFireTimes } from "./sync/schedule";
+import type { VaultMirror, WorkingTreeWriter } from "./sync/cloneManager";
+import { normalizeVaultPath } from "./schema";
 import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
 import { MCP_SERVER_NAME, listAgentTools } from "./mcp/server";
@@ -53,6 +55,16 @@ const POLL_TICK_MS = 15_000;
 /** File-change events coalesce into a single sync this long after the last one. */
 const EVENT_DEBOUNCE_MS = 20_000;
 
+/** Extensions the vault mirror skips — the sync layer moves text, not binaries. */
+const BINARY_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
+  "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
+  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "Drawing",
+]);
+
+/** Status-bar states the plugin cycles through. */
+type BarState = "idle" | "syncing" | "synced" | "conflict" | "skipped" | "error" | "paused" | "hidden";
+
 export default class MugsPlugin extends Plugin {
   store: MugsStore = new MugsStore();
 
@@ -70,6 +82,12 @@ export default class MugsPlugin extends Plugin {
   private eventTimestamps: number[] = [];
   /** Tracks vault paths currently open with unsaved changes so sync writes never clobber an edit (Area 5). */
   private editorOpen = new EditorOpenGuard();
+  /** True while a sync pass is running — the guard that keeps scheduler ticks, file
+   *  events and manual Sync clicks from stacking parallel passes (and parallel
+   *  clones) on top of each other. */
+  private syncInFlight = false;
+  /** Epoch ms of the newest successful sync — renders the "✓ synced HH:MM" state. */
+  private lastSyncedAt?: number;
 
   async onload(): Promise<void> {
     // In Obsidian, IO is backed by loadData/saveData; MemoryIO covers tests.
@@ -79,6 +97,11 @@ export default class MugsPlugin extends Plugin {
     });
 
     await this.store.load();
+    // Seed the status bar from the persisted sync bookkeeping so a reload shows the
+    // real last-synced time instead of a blank "idle".
+    const lastSync = this.store.getSettings().lastSync;
+    const newest = Math.max(0, ...Object.values(lastSync).map((s) => Math.max(s.lastPullAt ?? 0, s.lastPushAt ?? 0)));
+    this.lastSyncedAt = newest > 0 ? newest : undefined;
     console.log("MUGS — Multi-User Git Sync loaded");
 
     // Inject the plugin stylesheet (Map/Diff/settings UI). Prefer
@@ -119,7 +142,7 @@ export default class MugsPlugin extends Plugin {
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
     this.statusEl = this.addStatusBarItem();
-    this.updateStatusBar("idle");
+    this.updateStatusBar(this.lastSyncedAt ? "synced" : "idle");
     this.startScheduler();
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibilityChange());
     // Workspace emits create/modify/delete with a path arg; the shipped typings only
@@ -193,10 +216,17 @@ export default class MugsPlugin extends Plugin {
     });
   }
 
-  /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice. */
+  /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice.
+   *  Guarded: while a pass is in flight, further calls (scheduler ticks, file events,
+   *  repeated Sync clicks) return immediately — passes can never stack. */
   async runSync(quiet = false): Promise<void> {
+    if (this.syncInFlight) return;
+    this.syncInFlight = true;
+    this.updateStatusBar("syncing", "syncing…");
     const cloneRoot = this.cloneRoot();
     const settings = this.store.getSettings();
+    // Mappings with no baseline yet — used to report first-sync completion.
+    const firstTimers = new Set(settings.mappings.filter((m) => !settings.lastSync[m.id]).map((m) => m.id));
 
     let outcomes: SyncOutcome[];
     try {
@@ -215,13 +245,27 @@ export default class MugsPlugin extends Plugin {
         trash: this.trashStore(),
         heldPaths: storeHeldAccessor(this.store).heldPaths,
         pickAgent: this.pickAgent,
+        vaultMirror: this.vaultMirror(),
+        rmDir: (dir) => {
+          try {
+            rmSync(dir, { recursive: true, force: true });
+          } catch (err) {
+            console.warn("MUGS: could not clear partial clone dir", dir, err);
+          }
+        },
+        firstSyncDirection: settings.sync.firstSyncDirection,
+        onStatus: (message) => this.updateStatusBar("syncing", message),
+        onRepoResolved: (mappingId, repoRef) => this.backfillRepoRef(mappingId, repoRef),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       new Notice(`MUGS sync failed:\n${msg}`, 8000);
       if (!quiet) console.error("MUGS: runSync threw", err);
-      this.updateStatusBar("idle");
+      this.updateStatusBar("error");
+      this.syncInFlight = false;
       return;
+    } finally {
+      this.syncInFlight = false;
     }
 
     await this.store.save();
@@ -233,6 +277,11 @@ export default class MugsPlugin extends Plugin {
     }
     for (const o of outcomes.filter((o) => o.status === "ok")) {
       if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
+      // First-sync completions are worth hearing about even on quiet runs.
+      if (firstTimers.has(o.mappingId)) {
+        const direction = settings.sync.firstSyncDirection === "push" ? "vault uploaded to remote" : "vault populated from remote";
+        new Notice(`MUGS — ${o.label}: first sync complete — ${direction}.`, quiet ? 4000 : 7000);
+      }
     }
     // Skipped mappings are the silent-failure path: the driver returns status
     // "skipped" (not a throw) for no-credential / missing-token / repo-not-found /
@@ -242,12 +291,118 @@ export default class MugsPlugin extends Plugin {
       const reason = o.reason ? ` — ${o.reason}` : "";
       new Notice(`MUGS — ${o.label} skipped${reason}`, quiet ? 0 : 6000);
     }
+
+    // Terminal status-bar state from the outcome aggregate.
+    const conflicts = outcomes.filter((o) => o.status === "conflict").length;
+    const skips = outcomes.filter((o) => o.status === "skipped").length;
+    const oks = outcomes.filter((o) => o.status === "ok").length;
+    if (conflicts > 0) this.updateStatusBar("conflict");
+    else if (skips > 0) this.updateStatusBar("skipped");
+    else if (oks > 0) {
+      this.lastSyncedAt = Date.now();
+      this.updateStatusBar("synced");
+    }
+    // oks === 0 && skips === 0 && conflicts === 0 (no mappings configured): keep prior state.
   }
 
-  /** Writes merged file content into a clone's working tree via the vault adapter. */
+  /** Writes merged file content into a clone's working tree via the vault adapter
+   *  (absolute paths inside the vault). Parent folders are created so mirror writes
+   *  into a --no-checkout clone cannot fail on missing directories. NOTE: the
+   *  adapter's methods are read/write/remove (an earlier version called a
+   *  non-existent `writeFile`, which would have crashed on the first merge write). */
   private workingTreeWriter(): WorkingTreeWriter {
-    const adapter = this.app.vault.adapter as unknown as { writeFile(p: string, data: string | ArrayBuffer): Promise<void> };
-    return { writeFile: (absPath, content) => adapter.writeFile(absPath, content) };
+    const adapter = this.app.vault.adapter as unknown as {
+      read(p: string): Promise<string>;
+      write(p: string, data: string | ArrayBuffer): Promise<void>;
+      remove(p: string): Promise<void>;
+      mkdir(p: string): Promise<void>;
+    };
+    return {
+      writeFile: async (absPath, content) => {
+        const parent = absPath.slice(0, absPath.lastIndexOf("/"));
+        if (parent) {
+          try {
+            await adapter.mkdir(parent);
+          } catch {
+            // already exists
+          }
+        }
+        await adapter.write(absPath, content);
+      },
+      readFile: async (absPath) => {
+        try {
+          return await adapter.read(absPath);
+        } catch {
+          return undefined;
+        }
+      },
+      deleteFile: async (absPath) => {
+        try {
+          await adapter.remove(absPath);
+        } catch {
+          // already absent
+        }
+      },
+    };
+  }
+
+  /** Filesystem view of mapping vault folders backed by the Obsidian vault: listing
+   *  uses vault.getFiles() (dot-folders like .obsidian/ and .mugs-clones/ are
+   *  excluded automatically) minus known binary extensions — the mirror moves text. */
+  private vaultMirror(): VaultMirror {
+    const adapter = this.app.vault.adapter as unknown as {
+      read(p: string): Promise<string>;
+      write(p: string, data: string | ArrayBuffer): Promise<void>;
+      remove(p: string): Promise<void>;
+      mkdir(p: string): Promise<void>;
+    };
+    const rootOf = (folder: string): string => (folder === "." ? "" : normalizeVaultPath(folder));
+    const vaultPath = (folder: string, rel: string): string => {
+      const root = rootOf(folder);
+      return root ? `${root}/${rel}` : rel;
+    };
+    return {
+      list: async (folder) => {
+        const root = rootOf(folder);
+        const files = this.app.vault.getFiles();
+        return files
+          .filter((f) => !BINARY_EXTENSIONS.has(f.extension.toLowerCase()))
+          .filter((f) => (root === "" ? true : f.path.startsWith(`${root}/`)))
+          .map((f) => (root === "" ? f.path : f.path.slice(root.length + 1)));
+      },
+      read: async (folder, rel) => adapter.read(vaultPath(folder, rel)),
+      write: async (folder, rel, content) => {
+        const p = vaultPath(folder, rel);
+        const parent = p.slice(0, p.lastIndexOf("/"));
+        if (parent) {
+          try {
+            await adapter.mkdir(parent);
+          } catch {
+            // already exists
+          }
+        }
+        await adapter.write(p, content);
+      },
+      remove: async (folder, rel) => {
+        try {
+          await adapter.remove(vaultPath(folder, rel));
+        } catch {
+          // already absent
+        }
+      },
+    };
+  }
+
+  /** Pin a legacy mapping (no repoRef) to its resolved repo so the shared per-repo
+   *  clone dir — and the UI's clone-dir resolution — stick across sessions. */
+  private backfillRepoRef(mappingId: string, repoRef: string): void {
+    const m = this.store.getSettings().mappings.find((x) => x.id === mappingId);
+    if (!m || m.repoRef) return;
+    try {
+      this.store.upsertMapping({ ...m, repoRef });
+    } catch (err) {
+      console.warn("MUGS: could not backfill repoRef for", mappingId, err);
+    }
   }
 
   /** The on-disk clones directory, resolved defensively like getBasePath. */
@@ -298,12 +453,15 @@ export default class MugsPlugin extends Plugin {
       hidden: this.hidden,
     });
     if (!decision.allow) {
-      this.updateStatusBar(decision.reason);
+      // Only persistent gate states change the bar; "interval"/"too-soon" are
+      // transient and must not overwrite the last terminal state (the old bug
+      // that kept the bar stuck on "idle").
+      if (decision.reason === "paused-user") this.updateStatusBar("paused");
+      else if (decision.reason === "hidden") this.updateStatusBar("hidden");
       return;
     }
     await this.runSync(true); // quiet: automatic runs don't spam Notices
     this.lastRunAt = Date.now();
-    this.updateStatusBar("ok");
   }
 
   /** A vault file changed under a mapped path — debounce it into one sync. */
@@ -361,25 +519,56 @@ export default class MugsPlugin extends Plugin {
     });
   }
 
-  /** The app became visible/hidden — update the gate and status bar. */
+  /** The app became visible/hidden — update the gate and status bar. Becoming
+   *  visible again restores the last terminal state (synced/conflict/…) instead
+   *  of snapping back to "idle". */
   private onVisibilityChange(): void {
     this.hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
     if (!this.hidden && this.eventDebounceTimer) {
       clearTimeout(this.eventDebounceTimer);
       this.eventDebounceTimer = undefined;
     }
-    this.updateStatusBar(this.hidden ? "hidden" : "ok");
+    if (this.hidden) {
+      this.updateStatusBar("hidden");
+    } else {
+      // Re-render the persistent state (a pass in flight keeps its phase text).
+      this.updateStatusBar(this.syncInFlight ? "syncing" : this.lastSyncedAt ? "synced" : "idle");
+    }
   }
 
-  /** Render the status-bar label for a scheduler state. */
-  private updateStatusBar(state: RunDecision["reason"] | "ok" | "idle" = "idle"): void {
+  /** Render the status-bar label for a plugin state, with optional live detail
+   *  (sync phase text). A user pause always wins over everything else. */
+  private updateStatusBar(state: BarState, detail?: string): void {
     if (!this.statusEl) return;
-    const paused = this.store.getSettings().sync.paused;
-    let text = "MUGS ● idle";
+    const paused = this.store.getSettings().sync.paused && state !== "paused";
+    let text: string;
     if (paused) text = "MUGS ⏸ paused";
-    else if (state === "hidden") text = "MUGS 👁 hidden";
-    else if (state === "ok") text = "MUGS ✓ synced";
-    else if (state === "paused-user") text = "MUGS ⏸ paused";
+    else
+      switch (state) {
+        case "syncing":
+          text = `MUGS ⟳ ${detail ?? "syncing…"}`;
+          break;
+        case "synced":
+          text = `MUGS ✓ synced ${this.lastSyncedAt ? formatClock(this.lastSyncedAt) : ""}`.trimEnd();
+          break;
+        case "conflict":
+          text = "MUGS ⚠ needs merge";
+          break;
+        case "skipped":
+          text = "MUGS ✗ sync issues";
+          break;
+        case "error":
+          text = "MUGS ✗ failed";
+          break;
+        case "paused":
+          text = "MUGS ⏸ paused";
+          break;
+        case "hidden":
+          text = "MUGS 👁 hidden";
+          break;
+        default:
+          text = "MUGS ● idle";
+      }
     this.statusEl.empty();
     this.statusEl.setText(text);
   }
@@ -388,6 +577,11 @@ export default class MugsPlugin extends Plugin {
     if (this.eventDebounceTimer) clearTimeout(this.eventDebounceTimer);
     console.log("MUGS unloaded");
   }
+}
+
+/** Format an epoch-ms timestamp as a local HH:MM clock string. */
+function formatClock(at: number): string {
+  return new Date(at).toTimeString().slice(0, 5);
 }
 
 // Re-exported so settingsTab can `import type MugsPlugin from "./main"`.

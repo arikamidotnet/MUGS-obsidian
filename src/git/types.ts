@@ -16,5 +16,7 @@ export interface GitResult {
 
 /** Minimal command-runner seam. Resolves for any exit code so callers can inspect `code`. */
 export interface GitRunner {
-  run(args: string[], opts?: { cwd?: string }): Promise<GitResult>;
+  /** `env` entries are merged over the ambient environment for this invocation
+   *  (used to hand network commands a credential without persisting it). */
+  run(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult>;
 }

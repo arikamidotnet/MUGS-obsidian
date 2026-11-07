@@ -18,8 +18,8 @@ import type { Provider, RepoSummary } from "../providers/types";
 import type { HttpTransport } from "../providers/http";
 import type { ProviderInput } from "../providers/factory";
 import type { GitRunner } from "../git/types";
-import { GitClient } from "../git/client";
-import { CloneManager, type LastSyncAccessor, type SyncResult, type WorkingTreeWriter, type ConflictStore } from "./cloneManager";
+import { GitClient, type GitAuth } from "../git/client";
+import { CloneManager, type LastSyncAccessor, type SyncResult, type SyncOpts, type VaultMirror, type WorkingTreeWriter, type ConflictStore } from "./cloneManager";
 import type { TrashStore } from "./trash";
 import type { EditorOpenGuard } from "./editorOpen";
 import type { MugsStore } from "../store";
@@ -74,9 +74,24 @@ export interface SyncDriverDeps {
   /** Optional: record a file's content before it is removed from the working tree during
    *  sync, so both-sides-deletions are recoverable via `.mugs-trash` (Area 3). */
   trash?: TrashStore;
-  /** Optional: set of paths explicitly held back for review (Area 8); held paths are
+  /** Optional: set of paths explicitly held back for review (Area 8). Held paths are
    *  excluded from push. Absent -> nothing held. */
   heldPaths?: (mappingId: string) => ReadonlySet<string> | undefined;
+  /** Optional: filesystem view of each mapping's vault folder. When present the vault
+   *  is the authoritative local side of every sync (mirrored into clones on push,
+   *  populated from clones on pull). Wired in main.ts from the vault adapter. */
+  vaultMirror?: VaultMirror;
+  /** Optional: recursively remove a directory — clears the half-baked .git left by an
+   *  interrupted clone so a retry can re-clone. */
+  rmDir?: (dir: string) => void;
+  /** Which side wins a mapping's FIRST sync (no baseline yet): "pull" (default) populates
+   *  the vault from the remote; "push" uploads the vault without downloading history. */
+  firstSyncDirection?: "pull" | "push";
+  /** Optional: live progress reporter — receives phase text per mapping (status bar). */
+  onStatus?: (message: string) => void;
+  /** Optional: notified when a legacy mapping (no repoRef) resolves to a repo, so the
+   *  caller can backfill repoRef — that pins the shared clone dir and fixes UI paths. */
+  onRepoResolved?: (mappingId: string, repoRef: string) => void;
 }
 
 /**
@@ -112,6 +127,8 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     pickAgent: deps.pickAgent,
     trash: deps.trash,
     heldPaths: deps.heldPaths,
+    vaultMirror: deps.vaultMirror,
+    rmDir: deps.rmDir,
   });
   const providerCache = new Map<string, Provider>();
   const results: SyncOutcome[] = [];
@@ -130,6 +147,11 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     if (!credential) { skip(mapping, "no credential"); continue; }
 
     let repos: RepoSummary[];
+    // HTTP(S) credentials for the clone/fetch/push that follow. The REST provider
+    // already carries the token for API calls, but git-over-HTTPS needs it too —
+    // otherwise git falls back to the machine's credential helper and the clone
+    // fails with "HTTP Basic: Access denied". Local providers use a filesystem path.
+    let auth: GitAuth | undefined;
     if (credential.kind === "local") {
       // Local provider has no REST adapter: it syncs an existing local repo directly.
       // The repo path is stored in credential.baseUrl as a file:// URL (the schema requires
@@ -151,6 +173,8 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     } else {
       const token = deps.getToken(credential.id);
       if (!token) { skip(mapping, "missing token"); continue; }
+      // Any non-empty username works for token auth; `oauth2` is the GitLab convention.
+      auth = { username: credential.username ?? "oauth2", token };
 
       let provider = providerCache.get(credential.id);
       if (!provider) {
@@ -166,10 +190,16 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     }
     const repo = resolveRepo(repos, mapping);
     if (!repo) { skip(mapping, "repo not found or not accessible"); continue; }
+    // Backfill repoRef on legacy folder-scoped links so the shared per-repo clone dir
+    // (and the UI's clone-dir resolution) sticks across sessions.
+    if (!mapping.repoRef) deps.onRepoResolved?.(mapping.id, repo.id);
 
     try {
-      await manager.ensureClone(mapping, repo);
-      const result = await manager.syncMapping(mapping, repo);
+      const opts: SyncOpts = {
+        firstSync: deps.firstSyncDirection ?? "pull",
+        onStatus: deps.onStatus,
+      };
+      const result = await manager.syncMapping(mapping, repo, auth, opts);
       if (result.conflicts.length > 0) {
         deps.lastSync.recordConflict?.(mapping.id);
         record(outcome(mapping, "conflict", { pull: result.pull, conflicts: result.conflicts }));
@@ -209,6 +239,8 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     recordPush: (id, localSha) =>
       persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPushAt: Date.now() })),
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
+    vaultPopulated: (id) => store.getSettings().lastSync[id]?.vaultPopulated,
+    recordVaultSync: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, vaultPopulated: true })),
   };
 }
 

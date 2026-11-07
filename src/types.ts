@@ -118,6 +118,10 @@ export interface SyncPolicy {
   paused: boolean;
   /** Adaptive remote-drift poll interval in seconds (~300 default; UI presets refine it). */
   intervalSeconds: number;
+  /** Which side wins a mapping's FIRST initialization (no lastSync baseline yet):
+   *  "pull" populates the vault from the remote (default); "push" uploads the
+   *  vault onto the remote without downloading its history (blobless, additive). */
+  firstSyncDirection: "pull" | "push";
   /** Opt-in syncing of Obsidian's own config directory. */
   obsidianConfig: ObsidianConfigPolicy;
 }
@@ -207,6 +211,7 @@ export const DEFAULT_SYNC_POLICY: SyncPolicy = {
   recencyWins: true,
   paused: false,
   intervalSeconds: 300,
+  firstSyncDirection: "pull",
   obsidianConfig: {
     enabled: false,
     entries: [
@@ -250,5 +255,9 @@ export interface LastSyncState {
   baseSha?: string;
   /** Monotonic operation id for the last sync pass (increments per pull/push). */
   opId?: number;
+  /** True once a sync pass has mirror-pulled the clone's content into the vault
+   *  folder — the signal that a vault-absent in-scope file is a real user deletion
+   *  (rather than a file the vault has simply never seen). */
+  vaultPopulated?: boolean;
   status: SyncStatus;
 }

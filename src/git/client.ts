@@ -9,6 +9,34 @@ import type { GitResult, GitRunner } from "./types";
 
 export type PullMode = "ff" | "rebase" | "merge";
 
+/** HTTP(S) credentials for network git commands (clone/fetch/pull/push). */
+export interface GitAuth {
+  /** Git username for HTTP basic auth (any non-empty value works for token auth;
+   *  `oauth2` is the conventional GitLab value). */
+  username: string;
+  /** The token, used as the HTTP password. Never written to argv or disk. */
+  token: string;
+}
+
+/** Environment variable carrying the git username to the credential helper. */
+const AUTH_USER_ENV = "MUGS_GIT_USER";
+/** Environment variable carrying the token to the credential helper. */
+const AUTH_TOKEN_ENV = "MUGS_GIT_TOKEN";
+
+/** The credential helper shell snippet: echoes username/password from the environment. */
+const AUTH_HELPER = `!f() { echo username=$${AUTH_USER_ENV}; echo password=$${AUTH_TOKEN_ENV}; }; f`;
+
+/** Options for {@link GitClient.clone}. */
+export interface CloneOpts {
+  /** Fetch a partial (blobless) clone — commit/tree history without file blobs,
+   *  so a first sync downloads refs + the checked-out snapshot instead of the
+   *  full pack history (missing blobs lazy-fetch on demand, authenticated). */
+  filter?: "blob:none";
+  /** Skip the working-tree checkout (implies the caller stages content itself,
+   *  e.g. a push-first init that writes vault content before committing). */
+  noCheckout?: boolean;
+}
+
 export interface Author {
   name: string;
   email: string;
@@ -26,20 +54,66 @@ export interface AuthorActivity {
 }
 
 export class GitClient {
-  constructor(private runner: GitRunner, private cwd?: string) {}
+  constructor(private runner: GitRunner, private cwd?: string, private auth?: GitAuth) {}
 
-  /** Return a client bound to a different working directory, reusing this runner. */
+  /** Return a client bound to a different working directory, reusing this runner + auth. */
   at(cwd: string): GitClient {
-    return new GitClient(this.runner, cwd);
+    return new GitClient(this.runner, cwd, this.auth);
   }
 
-  private opts() {
-    return this.cwd ? { cwd: this.cwd } : undefined;
+  /** Return a client bound to an HTTP(S) credential, reusing this runner + cwd. */
+  withAuth(auth: GitAuth | undefined): GitClient {
+    return new GitClient(this.runner, this.cwd, auth);
   }
 
-  /** Run a command that must succeed; throws with git's stderr otherwise. */
-  private async must(args: string[], opts?: { cwd?: string }): Promise<GitResult> {
-    const r = await this.runner.run(args, opts ?? this.opts());
+  /**
+   * Global git options supplying HTTP credentials without persisting them. The
+   * first `-c credential.helper=` clears every inherited helper (e.g. a global
+   * `glab`/GCM helper that has no token and answers with an empty password — the
+   * exact "HTTP Basic: Access denied" failure), and the second registers ours,
+   * which reads username/token from environment variables so the secret never
+   * reaches argv, `.git/config`, or error output.
+   */
+  private authArgs(): string[] {
+    if (!this.auth) return [];
+    return ["-c", "credential.helper=", "-c", `credential.helper=${AUTH_HELPER}`];
+  }
+
+  /** Environment carrying the credentials for {@link AUTH_HELPER}. */
+  private authEnv(): Record<string, string> | undefined {
+    if (!this.auth) return undefined;
+    // GIT_TERMINAL_PROMPT=0 makes failed auth fail fast instead of hanging on an
+    // unanswerable prompt (Obsidian cannot service an interactive git prompt).
+    return {
+      [AUTH_USER_ENV]: this.auth.username || "oauth2",
+      [AUTH_TOKEN_ENV]: this.auth.token,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+  }
+
+  /** Prepend the credential-helper config to every command of an authed client.
+   *  Attaching auth to ALL commands (not just clone/fetch/push) matters for
+   *  partial (blobless) clones: any command touching a missing blob — show, diff,
+   *  log — triggers a lazy background fetch that must authenticate, and without
+   *  the helper it would fall back to the machine's empty glab/GCM helper. */
+  private fullArgs(args: string[]): string[] {
+    return this.auth ? [...this.authArgs(), ...args] : args;
+  }
+
+  /** Merge caller opts with the credential environment (and cwd when bound). */
+  private execOpts(opts?: { cwd?: string; env?: Record<string, string> }): { cwd?: string; env?: Record<string, string> } | undefined {
+    const authEnv = this.authEnv();
+    const merged = { ...opts };
+    if (this.cwd && merged.cwd === undefined) merged.cwd = this.cwd;
+    if (authEnv) merged.env = { ...authEnv, ...opts?.env };
+    return merged.cwd || merged.env ? merged : undefined;
+  }
+
+  /** Run a command that must succeed; throws with git's stderr otherwise. The
+   *  thrown message quotes the command WITHOUT the credential-helper -c prefix
+   *  so Notices stay readable and never contain the helper string. */
+  private async must(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult> {
+    const r = await this.runner.run(this.fullArgs(args), this.execOpts(opts));
     if (r.code !== 0) {
       throw new Error(`git ${args.join(" ")} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
     }
@@ -47,16 +121,25 @@ export class GitClient {
   }
 
   /** Run a command and return the raw result (for introspecting exit codes). */
-  run(args: string[], opts?: { cwd?: string }): Promise<GitResult> {
-    return this.runner.run(args, opts ?? this.opts());
+  run(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult> {
+    return this.runner.run(this.fullArgs(args), this.execOpts(opts));
   }
 
   async init(): Promise<GitResult> {
     return this.must(["init"]);
   }
 
-  async clone(url: string, dir: string): Promise<GitResult> {
-    return this.must(["clone", url, dir]);
+  async clone(url: string, dir: string, opts?: CloneOpts): Promise<GitResult> {
+    const args = ["clone"];
+    // Partial-clone flags only apply to real http(s) remotes: local file:///path
+    // servers reject --filter unless uploadpack.allowFilter is configured.
+    const isHttp = /^https?:\/\//i.test(url);
+    if (isHttp && opts?.filter) args.push(`--filter=${opts.filter}`);
+    if (opts?.noCheckout) args.push("--no-checkout");
+    args.push(url, dir);
+    // Credentials ride along via the per-invocation helper, so the URL stays clean
+    // and nothing is persisted in the fresh clone's .git/config.
+    return this.must(args);
   }
 
   async fetch(remote = "origin"): Promise<GitResult> {
@@ -87,6 +170,19 @@ export class GitClient {
     return this.must(branch ? ["push", remote, branch] : ["push", remote]);
   }
 
+  /** Tracked files (index), one per line — the clone-side file list for mirroring. */
+  async lsFiles(): Promise<string[]> {
+    const r = await this.must(["ls-files"]);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
+  /** Paths deleted between two refs (`git diff --name-only --diff-filter=D`).
+   *  Tree-level comparison only — safe on blobless clones (no lazy blob fetch). */
+  async deletedPaths(range: string): Promise<string[]> {
+    const r = await this.must(["diff", "--name-only", "--diff-filter=D", range]);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
   /** Mixed-reset the branch to `ref`: moves HEAD and the index, keeps the working
    *  tree. Used after a clean file-level divergence merge so the merged content is
    *  committed on the remote tip and the push fast-forwards. */
@@ -101,8 +197,11 @@ export class GitClient {
     return r.stdout.trim();
   }
 
+  /** HEAD's SHA, or "" when HEAD is unborn (fresh clone of an empty repo) —
+   *  first-init topology treats unborn as "no local history yet". */
   async currentHead(): Promise<string> {
-    return this.revParse("HEAD");
+    const r = await this.run(["rev-parse", "HEAD"]);
+    return r.code === 0 ? r.stdout.trim() : "";
   }
 
   /** True when `ancestor` is an ancestor of any SHA in `descendants`. */

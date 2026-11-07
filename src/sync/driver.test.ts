@@ -53,31 +53,42 @@ interface ContentScenario {
   showMap?: Record<string, Record<string, string | undefined>>;
   /** Paths returned by every `git diff --name-only` call. */
   changedPaths?: string[];
+  /** Paths returned by `git diff --name-only --diff-filter=D` (remote deletions). */
+  deletedPaths?: string[];
 }
 
-/** A git runner that never touches disk: rev-parse/merge-base are canned, everything else is a no-op success. */
-function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned?: boolean } & ContentScenario): { runner: GitRunner; calls: string[][] } {
+/** A git runner that never touches disk: rev-parse/merge-base/show/diff are canned,
+ *  everything else is a no-op success. Leading `-c <value>` pairs (credential-helper
+ *  config, core.quotePath) are stripped before dispatch — an authed client prefixes
+ *  every command with them. */
+function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned?: boolean } & ContentScenario): { runner: GitRunner; calls: string[][]; callOpts: Array<{ cwd?: string; env?: Record<string, string> } | undefined> } {
   const mergeBaseSha = o.mergeBaseSha ?? "M0";
   const showMap = o.showMap ?? {};
   const changedPaths = o.changedPaths ?? [];
+  const deletedPaths = o.deletedPaths ?? [];
   const calls: string[][] = [];
+  const callOpts: Array<{ cwd?: string; env?: Record<string, string> } | undefined> = [];
   const runner: GitRunner = {
-    run: async (args): Promise<GitResult> => {
+    run: async (args, opts): Promise<GitResult> => {
       calls.push([...args]);
-      const cmd = args[0];
+      callOpts.push(opts);
+      let i = 0;
+      while (args[i] === "-c") i += 2; // skip -c <value> pairs
+      const cmd = args[i];
+      const rest = args.slice(i);
       if (cmd === "rev-parse") {
-        const ref = args[1];
+        const ref = rest[1];
         if (ref === "--is-inside-work-tree") return { code: o.cloned ? 0 : 128, stdout: o.cloned ? "true" : "", stderr: "" };
         if (ref === "HEAD") return { code: 0, stdout: o.head, stderr: "" };
         return { code: 0, stdout: o.remote, stderr: "" };
       }
       if (cmd === "merge-base") {
         // --is-ancestor is the ancestry oracle; a bare merge-base returns the SHA.
-        if (args.includes("--is-ancestor")) return { code: o.ancestor ? 0 : 1, stdout: "", stderr: "" };
+        if (rest.includes("--is-ancestor")) return { code: o.ancestor ? 0 : 1, stdout: "", stderr: "" };
         return { code: 0, stdout: mergeBaseSha, stderr: "" };
       }
       if (cmd === "show") {
-        const refPath = args[1];
+        const refPath = rest[1];
         const idx = refPath.indexOf(":");
         const ref = refPath.slice(0, idx);
         const path = refPath.slice(idx + 1);
@@ -85,12 +96,15 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         if (content === undefined) return { code: 128, stdout: "", stderr: "" };
         return { code: 0, stdout: content, stderr: "" };
       }
-      if (cmd === "-c") return { code: 0, stdout: changedPaths.map((p) => ` M ${p}`).join("\n"), stderr: "" }; // status --porcelain (push staging)
-      if (cmd === "diff") return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
-      return { code: 0, stdout: "", stderr: "" }; // fetch / pull / add / commit / push
+      if (cmd === "status") return { code: 0, stdout: changedPaths.map((p) => ` M ${p}`).join("\n"), stderr: "" }; // porcelain (push staging)
+      if (cmd === "diff") {
+        if (rest.includes("--diff-filter=D")) return { code: 0, stdout: deletedPaths.join("\n"), stderr: "" };
+        return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" }; // clone / fetch / ls-files / reset / add / commit / push
     },
   };
-  return { runner, calls };
+  return { runner, calls, callOpts };
 }
 
 /** In-memory ConflictStore spy that records the latest persisted list per mapping. */
@@ -185,6 +199,52 @@ describe("syncAllMappings — skips", () => {
       lastSync: spyAccessor().accessor,
     });
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: /repo not found/ });
+  });
+});
+
+describe("syncAllMappings — HTTP(S) credentials for git", () => {
+  it("hands the credential's token to git without exposing it in argv", async () => {
+    // Regression: the REST provider got the token but the git clone/fetch/push did
+    // not, so git fell back to the machine's credential helper and the clone failed
+    // with "HTTP Basic: Access denied".
+  const { runner, calls, callOpts } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false });
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ username: "arikamidotnet" })],
+      getToken: () => "glpat-secret",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor,
+    });
+    const idx = calls.findIndex((c) => c.includes("clone"));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const cloneArgs = calls[idx];
+    // Credentials ride as a per-invocation helper that clears inherited helpers…
+    const credIdx = cloneArgs.findIndex((a) => a === "-c");
+    expect(cloneArgs[credIdx + 1]).toBe("credential.helper=");
+    expect(cloneArgs.join(" ")).toContain("username=$MUGS_GIT_USER");
+    expect(cloneArgs.join(" ")).toContain("password=$MUGS_GIT_TOKEN");
+    // …and both values stay in the environment, out of argv (no leak to ps/config).
+    for (const a of cloneArgs) expect(a).not.toContain("glpat-secret");
+    expect(callOpts[idx]?.env?.MUGS_GIT_USER).toBe("arikamidotnet");
+    expect(callOpts[idx]?.env?.MUGS_GIT_TOKEN).toBe("glpat-secret");
+    expect(callOpts[idx]?.env?.GIT_TERMINAL_PROMPT).toBe("0");
+  });
+
+  it("does not attach credentials for the local provider (filesystem path)", async () => {
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false });
+    await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ kind: "local", baseUrl: "file:///tmp/shared.git" })],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor,
+    });
+    const cloneCall = calls.find((c) => c[0] === "clone")!;
+    expect(cloneCall).toEqual(["clone", "/tmp/shared.git", expect.any(String)]);
   });
 });
 
@@ -284,9 +344,11 @@ describe("syncAllMappings — sync outcomes", () => {
       runner,
       lastSync: accessor,
     });
-    // First run clones the repo (ensureClone) before syncing.
-    const cloneCall = calls.find((c) => c[0] === "clone");
-    expect(cloneCall?.[1]).toBe("https://example.com/m1.git");
+    // First run clones the repo (blobless) before syncing.
+  const cloneCall = calls.find((c) => c.includes("clone"));
+  const cloneIdx = cloneCall!.indexOf("clone");
+  expect(cloneCall![cloneIdx + 1]).toBe("--filter=blob:none");
+  expect(cloneCall).toContain("https://example.com/m1.git");
     expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "R1" }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "R1"]]);
@@ -357,9 +419,9 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
     // The branch is re-pointed at the remote tip before staging, so the commit + push
     // land as a fast-forward instead of on the old diverged HEAD (non-FF rejection).
-    const resetIdx = calls.findIndex((c) => c[0] === "reset");
-    expect(calls[resetIdx]).toEqual(["reset", "origin/main"]);
-    expect(calls.findIndex((c) => c[0] === "commit")).toBeGreaterThan(resetIdx);
+    const resetIdx = calls.findIndex((c) => c.includes("reset"));
+    expect(calls[resetIdx]?.includes("origin/main")).toBe(true);
+    expect(calls.findIndex((c) => c.includes("commit"))).toBeGreaterThan(resetIdx);
     expect(store.getState()).toEqual([]); // no conflicts recorded
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "R1"]]);
@@ -464,8 +526,9 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
       lastSync: accessor,
     });
     // First run clones the local repo (ensureClone) before syncing.
-    const cloneCall = calls.find((c) => c[0] === "clone");
-    expect(cloneCall?.[1]).toBe("/tmp/shared.git");
+  const cloneCall = calls.find((c) => c.includes("clone"));
+    const cloneIdx = cloneCall!.indexOf("clone");
+    expect(cloneCall![cloneIdx + 1]).toBe("/tmp/shared.git");
     expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "R1" }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "R1"]]);
@@ -732,7 +795,7 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor, // unpushed -> push
       pickAgent: () => actingAgent,
     });
-    const commitCall = calls.find((c) => c[0] === "commit")!;
+    const commitCall = calls.find((c) => c.includes("commit"))!;
     // Message carries the on-behalf-of trailer for the owner…
     expect(commitCall.join(" ")).toContain("On-behalf-of: Ada");
     // …and the commit is authored by the agent's committer identity.
@@ -752,7 +815,7 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor,
       pickAgent: () => undefined, // no agent -> plain sync commit
     });
-    const commitCall = calls.find((c) => c[0] === "commit")!;
+    const commitCall = calls.find((c) => c.includes("commit"))!;
     expect(commitCall.join(" ")).not.toContain("On-behalf-of");
     expect(commitCall).not.toContain("--author");
   });
@@ -772,7 +835,7 @@ describe("syncAllMappings — review-queue 'held' gates push (Area 8)", () => {
       heldPaths: () => new Set(["notes/held.md"]),
     });
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok", push: true });
-    const addCall = calls.find((c) => c[0] === "add")!;
+    const addCall = calls.find((c) => c.includes("add") && c.includes("notes/keep.md"))!;
     // The held file is staged out so it never leaves the machine; the in-scope change still pushes.
     expect(addCall).toContain("notes/keep.md");
     expect(addCall).not.toContain("notes/held.md");
@@ -790,8 +853,7 @@ describe("syncAllMappings — review-queue 'held' gates push (Area 8)", () => {
       lastSync: spyAccessor("").accessor,
       heldPaths: () => new Set<string>(),
     });
-    const addCall = calls.find((c) => c[0] === "add")!;
-    expect(addCall).toContain("notes/a.md");
+    const addCall = calls.find((c) => c.includes("add") && c.includes("notes/a.md"))!;
     expect(addCall).toContain("notes/b.md");
   });
 });

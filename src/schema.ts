@@ -65,6 +65,8 @@ export const lastSyncStateSchema = z.object({
   lastRemoteSha: z.string().optional(),
   baseSha: z.string().optional(),
   opId: z.number().int().positive().optional(),
+  /** Set once a mirror-pull has populated the vault folder (deletion-safety gate). */
+  vaultPopulated: z.boolean().optional(),
   status: syncStatusSchema.default("pending"),
 });
 
@@ -105,6 +107,9 @@ export const syncPolicySchema = z.object({
   recencyWins: z.boolean().default(true),
   paused: z.boolean().default(false),
   intervalSeconds: z.number().int().positive().default(300),
+  /** Which side wins a mapping's first initialization; "pull" = remote populates
+   *  the vault (historic default), "push" = vault uploads without downloading history. */
+  firstSyncDirection: z.enum(["pull", "push"]).default("pull"),
   obsidianConfig: obsidianConfigSchema.default(() => structuredClone(DEFAULT_SYNC_POLICY.obsidianConfig)),
 });
 

@@ -64,14 +64,38 @@ describe("ChildProcessRunner", () => {
     const p = runner.run(["status"], { cwd: "/tmp/vault" });
     h.handlers[0](null, "", "");
     await p;
-    expect(h.execFile).toHaveBeenCalledWith("git", ["status"], { cwd: "/tmp/vault" }, expect.any(Function));
+    expect(h.execFile).toHaveBeenCalledWith("git", ["status"], { cwd: "/tmp/vault", maxBuffer: 256 * 1024 * 1024 }, expect.any(Function));
   });
 
-  it("defaults the binary to 'git'", async () => {
+  it("defaults the binary to 'git' and always caps captured output", async () => {
     const runner = new ChildProcessRunner();
     const p = runner.run(["rev-parse", "HEAD"]);
     h.handlers[0](null, "deadbeef", "");
     await p;
-    expect(h.execFile).toHaveBeenCalledWith("git", ["rev-parse", "HEAD"], undefined, expect.any(Function));
+    // maxBuffer is always applied: node's 1MB default would kill `git show` of a
+    // large file mid-command and surface as a phantom failure.
+    expect(h.execFile).toHaveBeenCalledWith("git", ["rev-parse", "HEAD"], { maxBuffer: 256 * 1024 * 1024 }, expect.any(Function));
+  });
+
+  it("merges an injected env over the ambient environment (credential passing)", async () => {
+    const runner = new ChildProcessRunner();
+    const p = runner.run(["-c", "credential.helper=", "fetch", "origin"], {
+      cwd: "/c/y",
+      env: { MUGS_GIT_TOKEN: "glpat-secret", GIT_TERMINAL_PROMPT: "0" },
+    });
+    h.handlers[0](null, "", "");
+    await p;
+    // The credential reaches the git process via env — merged over process.env so
+    // PATH and friends still resolve — and never appears in the argv array.
+    expect(h.execFile).toHaveBeenCalledWith(
+      "git",
+      ["-c", "credential.helper=", "fetch", "origin"],
+      {
+        cwd: "/c/y",
+        maxBuffer: 256 * 1024 * 1024,
+        env: expect.objectContaining({ MUGS_GIT_TOKEN: "glpat-secret", GIT_TERMINAL_PROMPT: "0", PATH: process.env.PATH }),
+      },
+      expect.any(Function),
+    );
   });
 });

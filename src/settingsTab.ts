@@ -282,6 +282,20 @@ export class MugsSettingTab extends PluginSettingTab {
           });
     });
 
+      new Setting(card)
+        .setName("First sync direction")
+        .setDesc(
+          "When a mapping syncs for the first time: pull fills your vault folder from the remote (default); push uploads your vault onto the remote without downloading its history — pick push when this device already has the up-to-date content.",
+        )
+        .addDropdown((d) => {
+          d.setValue(sync.firstSyncDirection).onChange(async (v) => {
+            this.plugin.store.setSync({ firstSyncDirection: v as "pull" | "push" });
+            await this.markUnsaved();
+          });
+          d.addOption("pull", "Pull — remote populates the vault (default)");
+          d.addOption("push", "Push — vault uploads to the remote");
+        });
+
       // Whole-vault mappings expose a per-mapping .trash/ toggle.
       const mappings = this.plugin.store.getSettings().mappings;
       for (const m of mappings) {

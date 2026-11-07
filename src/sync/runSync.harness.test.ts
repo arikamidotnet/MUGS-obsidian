@@ -8,7 +8,7 @@
  * Run: npx vitest run src/sync/runSync.harness.test.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -58,6 +58,22 @@ function makeSettings(): MugsSettings {
 
 let store: MugsStore;
 
+/** Real working-tree writer over the filesystem — mirrors exactly what main.ts wires
+ *  from the vault adapter. In the new sync flow the writer is load-bearing (merged
+ *  content materializes through it), so a no-op stub would test nothing. */
+const workingTree = {
+  writeFile: (p: string, c: string) => {
+    mkdirSync(p.slice(0, p.lastIndexOf("/")), { recursive: true });
+    writeFileSync(p, c);
+    return Promise.resolve();
+  },
+  readFile: (p: string) => Promise.resolve(existsSync(p) ? readFileSync(p, "utf8") : undefined),
+  deleteFile: (p: string) => {
+    if (existsSync(p)) unlinkSync(p);
+    return Promise.resolve();
+  },
+};
+
 beforeAll(() => {
   seedRemote();
   mkdirSync(CLONE_ROOT, { recursive: true });
@@ -80,7 +96,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       cloneRoot: CLONE_ROOT,
       runner: new ChildProcessRunner(),
       lastSync: storeWritableAccessor(store),
-      workingTree: { writeFile: async () => {} },
+      workingTree,
       conflicts: storeConflictAccessor(store),
       editorOpen: undefined as never,
       trash: undefined as never,
@@ -114,7 +130,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       cloneRoot: CLONE_ROOT,
       runner: new ChildProcessRunner(),
       lastSync: storeWritableAccessor(store),
-      workingTree: { writeFile: async () => {} },
+      workingTree,
       conflicts: storeConflictAccessor(store),
       editorOpen: undefined as never,
       trash: undefined as never,
@@ -146,7 +162,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       cloneRoot: CLONE_ROOT,
       runner: new ChildProcessRunner(),
       lastSync: storeWritableAccessor(store),
-      workingTree: { writeFile: async () => {} },
+      workingTree,
       conflicts: storeConflictAccessor(store),
       editorOpen: undefined as never,
       trash: undefined as never,
@@ -181,7 +197,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       cloneRoot: CLONE_ROOT,
       runner: new ChildProcessRunner(),
       lastSync: storeWritableAccessor(store),
-      workingTree: { writeFile: async () => {} },
+      workingTree,
       conflicts: storeConflictAccessor(store),
       editorOpen: undefined as never,
       trash: undefined as never,

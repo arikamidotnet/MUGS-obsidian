@@ -117,9 +117,13 @@ export type AppliedChange = AppliedFile | AppliedDelete;
 
 /**
  * Merge a set of files at once: divergent files become {@link FileConflict}s, and
- * clean changes (remote-only, or non-overlapping with ours) are returned as
- * {@link AppliedFile}s to write into the working tree. A file whose merged result
- * equals local is a no-op and omitted from `applied`.
+ * clean changes are returned as {@link AppliedFile}s to write into the working
+ * tree. A file whose merged result equals BOTH sides is a true no-op and omitted;
+ * a result that differs from either side must be written (an ours-only change
+ * still needs writing wherever the older content lives — e.g. the clone, when
+ * "ours" is the vault). A deletion by one side of a file the other side did NOT
+ * touch propagates as a deletion; only modify/delete (the survivor actually
+ * changed it) keeps the surviving content.
  */
 export function applyMerge(entries: FileVersions[]): { applied: AppliedChange[]; conflicts: FileConflict[] } {
   const applied: AppliedChange[] = [];
@@ -139,7 +143,15 @@ export function applyMerge(entries: FileVersions[]): { applied: AppliedChange[];
     } else if (merged.oursAbsent && merged.theirsAbsent) {
       // Both sides deleted the file -> record a deletion to apply.
       applied.push({ path: e.path });
-    } else if (merged.content !== (e.ours ?? "")) {
+    } else if (merged.oursAbsent && e.theirs !== undefined && e.theirs === e.base) {
+      // We deleted a file the remote did not touch -> the deletion propagates
+      // (the generic modify/delete rule would keep theirs and resurrect it).
+      applied.push({ path: e.path });
+    } else if (merged.theirsAbsent && e.ours !== undefined && e.ours === e.base) {
+      // The remote deleted a file we did not touch -> take the deletion instead
+      // of writing our (unchanged) copy back over it.
+      applied.push({ path: e.path });
+    } else if (merged.content !== (e.ours ?? "") || merged.content !== (e.theirs ?? "")) {
       applied.push({ path: e.path, content: merged.content });
     }
   }
