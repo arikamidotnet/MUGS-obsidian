@@ -359,6 +359,7 @@ export default class MugsPlugin extends Plugin {
       write(p: string, data: string | ArrayBuffer): Promise<void>;
       remove(p: string): Promise<void>;
       mkdir(p: string): Promise<void>;
+      stat(p: string): Promise<{ mtime: number } | null>;
     };
     const rootOf = (folder: string): string => (folder === "." ? "" : normalizeVaultPath(folder));
     const vaultPath = (folder: string, rel: string): string => {
@@ -392,6 +393,14 @@ export default class MugsPlugin extends Plugin {
           await adapter.remove(vaultPath(folder, rel));
         } catch {
           // already absent
+        }
+      },
+      mtime: async (folder, rel) => {
+        try {
+          const st = await adapter.stat(vaultPath(folder, rel));
+          return st?.mtime;
+        } catch {
+          return undefined; // unreadable/absent -> recency falls back to defaultResolution
         }
       },
     };

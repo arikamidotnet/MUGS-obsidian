@@ -178,6 +178,20 @@ describe("GitClient — first-init topology helpers", () => {
     expect(await client(r).deletedPaths("OLD..HEAD")).toEqual(["gone.md"]);
     expect(last(r).args).toEqual(["diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
   });
+
+  it("lastModifiedAt parses the last commit time of a path at a ref", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "1789032181\n", stderr: "" }));
+    expect(await client(r).lastModifiedAt("origin/main", "notes/todo.md")).toBe(1789032181);
+    expect(last(r).args).toEqual(["log", "-1", "--format=%ct", "origin/main", "--", "notes/todo.md"]);
+  });
+
+  it("lastModifiedAt yields undefined for a path the ref never saw", async () => {
+    // git log prints nothing for a path absent from history — exit code still 0.
+    const empty = new FakeRunner(() => ({ code: 0, stdout: "\n", stderr: "" }));
+    expect(await client(empty).lastModifiedAt("origin/main", "brand-new.md")).toBeUndefined();
+    const failed = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "" }));
+    expect(await client(failed).lastModifiedAt("origin/main", "brand-new.md")).toBeUndefined();
+  });
 });
 
 describe("GitClient — query parsing and errors", () => {

@@ -22,7 +22,7 @@ import { applyMerge, type AppliedChange } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
-import { planMirrorPush, planMirrorPull, vaultToRepoPath, type MirrorFile, type MirrorOp } from "./mirror";
+import { planMirrorPush, planMirrorPull, vaultToRepoPath, repoToVaultPath, type MirrorFile, type MirrorOp } from "./mirror";
 import type { TrashStore } from "./trash";
 import { EditorOpenGuard } from "./editorOpen";
 import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
@@ -115,6 +115,10 @@ export interface VaultMirror {
   write(localFolder: string, relPath: string, content: string): Promise<void>;
   /** Remove one file (folder-relative). */
   remove(localFolder: string, relPath: string): Promise<void>;
+  /** Optional: last-modified time (ms epoch) of one file — the "ours" recency
+   *  input for automatic conflict resolution. Absent/undefined leaves the policy
+   *  to fall back to defaultResolution. */
+  mtime?(localFolder: string, relPath: string): Promise<number | undefined>;
 }
 
 /** Durable per-mapping conflict store. Optional; when omitted conflicts are computed but not persisted. */
@@ -360,7 +364,7 @@ export class CloneManager {
     if (mapping.direction !== "pull-only") {
       const held = this.heldPaths?.(mapping.id);
       const legacyChanges = this.vaultMirror ? [] : await c.workingTreePaths();
-      const stagedPaths = [...new Set([...merged.applied.map((a) => a.path), ...legacyChanges])].filter(
+      const stagedPaths = [...new Set([...merged.applied.map((a) => a.path), ...merged.autoResolvedPaths, ...legacyChanges])].filter(
         (path) => this.inScope(mapping, path) && !(held?.has(path) ?? false),
       );
       if (stagedPaths.length > 0) {
@@ -480,7 +484,7 @@ export class CloneManager {
     localSha: string,
     remoteRef: string,
     status?: (m: string) => void,
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string> }> {
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string>; autoResolvedPaths: string[] }> {
     const clonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p));
     const vaultFiles = await this.readVaultFiles(mapping);
     const vaultByRepo = new Map<string, string>();
@@ -534,7 +538,36 @@ export class CloneManager {
 
     const { applied, conflicts } = applyMerge(resolved);
 
-    // Automatic-first resolution: when a policy is injected and auto-merge is on, resolve
+    // Recency inputs (Area 2): attach each side's last-modified time so the policy's
+    // recency-wins rule can actually pick a winner. Before this the timestamps were
+    // never populated anywhere in the sync path, so every genuine conflict fell
+    // through to defaultResolution — recencyWins was effectively display-only.
+    // Vault side: the file's mtime (mirror seam). Remote side: the last commit that
+    // touched the path — commit metadata only, so blobless partial clones never
+    // lazy-fetch a blob for this. Failures leave a timestamp undefined, which just
+    // falls back to defaultResolution.
+    if (conflicts.length > 0 && this.policy?.recencyWins) {
+      for (const cf of conflicts) {
+        if (!cf.oursAbsent) {
+          const vaultRel = repoToVaultPath(mapping, cf.path);
+          if (vaultRel !== null) {
+            try {
+              cf.oursSavedAt = await this.vaultMirror?.mtime?.(mapping.localFolder, vaultRel);
+            } catch {
+              // stat unavailable -> leave undefined
+            }
+          }
+        }
+        try {
+          const secs = await c.lastModifiedAt(remoteRef, cf.path);
+          if (secs !== undefined) cf.theirsModifiedAt = secs * 1000;
+        } catch {
+          // log unavailable -> leave undefined
+        }
+      }
+    }
+
+    // Automatic-first resolution: when a policy is injected and autoMerge is on, resolve
     // genuine conflicts automatically (recency-wins / defaultResolution) and write the
     // resolved content instead of surfacing them. Only unresolvable conflicts are returned
     // for manual review. With no policy injected this is a no-op — behavior is unchanged.
@@ -547,23 +580,30 @@ export class CloneManager {
       if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
       return op;
     });
+    // Auto-resolved conflict paths, staged on the push side alongside merged.applied —
+    // a resolution that never gets committed would resurface as the same conflict on
+    // every later sync (and mirror mode stages nothing implicitly).
+    const autoResolvedPaths: string[] = [];
     if (this.policy?.autoMerge) {
       surfacedConflicts = [];
-      for (const c of conflicts) {
-        if (canAutoResolve(c, this.policy)) {
-          const content = autoResolvedContent(c, resolveConflictAuto(c, this.policy)!);
-          // Skip a no-op write when the resolved content already equals local.
-          const local = c.oursAbsent ? "" : c.ours;
-          if (content !== local) toApply.push({ path: c.path, kind: "write", content });
+      for (const cf of conflicts) {
+        if (canAutoResolve(cf, this.policy)) {
+          const content = autoResolvedContent(cf, resolveConflictAuto(cf, this.policy)!);
+          // Always write the resolved content into the clone working tree. Even when
+          // it equals the vault's copy (an "ours" win) the clone does not hold it yet,
+          // and `git add` stages from the working tree — the previous no-op skip left
+          // ours-wins uncommitted in the clone forever.
+          toApply.push({ path: cf.path, kind: "write", content });
+          autoResolvedPaths.push(cf.path);
         } else {
-          surfacedConflicts.push(c);
+          surfacedConflicts.push(cf);
         }
       }
     }
 
     // Safe applier ordering: writes before deletes, parents before children.
     await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
-    return { applied, conflicts: surfacedConflicts, renames, vaultByRepo };
+    return { applied, conflicts: surfacedConflicts, renames, vaultByRepo, autoResolvedPaths };
   }
 
   /** Pull the clone's current in-scope content into the vault folder: writes for

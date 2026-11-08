@@ -263,6 +263,17 @@ export class GitClient {
     return r.stdout;
   }
 
+  /** Epoch seconds of the last commit that touched `path` at `ref`, or undefined
+   *  when the path never existed there (git log prints nothing). Feeds the policy's
+   *  recency-wins conflict resolution — commit metadata only, so a blobless
+   *  partial clone never lazy-fetches a blob for this. */
+  async lastModifiedAt(ref: string, path: string): Promise<number | undefined> {
+    const r = await this.run(["log", "-1", "--format=%ct", ref, "--", path]);
+    if (r.code !== 0) return undefined;
+    const secs = Number.parseInt(r.stdout.trim(), 10);
+    return Number.isNaN(secs) ? undefined : secs;
+  }
+
   /** Lowest common ancestor SHA of two refs (`git merge-base`). */
   async mergeBase(a: string, b: string): Promise<string> {
     const r = await this.run(["merge-base", a, b]);

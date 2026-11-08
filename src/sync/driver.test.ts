@@ -55,6 +55,9 @@ interface ContentScenario {
   changedPaths?: string[];
   /** Paths returned by `git diff --name-only --diff-filter=D` (remote deletions). */
   deletedPaths?: string[];
+  /** Epoch seconds served by every `git log -1 --format=%ct <ref> -- <path>` call
+   *  (the remote-side recency input for automatic conflict resolution). */
+  pathLogTimeSecs?: number;
 }
 
 /** A git runner that never touches disk: rev-parse/merge-base/show/diff are canned,
@@ -101,6 +104,7 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         if (rest.includes("--diff-filter=D")) return { code: 0, stdout: deletedPaths.join("\n"), stderr: "" };
         return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
       }
+      if (cmd === "log") return { code: 0, stdout: o.pathLogTimeSecs !== undefined ? String(o.pathLogTimeSecs) : "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" }; // clone / fetch / ls-files / reset / add / commit / push
     },
   };
@@ -387,6 +391,51 @@ describe("syncAllMappings — sync outcomes", () => {
     // A conflicting pull is not executed (no push yet).
     expect(state.pull).toEqual([]);
     expect(state.push).toEqual([]);
+  });
+
+  it("auto-resolves an overlapping divergence by recency and stages the winner for push (mirror mode)", async () => {
+    // Regression: recencyWins never fired because ours/theirs timestamps were never
+    // populated in the sync path, and auto-resolved winners were never staged in
+    // mirror mode — the same conflict would resurface on every later sync.
+    const OURS_MS = Date.now();
+    const writes: Array<[string, string]> = [];
+    const workingTree: WorkingTreeWriter = {
+      writeFile: (p, content) => { writes.push([p, content]); return Promise.resolve(); },
+    };
+    const store = memoryConflictStore();
+    const vaultMirror = {
+      list: async () => ["todo.md"],
+      read: async (_folder: string, rel: string) => (rel === "todo.md" ? "a\nLOCAL\nc\n" : ""),
+      write: async () => {},
+      remove: async () => {},
+      mtime: async () => OURS_MS, // the vault copy was just saved
+    };
+    const { runner, calls } = makeRunner({
+      head: "L1", remote: "R1", ancestor: false, cloned: true,
+      changedPaths: ["todo.md"], // porcelain sees the staged winner -> commit path
+      showMap: { "origin/main": { "todo.md": "a\nREMOTE\nc\n" } },
+      pathLogTimeSecs: 1_000_000, // remote's edit is ancient -> recency picks ours
+    });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()], // push-pull, base "" -> add/add against the remote tip
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("").accessor, // never synced -> first pass over the mapping
+      workingTree,
+      conflicts: store.store,
+      policy: { ...DEFAULT_SYNC_POLICY }, // autoMerge + recencyWins on, "both" fallback
+      vaultMirror,
+    });
+    // Overlapping add/add auto-resolved by recency: the newer vault copy wins.
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+    expect(store.getState()).toEqual([]); // nothing surfaced for manual resolve
+    // The ours-winner was written into the clone working tree and staged for push.
+    expect(writes).toEqual([[`${CLONE_ROOT}/c1/m1/todo.md`, "a\nLOCAL\nc\n"]]);
+    expect(calls.some((cl) => cl.includes("add") && cl.includes("todo.md"))).toBe(true);
+    expect(calls.some((cl) => cl.includes("commit"))).toBe(true);
   });
 
   it("auto-merges a clean divergence into the working tree and pushes", async () => {
