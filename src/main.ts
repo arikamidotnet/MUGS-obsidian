@@ -32,6 +32,7 @@ import type { VaultMirror, WorkingTreeWriter } from "./sync/cloneManager";
 import { normalizeVaultPath } from "./schema";
 import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
+import { toAdapterPath } from "./sync/adapterPath";
 import { MCP_SERVER_NAME, listAgentTools } from "./mcp/server";
 
 // Injected at build time by esbuild (define) from styles.css so the plugin's
@@ -142,6 +143,11 @@ export default class MugsPlugin extends Plugin {
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
     this.statusEl = this.addStatusBarItem();
+    this.statusEl.addClass("mod-clickable");
+    // Clicking the status routes to the surface that needs attention: the
+    // Conflicts panel when something needs a manual merge, otherwise the Diff
+    // view showing what the last sync did.
+    this.statusEl.addEventListener("click", () => this.onStatusBarClick());
     this.updateStatusBar(this.lastSyncedAt ? "synced" : "idle");
     this.startScheduler();
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibilityChange());
@@ -309,21 +315,32 @@ export default class MugsPlugin extends Plugin {
     // oks === 0 && skips === 0 && conflicts === 0 (no mappings configured): keep prior state.
   }
 
-  /** Writes merged file content into a clone's working tree via the vault adapter
-   *  (absolute paths inside the vault). Parent folders are created so mirror writes
-   *  into a --no-checkout clone cannot fail on missing directories. NOTE: the
-   *  adapter's methods are read/write/remove (an earlier version called a
-   *  non-existent `writeFile`, which would have crashed on the first merge write). */
+  /** Writes merged file content into a clone's working tree via the vault adapter.
+   *  CRITICAL: the adapter speaks VAULT-RELATIVE paths — handed an absolute path it
+   *  strips the leading slash and joins it onto the vault base, silently writing to
+   *  <vault>/home/arikami/… instead of the clone. That was the silent push-skip bug:
+   *  the clone never received its files, `git add` failed on pathspecs matching
+   *  nothing, and every first-sync push skipped while junk directories grew inside
+   *  the vault. Clones live inside the vault under .mugs-clones/, so absolute clone
+   *  paths convert cleanly to the relative form the adapter expects. */
   private workingTreeWriter(): WorkingTreeWriter {
     const adapter = this.app.vault.adapter as unknown as {
       read(p: string): Promise<string>;
       write(p: string, data: string | ArrayBuffer): Promise<void>;
       remove(p: string): Promise<void>;
       mkdir(p: string): Promise<void>;
+      getBasePath(): string;
     };
+    let basePath = "";
+    try {
+      basePath = adapter.getBasePath();
+    } catch {
+      // no base path resolvable (tests) — paths pass through unchanged
+    }
     return {
       writeFile: async (absPath, content) => {
-        const parent = absPath.slice(0, absPath.lastIndexOf("/"));
+        const rel = toAdapterPath(basePath, absPath);
+        const parent = rel.slice(0, rel.lastIndexOf("/"));
         if (parent) {
           try {
             await adapter.mkdir(parent);
@@ -331,18 +348,18 @@ export default class MugsPlugin extends Plugin {
             // already exists
           }
         }
-        await adapter.write(absPath, content);
+        await adapter.write(rel, content);
       },
       readFile: async (absPath) => {
         try {
-          return await adapter.read(absPath);
+          return await adapter.read(toAdapterPath(basePath, absPath));
         } catch {
           return undefined;
         }
       },
       deleteFile: async (absPath) => {
         try {
-          await adapter.remove(absPath);
+          await adapter.remove(toAdapterPath(basePath, absPath));
         } catch {
           // already absent
         }
@@ -549,6 +566,19 @@ export default class MugsPlugin extends Plugin {
     }
   }
 
+  /** Clicking the status item routes to the surface that needs attention: the
+   *  Conflicts panel when any mapping has unresolved conflicts, else the Diff view
+   *  (per-mapping last-sync state and what changed). */
+  private onStatusBarClick(): void {
+    const s = this.store.getSettings();
+    const hasConflicts = Object.values(s.conflicts).some((list) => list.some((c) => !c.resolved));
+    if (hasConflicts) {
+      void this.app.workspace.createPanelTab(this, MugsConflictsPanel);
+      return;
+    }
+    void this.openView("mugs-diff");
+  }
+
   /** Render the status-bar label for a plugin state, with optional live detail
    *  (sync phase text). A user pause always wins over everything else. */
   private updateStatusBar(state: BarState, detail?: string): void {
@@ -582,8 +612,16 @@ export default class MugsPlugin extends Plugin {
         default:
           text = "MUGS ● idle";
       }
+    // Tooltip mirrors the click target so hover explains what clicking does.
+    const tooltip =
+      state === "conflict" ? "MUGS — conflicts need a manual merge. Click to open the Conflicts panel."
+      : state === "skipped" ? "MUGS — some mappings were skipped last pass. Click for details."
+      : state === "error" ? "MUGS — last sync failed. Click for details."
+      : state === "syncing" ? `MUGS — syncing now: ${detail ?? "working…"}`
+      : "MUGS sync status — click to view the Diff (last-sync) report.";
     this.statusEl.empty();
     this.statusEl.setText(text);
+    this.statusEl.setAttribute("aria-label", tooltip);
   }
 
   onunload(): void {
