@@ -14,7 +14,7 @@ The guiding architectural invariant, repeated throughout, is:
 
 > **All correctness-sensitive logic lives in pure, dependency-free, unit-tested modules under `src/sync/` (and a few under `src/ui/`, `src/providers/`, `src/membership/`). The Obsidian/glue layer (`main.ts`, `settingsTab.ts`, the views) is thin: it wires injected seams and renders data — it never contains merge, scope, or policy logic.**
 
-This invariant is what makes 391 unit tests possible without a real git binary, network, or Obsidian runtime.
+This invariant is what makes the 575+-test suite possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
 
 ### 1.1 The sync pipeline
 
@@ -165,7 +165,7 @@ The payoff: **no false content conflict on any delete case.** Only overlapping a
 
 **Problem.** Users want a live diff open beside their notes, not a full editor tab each time.
 
-**Chosen.** A sidebar panel tab via `app.workspace.createPanelTab(...)` (`MugsConflictsPanel` in `diffPanel.ts`), living alongside Obsidian's built-in Outline/Tags/Backlinks. The shipped `obsidian.d.ts` lacked `createPanelTab`, so the module is augmented (same pattern as `Plugin.addStyleTag` in `main.ts`). The full-tab `DiffView` and the panel share one extracted renderer (`diffRender.ts`) — single source of truth for diff/conflict presentation, folding, and attribution.
+**Chosen.** A real registered sidebar view (`MugsConflictsPanel` in `diffPanel.ts`, registered as `mugs-conflicts` via `registerView` and opened into `getRightLeaf`), living alongside Obsidian's built-in Outline/Tags/Backlinks. An earlier revision called `workspace.createPanelTab` — a method that does not exist in Obsidian — so the panel could never open; it is a proper `ItemView` now. The full-tab `DiffView` and the panel share one extracted renderer (`diffRender.ts`) — single source of truth for diff/conflict presentation, folding, and attribution.
 
 ### Area 5 — Sync frequency + adaptive cadence + event triggers + editor-open guard + resumable state
 
@@ -183,7 +183,7 @@ The payoff: **no false content conflict on any delete case.** Only overlapping a
 
 **Problem.** Users need at-a-glance sync state and a conflict marker that reflects the currently focused file.
 
-**Chosen.** `addStatusBarItem()` re-rendered only when the rendered state changes (no flicker), using `setIcon` and theme color vars (`--color-*`, `--text-muted`). Page-aware: on active-leaf-change/file-open it resolves the owning mapping via `resolveMappingForPath` (§4) and shows that mapping's status glyph + label, plus a conflict count when the mapping (or the active file itself) has unresolved conflicts. Glyphs driven by `SyncOutcome.status`, including an explicit "paused" state.
+**Chosen.** `addStatusBarItem()` renders the global sync state — `⟳` with live phase text while a pass runs, `✓ synced HH:MM`, `⚠ needs merge`, `✗ sync issues`/`✗ failed`, `⏸ paused`, `👁 hidden` — and persists the last terminal state across visibility changes. **Clicking the item routes to the surface that needs attention**: the Conflicts panel (§Area 4) when any mapping has unresolved conflicts, otherwise the Diff view with the last-sync report; a hover tooltip states the click target.
 
 ### Area 7 — Diff view: per-change attribution + folding + action-labeled conflicts
 
@@ -200,7 +200,7 @@ The payoff: **no false content conflict on any delete case.** Only overlapping a
 
 **Chosen:**
 - **Global pause (`sync.paused`)** holds across reloads (durable) plus an in-memory lock. While paused: the poll is suspended, event triggers are suppressed, and the driver performs no auto-pull/push. Exposed via ribbon/command; shown with an explicit "paused" glyph (§6). Resuming runs exactly one reconciliation pass to catch up on drift made while paused. The pause gate is the pure `decideRun` (`schedule.ts`), which also vetoes while the window is hidden and enforces the minimum interval.
-- **Review queue** (`ReviewQueueView`, `mugs-review`) models GitButler's staged-changes/draft-PR review: changes are curated into states *unstaged* (pending) / *staged* (selected for push) / *held* (deferred). Nothing leaves the machine without an explicit stage-and-push. State lives in the persisted `staging` map; the view is thin render + action.
+- **Review queue** (`ReviewQueueView`, `mugs-review`) models GitButler's staged-changes/draft-PR review: changes are curated into states *unstaged* (pending) / *staged* (selected for push) / *held* (deferred). **Current state:** the `staging` map and the view exist and `held` paths are excluded from pushes, but no producer populates the queue yet — the ribbon/command entry points are hidden until it is wired.
 
 ### Area 9 — Obsidian config sync: personal vs vault-wide (`.obsidian/`)
 
@@ -215,7 +215,7 @@ The payoff: **no false content conflict on any delete case.** Only overlapping a
 **Chosen:**
 - **Agent identity model.** `AuthorRef` already carries `kind: "human" | "agent"`, a stable `agentId`, an optional `ownerHuman`, and (via the `Agent` settings registry) a custom committer name/email + MCP endpoint. Agents are opt-in; the default experience is unchanged.
 - **Isolated worktrees (`worktrees.ts`).** Each agent gets its own git branch (`mugs-agent/<slug>`) so parallel agents — and agents vs. humans — never clobber each other's unpushed work or shared history. The pure core derives a safe unique branch name (`slugForRef`, `agentBranch`, `uniqueAgentBranch`) and checks isolation (branch/path collision, `resolveWorktree`).
-- **Agent-facing interface.** Two surfaces produce identical local commits: (a) an MCP server contract (`mcp/server.ts`) exposing agent tools (list/register/create-worktree); (b) a lightweight commit-draft format (`mcp/draft.ts`) that composes the on-behalf-of message + author. The transport in `main.ts` dispatches against these; both paths yield the same attributed commit.
+- **Agent-facing interface.** Two surfaces are planned to produce identical local commits: (a) an MCP server contract (`mcp/server.ts`) describing agent tools (list/register/create-worktree); (b) a lightweight commit-draft format (`mcp/draft.ts`) that composes the on-behalf-of message + author. **Not yet wired:** `main.ts` registers only the server name/version — the tool surface and its dispatch transport ship together in a later phase (advertising tools without a handler would be dead).
 - **Local-first, human-reviewed.** Agent edits become local commits on the agent's branch only — never auto-pushed. They appear in the review queue (§8) exactly like any other change; a human reviews and approves/merges them through the normal driver path.
 - **Owner mapping / local vs remote.** Local commits carry the agent's own attribution; when merged and pushed, history records the owning human via an `On-behalf-of <owner>` trailer so remote blame maps back to a person (`attribution.ts`, wired into `commit-message.ts` + `cloneManager.ts`/`driver.ts` via the optional `pickAgent` seam).
 - **Symmetry guarantees.** Agents act like humans (real attribution, same pipeline, no special merge privileges); humans keep full control (opt-in, review gate, nothing auto-pushed on agent authority). A vault with zero agents works exactly as before.
@@ -270,7 +270,7 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 ## 5. Validation & testing
 
-All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian). The suite currently has **391 tests across 34 files** and stays green through every phase. High-value coverage, mapped to areas:
+All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite currently has **575+ tests across 50+ files** and stays green through every phase. High-value coverage, mapped to areas:
 
 - **Merge correctness (Area 3):** same-change accept/keep; modify/delete both directions; delete/delete; delete/add; empty-vs-deleted distinction — `merge.test.ts`, `conflict.test.ts`.
 - **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.
@@ -289,7 +289,7 @@ All new logic lives in pure modules and is covered by **vitest with fakes** (no 
 
 ```bash
 npm run build     # tsc --noEmit --skipLibCheck && node esbuild.config.min.js  (bundles CSS into main.js)
-npx vitest run    # full pure-core suite (391 tests)
+npx vitest run    # full suite (575+ tests incl. real-git e2e)
 npm run dev       # esdev watch build for iteration
 ```
 

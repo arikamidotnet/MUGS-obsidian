@@ -1,6 +1,6 @@
 {
   "name": "mugs-obsidian",
-"version": "0.3.23",
+"version": "0.3.24",
   "description": "MUGS — Multi-User Git Sync for Obsidian. Fine-grained, folder-mapped git sync across all git backends (GitLab-first) with per-user credentials stored inside the vault.",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,7 @@
     "gitlab",
     "multi-user"
   ],
-  "author": "",
+"author": "MUGS",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.7.5",

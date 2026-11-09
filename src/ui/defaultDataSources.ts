@@ -81,7 +81,9 @@ export class StoreMapDataSource implements MapDataSource {
     for (const m of settings.mappings) {
       let owner: string | undefined;
       try {
-        const dir = cloneDir({ root: this.cloneRoot }, m.providerId, m.id);
+        // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
+        // m.id-only form missed every folder-scoped mapping's shared clone.
+        const dir = cloneDir({ root: this.cloneRoot }, m.providerId, m.repoRef ?? m.id);
         const client = new GitClient(this.runner);
         if (await isWorkTree(client, dir)) {
           owner = pickOwner(await client.recentAuthors("HEAD", 100));
@@ -116,7 +118,10 @@ export class StoreDiffDataSource implements DiffDataSource {
     const mapping = settings.mappings.find((m) => m.id === query.mappingId);
     if (!mapping) return { diffText: "", authorsByFile: {} };
 
-    const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.id);
+    // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
+    // m.id-only form made the Diff view permanently "no comparison available"
+    // for every folder-scoped mapping.
+    const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
     const client = new GitClient(this.runner);
     try {
       if (!(await isWorkTree(client, dir))) return { diffText: "", authorsByFile: {} };
@@ -135,13 +140,18 @@ export class StoreDiffDataSource implements DiffDataSource {
     }
   }
 
-  /** Resolve a sensible "from" ref: last synced remote SHA, else origin/<branch>. */
+  /** Resolve a sensible "from" ref: last synced remote SHA, else the mapping's
+   *  branch, else the clone's default (origin/HEAD) — matching the engine's
+   *  resolveSyncBranch instead of a hardcoded "main". */
   private async resolveBase(client: GitClient, mapping: FolderMapping): Promise<string | undefined> {
     const explicit = storeLastSyncAccessor(this.store).lastRemoteSha(mapping.id);
     if (explicit) return explicit;
-    const branch = mapping.branch ?? "main";
-    const r = await client.run(["rev-parse", "--verify", "--quiet", `origin/${branch}`]);
-    return r.code === 0 ? `origin/${branch}` : undefined;
+    const candidates = mapping.branch ? [`origin/${mapping.branch}`, "origin/HEAD"] : ["origin/HEAD"];
+    for (const ref of candidates) {
+      const r = await client.run(["rev-parse", "--verify", "--quiet", ref]);
+      if (r.code === 0) return ref;
+    }
+    return undefined;
   }
 }
 
@@ -173,8 +183,10 @@ export class StoreConflictDataSource implements ConflictDataSource {
     // Unknown path — nothing to do (still report the pre-existing count).
     if (!next) return { remaining: before.length };
     // Write the chosen content into the working tree so a later commit carries it.
+    // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old m.id-only
+    // form wrote resolutions into a junk directory, so they never stuck.
     if (this.workingTree) {
-      const absPath = `${cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.id)}/${query.path}`;
+      const absPath = `${cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id)}/${query.path}`;
       await this.workingTree.writeFile(absPath, next.resolvedContent);
     }
     this.store.setConflicts(mapping.id, next.conflicts);

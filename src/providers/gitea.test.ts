@@ -99,7 +99,7 @@ describe("GiteaProvider — getMembers", () => {
     const members = await provider(t).getMembers("group/project");
     expect(members.map((m) => m.role)).toEqual(["maintainer", "developer", "guest"]);
     expect(members[0].name).toBe("Admin");
-    expect(t.calls[0].url).toBe("https://gitea.com/api/v1/repos/group%2Fproject/members?per_page=100");
+    expect(t.calls[0].url).toBe("https://gitea.com/api/v1/repos/group%2Fproject/members?limit=50");
   });
 });
 

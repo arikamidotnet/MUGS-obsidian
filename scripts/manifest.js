@@ -13,6 +13,7 @@ function writeJson(p, obj) {
 const target = process.argv[2];
 const pkgPath = path.join(__dirname, "..", "package.json");
 const manPath = path.join(__dirname, "..", "manifest.json");
+const verPath = path.join(__dirname, "..", "versions.json");
 
 let version;
 if (target) {
@@ -25,4 +26,10 @@ if (target) {
 
 writeJson(pkgPath, { ...readJson(pkgPath), version });
 writeJson(manPath, { ...readJson(manPath), version });
-console.log(`Version bumped to ${version}`);
+// versions.json drives updates for BRAT/manual installs — a missing entry means
+// teammates on that channel never receive the release.
+writeJson(verPath, {
+  ...readJson(verPath),
+  [version]: "https://raw.githubusercontent.com/arikamidotnet/MUGS-obsidian/main/main.js",
+});
+console.log(`Version bumped to ${version} (package.json, manifest.json, versions.json)`);

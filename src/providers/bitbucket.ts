@@ -160,7 +160,8 @@ export class BitbucketProvider implements Provider {
     if (this.allowedRepos && this.allowedRepos.length > 0) {
       return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
     }
-    const url = withQuery(`${this.baseUrl}/2.0/repositories`, { include_public: false, per_page: 100 });
+    // Bitbucket pages with `pagelen` (per_page is ignored; default 10/page).
+    const url = withQuery(`${this.baseUrl}/2.0/repositories`, { include_public: false, pagelen: 100 });
     const raw = (await paginateValues(this.transport, url, this.headers())) as BitbucketRepo[];
     return raw.map((r) => mapProject(r));
   }
@@ -184,7 +185,7 @@ export class BitbucketProvider implements Provider {
   }
 
   async getMembers(repoId: string): Promise<Member[]> {
-    const url = withQuery(`${this.baseUrl}/2.0/repositories/${encodeRepoPath(repoId)}/participants`, { per_page: 100 });
+    const url = withQuery(`${this.baseUrl}/2.0/repositories/${encodeRepoPath(repoId)}/participants`, { pagelen: 100 });
     const raw = (await paginateValues(this.transport, url, this.headers())) as BitbucketParticipant[];
     return raw.map((p) => mapParticipant(p));
   }
@@ -199,13 +200,13 @@ export class BitbucketProvider implements Provider {
     // Determine push rights from the acting user's participant role, if known.
     let writeCapable = DEFAULT_WRITE_CAPABLE;
     if (this.actingUsername) {
-      const participantsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/participants`, { per_page: 100 });
+      const participantsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/participants`, { pagelen: 100 });
       const participants = (await paginateValues(this.transport, participantsUrl, this.headers())) as BitbucketParticipant[];
       const me = participants.find((p) => p.user?.username === this.actingUsername);
       writeCapable = me ? WRITE_CAPABLE_ROLES.has(me.role) : DEFAULT_WRITE_CAPABLE;
     }
 
-    const refsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/refs`, { kind: "branch", per_page: 100 });
+    const refsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/refs`, { kind: "branch", pagelen: 100 });
     const refs = (await paginateValues(this.transport, refsUrl, this.headers())) as BitbucketRef[];
     return refs.map((b) =>
       branchSummarySchema.parse({

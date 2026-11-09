@@ -146,7 +146,13 @@ export class GitLabProvider implements Provider {
     let defaultBranch = "";
     try {
       defaultBranch = resolveDefaultBranch(await this.getBranches(path));
-    } catch {
+    } catch (err) {
+      // A rejected token must surface as such — a 401/403 would otherwise
+      // degrade to defaultBranch "" and only fail later as an opaque git error.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b40[13]\b/.test(msg)) {
+        throw new Error(`token rejected for ${path} — check this credential's access token`);
+      }
       defaultBranch = "";
     }
     return repoSummarySchema.parse({
@@ -168,10 +174,12 @@ export class GitLabProvider implements Provider {
 
   async getBranches(repoId: string): Promise<BranchSummary[]> {
     const myAccess = await this.resolveMyAccessLevel(repoId);
-    const url = `${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/branches`;
-    const res = await this.transport.get<GitLabBranch[]>(url, { headers: this.headers() });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching branches for ${repoId}${res.message ? ` — ${res.message}` : ""}`);
-    return (res.body ?? []).map((b) =>
+    // per_page=100 + Link following: GitLab's default 20/page truncated larger
+    // repos, and resolveDefaultBranch then fell back to branches[0] — silently
+    // syncing the WRONG branch for an allowlisted repo.
+    const url = withQuery(`${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/branches`, { per_page: 100 });
+    const raw = await paginateAll(this.transport, url, this.headers());
+    return (raw as GitLabBranch[]).map((b) =>
       branchSummarySchema.parse({
         name: b.name,
         protected: !!b.protected,
@@ -194,10 +202,11 @@ export class GitLabProvider implements Provider {
   /** Immediate child directories under `path` via the repository/tree API. */
   async listDirectories(repoId: string, path = ""): Promise<string[]> {
     const base = `${this.baseUrl}/projects/${encodeRepoPath(repoId)}/repository/tree`;
-    const url = withQuery(base, path ? { path } : {});
-    const res = await this.transport.get<{ type: string; path: string }[]>(url, { headers: this.headers() });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}${res.message ? ` — ${res.message}` : ""}`);
-    const dirs = (res.body ?? []).filter((t) => t.type === "tree").map((t) => t.path.split("/").pop() ?? "");
+    // per_page=100 + Link following — the default 20/page hid every folder past
+    // the first 20 from the mapping UI (with no manual path entry to recover).
+    const url = withQuery(base, { ...(path ? { path } : {}), per_page: 100 });
+    const raw = await paginateAll(this.transport, url, this.headers());
+    const dirs = (raw as { type: string; path: string }[]).filter((t) => t.type === "tree").map((t) => t.path.split("/").pop() ?? "");
     return [...new Set(dirs)].sort();
   }
 }

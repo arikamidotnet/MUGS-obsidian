@@ -107,13 +107,26 @@ export class MugsSettingTab extends PluginSettingTab {
     if (this.unsavedBannerEl) this.unsavedBannerEl.style.display = "";
   }
 
-  /** Persist the current in-memory settings to disk and clear the unsaved flag. */
+  /** Persist the current in-memory settings to disk, clearing the unsaved flag
+   *  only once the save actually succeeded (a failed save used to be reported as
+   *  applied — config could vanish on restart after an explicit success message). */
   private async applySettings(): Promise<void> {
-    if (this.unsavedBannerEl) this.unsavedBannerEl.remove();
-    this.unsavedBannerEl = null;
-    this.unsavedChanges = false;
-    await this.plugin.store.save();
-    new Notice("MUGS: settings saved.");
+    try {
+      await this.plugin.store.save();
+      this.unsavedChanges = false;
+      if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
+      new Notice("MUGS: settings saved.");
+    } catch (e) {
+      new Notice(`MUGS: could not save settings — ${errorMessage(e)}. Changes remain active for this session; try Apply again.`, 8000);
+    }
+  }
+
+  hide(): void {
+    // Deferred persistence: leaving the tab with unsaved changes is the moment a
+    // teammate loses work — say so instead of letting the changes silently expire.
+    if (this.unsavedChanges) {
+      new Notice("MUGS: settings changed but not applied — reopen MUGS settings and click Apply to persist them.", 6000);
+    }
   }
 
   private _renderAll(): void {
@@ -192,7 +205,9 @@ export class MugsSettingTab extends PluginSettingTab {
             .onChange(async (v) => {
               this.plugin.store.setSecurity({ encryptCredentials: v });
               await this.markUnsaved();
-              new Notice(`MUGS credentials ${v ? "encrypted" : "unencrypted"} at rest.`);
+              // The claim must not fire before the save: data.json still holds the
+              // previous state until Apply (deferred persistence).
+              new Notice(`MUGS credentials will be ${v ? "encrypted" : "stored as-is"} once you Apply settings.`);
             }),
         );
 
@@ -590,10 +605,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setName("Provider")
       .setDesc("The backend this token authenticates against.")
       .addDropdown((d) => {
-        d.setValue(kind).onChange(async (v) => {
+        d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
           setBaseUrlField(prefilledBaseUrl(kind));
-          await this.markUnsaved();
+          // No markUnsaved: nothing is stored yet — the old call showed the
+          // "Unsaved changes" banner on a form the user had not filled in.
         });
         for (const [value, text] of [
           ["gitlab", "GitLab"],
@@ -655,7 +671,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               repos: repos.length ? repos : undefined,
             });
             await this.markUnsaved();
-            new Notice(`MUGS: credential "${label}" saved.`);
+            new Notice(`MUGS: credential "${label}" added — Apply settings to persist.`);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
@@ -704,6 +720,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setDesc("The backend this mapping authenticates against.")
       .addDropdown((d) => {
         d.setValue(providerId).onChange(async (v) => {
+          providerId = v; // CRITICAL: the assistant used to keep listing repos for —
+          // and saving mappings against — the FIRST credential, whatever was picked.
           wholeRepo = false;
           syncTrash = false;
           selectedFolders.clear();
@@ -813,6 +831,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     // --- Matched-folder checkboxes + whole-repo toggle -----------------------
     const matchesEl = card.createDiv({ cls: "mugs-matches" });
     const renderMatches = (): void => {
+      // Clear before re-rendering: every previous re-render APPENDED, stacking
+      // duplicate whole-repo/.trash rows and stale rows from the prior repo.
+      matchesEl.empty();
       if (isRest() && repoKey) {
         // Whole-repo toggle: map the entire repository root to the vault root ('.').
         const wholeRow = matchesEl.createDiv({ cls: "mugs-match-whole" });
@@ -918,7 +939,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
                 branch: branch || undefined, direction, ...scope,
                 syncTrashFolder: syncTrash ? undefined : false,
               });
-              new Notice(`MUGS: whole-repo mapping for "${repoKey}" saved.`);
+              new Notice(`MUGS: whole-repo mapping for "${repoKey}" added — Apply settings to persist.`);
             } else if (selectedFolders.size === 0) {
               new Notice("MUGS: check at least one folder to link."); return;
             } else {
@@ -933,7 +954,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
                 });
                 count += 1;
               }
-              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} saved.`);
+              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} added — Apply settings to persist.`);
             }
             await this.markUnsaved();
             this._renderAll();

@@ -27,7 +27,9 @@ export interface HttpTransport {
 /** Default transport backed by the global `fetch`. */
 export class FetchTransport implements HttpTransport {
   async get<T = unknown>(url: string, init: { headers: Record<string, string> }): Promise<HttpResponse<T>> {
-    const res = await fetch(url, { headers: init.headers });
+    // Hard timeout: a hung request would stall the whole sync pass (and the
+    // in-flight guard then blocks every later pass until the plugin reloads).
+    const res = await fetch(url, { headers: init.headers, signal: AbortSignal.timeout(30_000) });
     const linkHeader = res.headers.get("Link");
     let body: T;
     try {
@@ -56,8 +58,11 @@ export function withQuery(path: string, params?: Record<string, string | number 
 
 /**
  * Follow a paginated `Link` header, concatenating the body arrays across pages.
- * Used by adapters whose list endpoints page via `rel="next"`.
+ * Used by adapters whose list endpoints page via `rel="next"`. A safety cap
+ * aborts a cyclic or broken Link header instead of looping forever.
  */
+const MAX_PAGES = 100;
+
 export async function paginateAll(
   transport: HttpTransport,
   url: string,
@@ -65,9 +70,12 @@ export async function paginateAll(
 ): Promise<unknown[]> {
   const acc: unknown[] = [];
   let next: string | null = url;
+  let pages = 0;
   while (next) {
+    if (++pages > MAX_PAGES) throw new Error(`provider pagination exceeded ${MAX_PAGES} pages — aborting (${url})`);
     const res = await transport.get<unknown>(next, { headers });
-    if (res.status >= 400) throw new Error(`GitLab ${res.status} error paginating${res.message ? ` — ${res.message}` : ""} (${next})`);
+    // Neutral wording: this helper serves GitLab, GitHub and Gitea alike.
+    if (res.status >= 400) throw new Error(`provider API ${res.status} error paginating${res.message ? ` — ${res.message}` : ""} (${next})`);
     if (Array.isArray(res.body)) acc.push(...(res.body as unknown[]));
     next = extractNextLink(res.linkHeader);
   }

@@ -34,7 +34,7 @@ describe("GitClient — command construction", () => {
   it("fetches the default remote (origin)", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "origin"]);
+    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
   });
 
   it("pulls in each mode with the right flags", async () => {
@@ -52,7 +52,7 @@ describe("GitClient — command construction", () => {
   it("adds given paths or everything when none are given", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).add(["a.md", "b.md"]);
-    expect(last(r).args).toEqual(["add", "a.md", "b.md"]);
+    expect(last(r).args).toEqual(["-c", "core.autocrlf=false", "add", "--", "a.md", "b.md"]);
     await client(r).add();
     expect(last(r).args).toEqual(["add", "."]);
   });
@@ -100,7 +100,7 @@ describe("GitClient — HTTP(S) credentials", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     const c = client(r, "/c/y").withAuth({ username: "u", token: "t" });
     await c.fetch();
-    expect(last(r).args).toEqual([...HELPER_ARGS, "fetch", "origin"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, "fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toMatchObject({ MUGS_GIT_TOKEN: "t" });
     await c.push("origin", "main");
     expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
@@ -109,7 +109,7 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("leaves network commands untouched when no auth is set (local provider)", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "origin"]);
+    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toBeUndefined();
   });
 
@@ -134,7 +134,7 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("throws readable errors that omit the credential-helper prefix", async () => {
     const r = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad" }));
     await expect(client(r).withAuth({ username: "u", token: "t" }).fetch()).rejects.toThrow(
-      "git fetch origin failed (128): fatal: bad",
+      "git fetch --prune origin failed (128): fatal: bad",
     );
   });
 });
@@ -170,13 +170,13 @@ describe("GitClient — first-init topology helpers", () => {
   it("lsFiles lists tracked paths", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
     expect(await client(r).lsFiles()).toEqual(["a.md", "sub/b.md"]);
-    expect(last(r).args).toEqual(["ls-files"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "ls-files"]);
   });
 
   it("deletedPaths asks git for the deleted-only diff of a range", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\n", stderr: "" }));
     expect(await client(r).deletedPaths("OLD..HEAD")).toEqual(["gone.md"]);
-    expect(last(r).args).toEqual(["diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
   });
 
   it("lastModifiedAt parses the last commit time of a path at a ref", async () => {

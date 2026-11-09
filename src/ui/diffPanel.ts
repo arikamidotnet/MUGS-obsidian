@@ -1,35 +1,20 @@
 /**
- * MUGS — conflicts sidebar panel (`mugs-conflicts`).
+ * MUGS — conflicts sidebar view (`mugs-conflicts`).
  *
- * A right-sidebar panel listing every unresolved conflict across all mappings, each
+ * A right-sidebar view listing every unresolved conflict across all mappings, each
  * labeled with what "ours" and "theirs" did (see describeConflictActions) and offering
  * Take ours / theirs / Merge both. It shares the per-conflict row renderer with the
- * full-tab Diff view so both surfaces look identical. Uses Workspace.createPanelTab,
- * which the shipped obsidian typings do not declare — augmented below.
+ * full-tab Diff view so both surfaces look identical. Registered as a REAL ItemView —
+ * the previous implementation called workspace.createPanelTab, a method that does
+ * not exist in Obsidian (the module augmentation below was fiction), so the panel
+ * could never open from any entry point.
  */
-import { Notice, type Plugin, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { getMugsContext } from "./dataSources";
 import { renderConflictRow } from "./diffRender";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
-// Obsidian's real API: `workspace.createPanelTab(plugin, viewClass)` returns a
-// PanelTabView with containerEl + onOpen/onClose. The shipped typings omit it, so
-// augment the module (same pattern as Plugin.addStyleTag in main.ts).
-declare module "obsidian" {
-  interface Workspace {
-    createPanelTab(
-      plugin: Plugin,
-      viewClass: new (leaf: WorkspaceLeaf) => MugsPanelTab,
-    ): MugsPanelTab;
-  }
-}
-
-/** The minimal PanelTabView shape MUGS relies on. */
-interface MugsPanelTab {
-  containerEl: HTMLElement;
-  onOpen(): Promise<void> | void;
-  onClose(): Promise<void> | void;
-}
+export const MUGS_CONFLICTS_VIEW_TYPE = "mugs-conflicts";
 
 interface ConflictGroup {
   mappingId: string;
@@ -37,23 +22,33 @@ interface ConflictGroup {
   conflicts: FileConflict[];
 }
 
-export class MugsConflictsPanel implements MugsPanelTab {
+export class MugsConflictsPanel extends ItemView {
   /** Auto-refresh interval handle, if enabled. */
   private autoRefreshTimer?: number;
   /** Whether auto-refresh is currently on. */
   private autoRefresh = false;
 
-  constructor(private leaf: WorkspaceLeaf) {}
+  constructor(leaf: WorkspaceLeaf) {
+    super(leaf);
+  }
 
-  get containerEl(): HTMLElement {
-    return (this.leaf as unknown as { containerEl: HTMLElement }).containerEl;
+  getViewType(): string {
+    return MUGS_CONFLICTS_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return "MUGS Conflicts";
+  }
+
+  getIcon(): string {
+    return "git-branch";
   }
 
   async onOpen(): Promise<void> {
     await this.render();
   }
 
-  onClose(): Promise<void> {
+  async onClose(): Promise<void> {
     this.stopAutoRefresh();
     this.containerEl.empty();
     return Promise.resolve();
@@ -95,9 +90,12 @@ export class MugsConflictsPanel implements MugsPanelTab {
       const groups = await this.loadGroups();
       this.renderBody(groups);
     } catch (err) {
-      this.containerEl.empty();
-      new Notice(`MUGS: could not load conflicts — ${err instanceof Error ? err.message : String(err)}`);
-      void this.render();
+      // Inline error state — re-rendering on a persistent error would loop with a
+      // Notice per cycle (the old unguarded void this.render() did exactly that).
+      this.containerEl.createEl("p", {
+        cls: "mugs-muted",
+        text: `Could not load conflicts — ${err instanceof Error ? err.message : String(err)}. Click Refresh to retry.`,
+      });
     }
   }
 

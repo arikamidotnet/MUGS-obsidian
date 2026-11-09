@@ -49,21 +49,6 @@ export function defaultBaseUrl(kind: ProviderKind): string {
   return kind === "local" ? "" : DEFAULT_BASE_URL[kind];
 }
 
-/**
- * Build an HTTPS git clone URL for a repository path on a given API base URL.
- *
- * Strips the trailing REST-api path segment (`/api`, `/api/vN`, `/2.0`) and the
- * public `api.` subdomain (github.com / bitbucket.org expose REST under `api.*`
- * but clone from the bare host), then appends `.git`. Used to synthesize a working
- * clone URL for explicitly-allowed repos that are never fetched from an endpoint.
- */
-export function cloneUrlFor(baseUrl: string, pathWithNamespace: string): string {
-  let root = baseUrl.replace(/\/+$/, "");
-  root = root.replace(/\/(?:api|2\.0)(?:\/v\d+)?$/, "");
-  root = root.replace(/^https?:\/\/api\./i, "https://");
-  return `${root}/${pathWithNamespace}.git`;
-}
-
 /** Build the `Provider` for a credential. Throws for `local` (no REST adapter). */
 export function buildProvider(input: ProviderInput, opts: { transport?: HttpTransport; actingUsername?: string } = {}): Provider {
   const kind = input.kind;

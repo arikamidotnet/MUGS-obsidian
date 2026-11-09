@@ -143,7 +143,9 @@ export class GitClient {
   }
 
   async fetch(remote = "origin"): Promise<GitResult> {
-    return this.must(["fetch", remote]);
+    // --prune drops remote-tracking refs for branches deleted/renamed upstream,
+    // so a removed branch can't keep syncing a ghost tip (or resurrect on push).
+    return this.must(["fetch", "--prune", remote]);
   }
 
   async pull(remote: string, branch: string, mode: PullMode = "rebase"): Promise<GitResult> {
@@ -157,29 +159,45 @@ export class GitClient {
   }
 
   async add(paths?: string[]): Promise<GitResult> {
-    return this.must(paths && paths.length > 0 ? ["add", ...paths] : ["add", "."]);
+    if (!paths || paths.length === 0) return this.must(["add", "."]);
+    // Chunk pathspecs (a first sync can stage thousands of paths — one argv would
+    // blow past OS limits, surfacing as a misleading "could not run") and pin
+    // line endings so a Windows teammate with core.autocrlf=true cannot push a
+    // whole-repo CRLF rewrite that everyone else then pulls.
+    const CHUNK = 500;
+    let last: GitResult = { code: 0, stdout: "", stderr: "" };
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      last = await this.must(["-c", "core.autocrlf=false", "add", "--", ...paths.slice(i, i + CHUNK)]);
+    }
+    return last;
   }
 
-  async commit(message: string, author?: Author): Promise<GitResult> {
+  async commit(message: string, author?: Author, committer?: Author): Promise<GitResult> {
     const args = ["commit", "--message", message];
     if (author) args.push("--author", `${author.name} <${author.email}>`);
-    return this.must(args);
+    // Without a committer identity git falls back to the machine's global config,
+    // which is UNSET on a fresh teammate machine — every push would fail with
+    // "tell me who you are". Env vars pin it per invocation; no config is written.
+    const env = committer ? { GIT_COMMITTER_NAME: committer.name, GIT_COMMITTER_EMAIL: committer.email } : undefined;
+    return this.must(args, env ? { env } : undefined);
   }
 
   async push(remote = "origin", branch?: string): Promise<GitResult> {
     return this.must(branch ? ["push", remote, branch] : ["push", remote]);
   }
 
-  /** Tracked files (index), one per line — the clone-side file list for mirroring. */
+  /** Tracked files (index), one per line — the clone-side file list for mirroring.
+   *  quotePath=false keeps non-ASCII/emoji names unquoted: the default C-quoting
+   *  would make them unmatchable against vault paths (phantom deletes / failed adds). */
   async lsFiles(): Promise<string[]> {
-    const r = await this.must(["ls-files"]);
+    const r = await this.must(["-c", "core.quotePath=false", "ls-files"]);
     return r.stdout.split("\n").filter((l) => l.length > 0);
   }
 
   /** Paths deleted between two refs (`git diff --name-only --diff-filter=D`).
    *  Tree-level comparison only — safe on blobless clones (no lazy blob fetch). */
   async deletedPaths(range: string): Promise<string[]> {
-    const r = await this.must(["diff", "--name-only", "--diff-filter=D", range]);
+    const r = await this.must(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", range]);
     return r.stdout.split("\n").filter((l) => l.length > 0);
   }
 
@@ -302,7 +320,7 @@ export class GitClient {
 
   /** Paths changed across a `base...HEAD`-style range, one per line. */
   async changedPaths(range: string): Promise<string[]> {
-    const r = await this.run(["diff", "--name-only", range]);
+    const r = await this.run(["-c", "core.quotePath=false", "diff", "--name-only", range]);
     if (r.code !== 0) throw new Error(`git diff --name-only ${range} failed (${r.code}): ${r.stderr.trim()}`);
     return r.stdout.split("\n").filter((l) => l.length > 0);
   }

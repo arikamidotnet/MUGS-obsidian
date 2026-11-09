@@ -221,7 +221,7 @@ export const DEFAULT_SYNC_POLICY: SyncPolicy = {
       { path: "recent-files.json", scope: "personal" },
       { path: "keymaps.json", scope: "personal" },
       { path: "global.css", scope: "vault-wide" },
-      { path: "plugins", scope: "vault-wide", excludes: ["*/data.json"] },
+      { path: "plugins", scope: "vault-wide", excludes: ["**/data.json"] },
       { path: "themes", scope: "vault-wide" },
       { path: "snippets", scope: "vault-wide" },
       { path: "templates", scope: "vault-wide" },

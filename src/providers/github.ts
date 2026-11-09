@@ -26,7 +26,7 @@ const PERMISSION_ROLE: Record<string, MemberRole> = {
 };
 
 /** Roles that may push to a non-protected branch. */
-const WRITE_CAPABLE = new Set(["owner", "admin", "write"]);
+const WRITE_CAPABLE = new Set(["owner", "admin", "maintain", "write"]);
 
 /** A write-capable token has at least `write`; used as the default when unknown. */
 const DEFAULT_WRITE_CAPABLE = true;

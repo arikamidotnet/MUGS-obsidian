@@ -52,6 +52,12 @@ export class MugsStore {
   private settings: MugsSettings;
   /** Runtime tokens, keyed by credential id. Never persisted in plaintext unless encryption is off. */
   private runtimeTokens = new Map<string, string>();
+  /** Credential ids whose stored token could not be decrypted (e.g. the key hint
+   *  changed): kept in storage for recovery, but never used for auth. */
+  private unreadableTokens = new Set<string>();
+  /** Set when data.json could not be parsed: saves are refused (see save) so the
+   *  corrupt file is never silently overwritten with fresh defaults. */
+  private loadErrorMessage?: string;
 
   constructor(private io: SettingsIO = new MemoryIO()) {
     // Clone the shared default so each store has its own mutable settings
@@ -59,19 +65,44 @@ export class MugsStore {
     this.settings = structuredClone(DEFAULT_SETTINGS);
   }
 
+  /** Why the last load failed, when it did (corrupt/unreadable data.json). */
+  get loadError(): string | undefined {
+    return this.loadErrorMessage;
+  }
+
   async load(): Promise<MugsSettings> {
     const raw = await this.io.read();
-    const parsed: Settings = parseSettings(raw ?? null);
-    this.settings = parsed as unknown as MugsSettings;
+    this.unreadableTokens.clear();
+    this.loadErrorMessage = undefined;
+    try {
+      this.settings = parseSettings(raw ?? null) as unknown as MugsSettings;
+    } catch (err) {
+      // A corrupted or partial data.json must not brick the plugin: start from
+      // defaults, record the failure, and refuse to save (below) so the corrupt
+      // file is never silently overwritten with empty settings.
+      this.loadErrorMessage = err instanceof Error ? err.message : String(err);
+      console.error("MUGS: data.json could not be parsed — starting from defaults", err);
+      this.settings = structuredClone(DEFAULT_SETTINGS);
+      this.runtimeTokens.clear();
+      return this.getSettings();
+    }
     // Restore runtime tokens from disk. When encryption is on the stored token
-    // is ciphertext and must be decrypted before it can be used for auth.
+    // is ciphertext and must be decrypted before it can be used for auth. A failed
+    // decrypt (e.g. the key hint changed) degrades that credential to "missing
+    // token" instead of throwing the whole load away; the stored ciphertext is
+    // kept so the right hint can still recover it.
     this.runtimeTokens.clear();
     if (!this.settings.security.encryptCredentials) return this.getSettings();
     // Derive the key once — PBKDF2 is deliberately expensive (see crypto.ts).
     const key = await deriveKey(keyHint(this.settings));
     for (const c of this.settings.credentials) {
       if (!c.token || isMasked(c.token)) continue;
-      this.runtimeTokens.set(c.id, await decryptToken(c.token, key));
+      try {
+        this.runtimeTokens.set(c.id, await decryptToken(c.token, key));
+      } catch (err) {
+        console.error("MUGS: could not decrypt the stored token for", c.label, err);
+        this.unreadableTokens.add(c.id);
+      }
     }
     return this.getSettings();
   }
@@ -93,6 +124,7 @@ export class MugsStore {
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
     this.runtimeTokens.set(cred.id, cred.token);
+    this.unreadableTokens.delete(cred.id); // a fresh token supersedes an undecryptable one
     return { ...cred, token: redactToken(cred.token) };
   }
 
@@ -117,6 +149,11 @@ export class MugsStore {
 
   removeMapping(id: string): void {
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== id);
+    // Prune the mapping's keyed records so megabytes of stale conflict content
+    // don't linger (and grow data.json) forever after a mapping is deleted.
+    delete this.settings.lastSync[id];
+    delete this.settings.conflicts[id];
+    delete this.settings.staging[id];
   }
 
   setLastSync(state: MugsSettings["lastSync"][string]): void {
@@ -188,13 +225,21 @@ export class MugsStore {
     this.settings.sync.obsidianConfig = { ...this.settings.sync.obsidianConfig, enabled };
   }
 
-  /** Persist current settings. Tokens are encrypted at rest when enabled. */
+  /** Persist current settings. Tokens are encrypted at rest when enabled.
+   *  Refused while data.json is unreadable so a corrupt file is never overwritten
+   *  with fresh defaults (the user is told to fix or restore it first). */
   async save(): Promise<void> {
+    if (this.loadErrorMessage) {
+      console.warn("MUGS: refusing to save over unreadable data.json — fix or restore it, then reload the plugin.");
+      return;
+    }
     const toWrite = structuredClone(this.settings);
     if (toWrite.security.encryptCredentials) {
-      // Derive once and reuse across credentials.
+      // Derive once and reuse across credentials. Undecryptable stored tokens are
+      // left untouched (the right key hint can still recover them).
       const key = await deriveKey(keyHint(toWrite));
       for (const c of toWrite.credentials) {
+        if (this.unreadableTokens.has(c.id)) continue;
         const real = this.runtimeTokens.get(c.id) ?? c.token;
         c.token = await encryptBytes(real, key);
       }
@@ -202,8 +247,10 @@ export class MugsStore {
     await this.io.write(toWrite);
   }
 
-  /** Resolve the live token for a credential id (runtime secret). */
+  /** Resolve the live token for a credential id (runtime secret). Undecryptable
+   *  stored tokens resolve to undefined so sync reports "missing token" clearly. */
   getToken(id: string): string | undefined {
+    if (this.unreadableTokens.has(id)) return undefined;
     return this.runtimeTokens.get(id) ?? this.settings.credentials.find((c) => c.id === id)?.token;
   }
 }

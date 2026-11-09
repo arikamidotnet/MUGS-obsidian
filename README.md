@@ -10,8 +10,9 @@ purely git-native.
 
 ## Design principles
 
-- **Git-native everywhere.** Sync is plain `git` (via `simple-git`). Backends differ only in how
-  auth + REST metadata are handled; GitLab gets first-class v4 API support.
+- **Git-native everywhere.** Sync is plain `git` over the system binary via a hand-rolled thin
+  client (no git helper libraries). Backends differ only in how auth + REST metadata are handled;
+  GitLab gets first-class v4 API support, and GitHub/Gitea/Forgejo/Bitbucket/local adapters ship today.
 - **Fine-grained folder sync.** Each mapping ties a remote path to a vault folder, so different
   users can share one repo while syncing only the folders relevant to them.
 - **Credentials live in the vault**, not the OS keychain. Tokens are never shown in full and can be
@@ -59,11 +60,11 @@ Feature work is delivered in phases (see below). Implemented so far:
 - **Multi-user visibility.** Merge a backend's member roster with local git activity into a membership summary — access and activity, not enforcement. (`src/membership/`)
 - **Map view** (`mugs-map`). A folder->repo graph color-coded by sync status and direction, showing owning users. (`src/ui/mapView.ts`)
 - **Diff view** (`mugs-diff`). Compare a mapping against a ref and attribute each changed hunk to its committing author. (`src/ui/diffView.ts`, `src/ui/diffModel.ts`)
-- **Conflict resolution.** On divergence, files auto-merge via pure 3-way merge; anything left over surfaces in the Diff view with Take ours / theirs / both, writing the choice back into the working tree and clearing conflict status once all are resolved. (`src/sync/conflict.ts`, `src/ui/defaultDataSources.ts`)
+- **Conflict resolution.** On divergence, files auto-merge via pure 3-way merge under the Automatic Conflict Resolution policy (auto-merge, tie-break, recency-wins); anything unresolvable surfaces in the dedicated **Conflicts panel** (right sidebar) with Take ours / theirs / both, writing the choice into the clone so the next push carries it. (`src/sync/conflict.ts`, `src/sync/policy.ts`, `src/ui/diffPanel.ts`)
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon and the *Run sync* command; each mapping reports ok / push+pull / conflict / skip as a Notice. (`src/providers/factory.ts`, `src/main.ts`)
 - **Settings controls.** Add or delete credentials (provider picker + token) and folder mappings (provider/branch/direction) directly from Settings, with `.obsidian/` targets rejected outright. (`src/settingsTab.ts`)
 
-End-to-end sync across all mappings is now wired from the UI, and Phase 5's file-level 3-way merge + durable, resolvable conflicts is implemented — divergent files auto-merge where possible and the remainder surface in the Diff view for per-file resolution. Remaining work is real AES-GCM encryption at rest and expanded backend testing.
+Also shipped since the phases below: **first-sync direction** (populate the vault from the remote, or upload the vault onto it without downloading history), **shared per-repo blobless clones**, **event-driven sync** on vault changes, a **live clickable status bar** (conflicts → Conflicts panel, otherwise the Diff view), **AES-256-GCM token encryption at rest** (opt-in), and a **live-diagnostic harness** (`MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts`) that replays the plugin's exact sync against a real vault/remote. Remaining work: mobile support (desktop-only for now), review-queue producer wiring, per-hunk blame.
 
 ## Installing into Obsidian
 
@@ -82,10 +83,28 @@ End-to-end sync across all mappings is now wired from the UI, and Phase 5's file
 - **Phase 3:** multi-user membership view data layer (roster + local activity -> summary), visibility only. `✅`
 - **Phase 4:** Map & Diff Obsidian views — folder->repo graph and per-author attributed diff, with store/git-backed data seams; sync driver wired to the ribbon + *Run sync* command; add/delete credentials and mappings in Settings. `✅`
 - **Phase 5:** file-level 3-way merge + durable, resolvable conflicts. `✅` Pure three-way auto-merge (`sync/merge.ts`), conflict record model (`sync/conflict.ts`), durable store state (get/set/clearConflicts), merge wired into the sync driver on divergence, and a Diff-view seam to surface + resolve per-file conflicts.
-- **Later:** remaining backends (GitHub/Forgejo/Gitea/Bitbucket/local), real encryption at rest (AES-GCM), device-flow auth, multi-device sync loop testing.
+- **Later:** mobile support (desktop-only — the engine uses node:fs + the system git binary), review-queue producer wiring, device-flow auth, per-hunk blame.
 
 ## Security notes
 
-Credentials stored in the vault are only as safe as the vault itself. Enable *Encrypt credentials at
-rest* and treat the vault with the same care you would a password manager. The placeholder obfuscation
-in `store.ts` is **not** production cryptography — Phase 2 replaces it with AES-GCM + PBKDF2/HKDF.
+Credentials are stored in the vault's `data.json`. Enable **Encrypt credentials at rest** (Settings →
+Security & Credentials) to encrypt tokens with **AES-256-GCM**, keys derived via PBKDF2-SHA256 (250k
+iterations) from your key hint; tokens are decrypted in memory only, and a wrong hint degrades that
+credential to a visible "missing token" instead of failing the plugin. Encryption is **off by default**
+— without it tokens are stored as-is, so treat the vault with the same care you would a password
+manager. Git authentication passes tokens through per-invocation environment variables (never argv,
+`.git/config`, or logs); tokens are masked wherever displayed; provider error messages contain URLs,
+never credentials.
+
+## Teammate quickstart
+
+1. Install: copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/mugs-obsidian/`
+   (or add the repo via [BRAT](https://github.com/tgrosing/BRAT)). **Desktop Obsidian only.**
+2. Settings → MUGS → Credentials: add your GitLab PAT (needs `api` scope + access to the shared repo),
+   your username, and optionally restrict the token to that repo.
+3. Folder Mappings: pick your credential → the shared repo → check your folders → choose direction.
+   Agree with your team on the **first-sync direction** before the first run (pull populates your
+   vault from the remote; push uploads your vault onto it, additively).
+4. Watch the status bar: `⟳` while syncing (with live phase text), `✓ synced HH:MM`, `⚠ needs merge`,
+   `✗ sync issues`. **Clicking it** opens the Conflicts panel when something needs a manual merge,
+   otherwise the Diff view with the last-sync report.

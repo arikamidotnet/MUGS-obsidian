@@ -121,7 +121,8 @@ export class GiteaProvider implements Provider {
     if (this.allowedRepos && this.allowedRepos.length > 0) {
       return Promise.all(this.allowedRepos.map((path) => this.synthRepo(path)));
     }
-    const url = withQuery(`${this.baseUrl}/user/repos`, { visibility: "all", per_page: 100 });
+    // Gitea/Forgejo page with `limit` (per_page is ignored; default 10/page).
+    const url = withQuery(`${this.baseUrl}/user/repos`, { visibility: "all", limit: 50 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((p) => mapProject(p as GiteaProject));
   }
@@ -145,7 +146,7 @@ export class GiteaProvider implements Provider {
   }
 
   async getMembers(repoId: string): Promise<Member[]> {
-    const url = withQuery(`${this.baseUrl}/repos/${encodeRepoPath(repoId)}/members`, { per_page: 100 });
+    const url = withQuery(`${this.baseUrl}/repos/${encodeRepoPath(repoId)}/members`, { limit: 50 });
     const raw = await paginateAll(this.transport, url, this.headers());
     return raw.map((m) => mapMember(m as GiteaMember));
   }
@@ -155,7 +156,7 @@ export class GiteaProvider implements Provider {
     const repoRes = await this.transport.get<GiteaProject>(`${this.baseUrl}/repos/${encodeRepoPath(repoId)}`, { headers: this.headers() });
     const defaultBranch = repoRes.status >= 200 && repoRes.status < 300 ? (repoRes.body?.default_branch ?? "") : "";
 
-    const url = withQuery(`${this.baseUrl}/repos/${encodeRepoPath(repoId)}/branches`, { per_page: 100 });
+    const url = withQuery(`${this.baseUrl}/repos/${encodeRepoPath(repoId)}/branches`, { limit: 50 });
     const res = await this.transport.get<GiteaBranch[]>(url, { headers: this.headers() });
     if (res.status >= 400) throw new Error(`Gitea ${res.status} error fetching branches for ${repoId}`);
     return (res.body ?? []).map((b) =>

@@ -13,7 +13,7 @@ import { MugsStore, MemoryIO } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
-import { MugsConflictsPanel } from "./ui/diffPanel";
+import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
 import { setMugsContext } from "./ui/dataSources";
 import {
@@ -33,7 +33,7 @@ import { normalizeVaultPath } from "./schema";
 import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
 import { toAdapterPath } from "./sync/adapterPath";
-import { MCP_SERVER_NAME, listAgentTools } from "./mcp/server";
+import { MCP_SERVER_NAME } from "./mcp/server";
 
 // Injected at build time by esbuild (define) from styles.css so the plugin's
 // Map/Diff/settings UI is self-contained in main.js — no separate file to copy.
@@ -89,6 +89,9 @@ export default class MugsPlugin extends Plugin {
   private syncInFlight = false;
   /** Epoch ms of the newest successful sync — renders the "✓ synced HH:MM" state. */
   private lastSyncedAt?: number;
+  /** Last terminal status-bar state (synced/conflict/skipped/error/paused/idle) —
+   *  what the bar restores to when the window becomes visible again. */
+  private lastTerminalBarState?: BarState;
 
   async onload(): Promise<void> {
     // In Obsidian, IO is backed by loadData/saveData; MemoryIO covers tests.
@@ -98,6 +101,16 @@ export default class MugsPlugin extends Plugin {
     });
 
     await this.store.load();
+    if (this.store.loadError) {
+      // Corrupt/unreadable data.json: the store refuses to save (it will not be
+      // overwritten with fresh defaults). Sync is disabled until the file is fixed
+      // or restored and the plugin reloaded — a sticky Notice says exactly that.
+      new Notice(
+        `MUGS: settings could not be read (${this.store.loadError}) — starting with defaults and NOT saving over data.json. ` +
+        "Fix or restore the file, then reload the plugin. Sync is disabled until then.",
+        0,
+      );
+    }
     // Seed the status bar from the persisted sync bookkeeping so a reload shows the
     // real last-synced time instead of a blank "idle".
     const lastSync = this.store.getSettings().lastSync;
@@ -139,6 +152,7 @@ export default class MugsPlugin extends Plugin {
     });
     this.registerView("mugs-map", (leaf) => new MapView(leaf));
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
+    this.registerView(MUGS_CONFLICTS_VIEW_TYPE, (leaf) => new MugsConflictsPanel(leaf));
     this.registerView("mugs-review", (leaf) => new ReviewQueueView(this, leaf));
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
@@ -151,16 +165,19 @@ export default class MugsPlugin extends Plugin {
     this.updateStatusBar(this.lastSyncedAt ? "synced" : "idle");
     this.startScheduler();
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibilityChange());
-    // Workspace emits create/modify/delete with a path arg; the shipped typings only
-    // type a few event names, so route through a loose signature.
-    const ws = this.app.workspace as unknown as { on(name: string, callback: (path: string) => void): EventRef };
-    this.registerEvent(ws.on("modify", (p) => this.onVaultChange(p)));
-    this.registerEvent(ws.on("create", (p) => this.onVaultChange(p)));
-    this.registerEvent(ws.on("delete", (p) => this.onVaultChange(p)));
-    // Rebuild the open-with-unsaved-changes set whenever the open files change so the
-    // editor-open guard stays current (Area 5). Defensive cast like getBasePath above.
-    const wsWithOpenChanged = this.app.workspace as unknown as { on(name: string, callback: () => void): EventRef };
-    this.registerEvent(wsWithOpenChanged.on("open-changed", () => this.recomputeOpenEditors()));
+    // Vault file events live on the VAULT (registering "modify"/"create"/"delete" on
+    // workspace — the old wiring — was silently dead, so the 20s debounced
+    // event-driven sync never fired and passes ran poll-only).
+    this.registerEvent(this.app.vault.on("modify", (file) => this.onVaultChange(file.path)));
+    this.registerEvent(this.app.vault.on("create", (file) => this.onVaultChange(file.path)));
+    this.registerEvent(this.app.vault.on("delete", (file) => this.onVaultChange(file.path)));
+    // Rebuild the editor-open set from REAL events so the write-back guard can
+    // actually hold paths. The old wiring used a nonexistent "open-changed" event
+    // plus equally fictional getOpenLeaves()/TFile.isDirty — the guard was
+    // permanently empty and every sync write could clobber an open editor.
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.recomputeOpenEditors()));
+    this.registerEvent(this.app.workspace.on("editor-change", () => this.recomputeOpenEditors()));
+    this.recomputeOpenEditors(); // seed immediately
     // Register the MUGS agents MCP server when this Obsidian build hosts MCP (Area 10).
     this.registerMcpServerIfSupported();
 
@@ -169,8 +186,10 @@ export default class MugsPlugin extends Plugin {
     this.addRibbonIcon("git-branch", "MUGS: Sync now", async () => void this.runSync());
     this.addRibbonIcon("map", "Open MUGS Map", async () => void this.openView("mugs-map"));
     this.addRibbonIcon("git-commit", "Open MUGS Diff", async () => void this.openView("mugs-diff"));
-    this.addRibbonIcon("pane-right", "Open MUGS Conflicts", () => void this.app.workspace.createPanelTab(this, MugsConflictsPanel));
-    this.addRibbonIcon("clipboard-list", "Open MUGS Review Queue", async () => void this.openView("mugs-review"));
+    this.addRibbonIcon("pane-right", "Open MUGS Conflicts", () => this.openConflictsPanel());
+    // NOTE: the Review Queue has no producer yet (nothing ever creates staging
+    // entries), so its ribbon/command entry points are hidden until it is wired —
+    // an always-empty queue advertised in the UI erodes trust.
 
     this.addCommand({
       id: "show-settings",
@@ -212,20 +231,21 @@ export default class MugsPlugin extends Plugin {
     this.addCommand({
       id: "show-conflicts",
       name: "Show MUGS Conflicts (right sidebar, with action labels)",
-      callback: () => void this.app.workspace.createPanelTab(this, MugsConflictsPanel),
+      callback: () => this.openConflictsPanel(),
     });
 
-    this.addCommand({
-      id: "show-review",
-      name: "Show MUGS Review Queue (curated changes)",
-      callback: () => void this.openView("mugs-review"),
-    });
   }
 
   /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice.
    *  Guarded: while a pass is in flight, further calls (scheduler ticks, file events,
    *  repeated Sync clicks) return immediately — passes can never stack. */
   async runSync(quiet = false): Promise<void> {
+    if (this.store.loadError) {
+      // Unreadable data.json: never sync (nothing would be persistable) — the
+      // corrupt-file Notice from onload explains why.
+      this.updateStatusBar("error");
+      return;
+    }
     if (this.syncInFlight) return;
     this.syncInFlight = true;
     this.updateStatusBar("syncing", "syncing…");
@@ -278,12 +298,41 @@ export default class MugsPlugin extends Plugin {
       this.syncInFlight = false;
     }
 
-    await this.store.save();
+    try {
+      await this.store.save();
+    } catch (err) {
+      // A failed persist must surface — every call site is fire-and-forget, so an
+      // unhandled rejection here was invisible (the old code kept the bar "synced").
+      new Notice(`MUGS: could not persist sync state — ${err instanceof Error ? err.message : String(err)}`, 8000);
+    }
 
-    // Report per-mapping outcomes as notices (manual runs only).
-    for (const o of outcomes.filter((o) => o.status === "conflict")) {
-      const n = o.conflicts?.length ?? 0;
-      new Notice(`MUGS — ${o.label} needs a manual merge (${n} file${n === 1 ? "" : "s"} diverged). Open the Diff view to resolve.`);
+    // Report outcomes as Notices. Manual runs get per-mapping detail; quiet
+    // (automatic) runs announce only an aggregate — a per-mapping Notice every
+    // 5 minutes would stack forever, and a 0-duration Notice in Obsidian NEVER
+    // auto-dismisses (each quiet skip used to pin a permanent notice on screen).
+    // The status bar carries the state either way and is clickable.
+    if (!quiet) {
+      for (const o of outcomes.filter((o) => o.status === "conflict")) {
+        const n = o.conflicts?.length ?? 0;
+        new Notice(`MUGS — ${o.label} needs a manual merge (${n} file${n === 1 ? "" : "s"} diverged). Open the MUGS Conflicts panel to resolve.`, 8000);
+      }
+      // Skipped mappings are the silent-failure path: the driver returns status
+      // "skipped" (not a throw) for no-credential / missing-token / repo-not-found /
+      // could-not-reach-provider. Surface them with their reason so users see why
+      // sync did nothing instead of getting zero feedback after clicking Sync.
+      for (const o of outcomes.filter((o) => o.status === "skipped")) {
+        const reason = o.reason ? ` — ${o.reason}` : "";
+        new Notice(`MUGS — ${o.label} skipped${reason}`, 8000);
+      }
+    } else {
+      // One finite aggregate notice per quiet pass keeps silent failures visible
+      // without stacking: names the first skip's reason as a hint.
+      const skipped = outcomes.filter((o) => o.status === "skipped");
+      if (skipped.length > 0) {
+        const first = skipped[0];
+        const reason = first.reason ? ` (e.g. ${first.label} — ${first.reason})` : "";
+        new Notice(`MUGS: ${skipped.length} mapping${skipped.length === 1 ? "" : "s"} skipped last pass${reason}. Click the MUGS status bar, or run Sync now, for details.`, 10_000);
+      }
     }
     for (const o of outcomes.filter((o) => o.status === "ok")) {
       if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
@@ -292,14 +341,6 @@ export default class MugsPlugin extends Plugin {
         const direction = settings.sync.firstSyncDirection === "push" ? "vault uploaded to remote" : "vault populated from remote";
         new Notice(`MUGS — ${o.label}: first sync complete — ${direction}.`, quiet ? 4000 : 7000);
       }
-    }
-    // Skipped mappings are the silent-failure path: the driver returns status
-    // "skipped" (not a throw) for no-credential / missing-token / repo-not-found /
-    // could-not-reach-provider. Surface them with their reason so users see why sync
-    // did nothing instead of getting zero feedback after clicking Sync.
-    for (const o of outcomes.filter((o) => o.status === "skipped")) {
-      const reason = o.reason ? ` — ${o.reason}` : "";
-      new Notice(`MUGS — ${o.label} skipped${reason}`, quiet ? 0 : 6000);
     }
 
     // Terminal status-bar state from the outcome aggregate.
@@ -311,8 +352,12 @@ export default class MugsPlugin extends Plugin {
     else if (oks > 0) {
       this.lastSyncedAt = Date.now();
       this.updateStatusBar("synced");
+    } else {
+      // No mappings configured: land on a definite state instead of leaving the bar
+      // stuck on the pre-pass "syncing…" label (a fresh install looked hung).
+      this.updateStatusBar("idle");
+      if (!quiet) new Notice("MUGS: no mappings configured — add one in Settings to start syncing.", 5000);
     }
-    // oks === 0 && skips === 0 && conflicts === 0 (no mappings configured): keep prior state.
   }
 
   /** Writes merged file content into a clone's working tree via the vault adapter.
@@ -420,6 +465,17 @@ export default class MugsPlugin extends Plugin {
           return undefined; // unreadable/absent -> recency falls back to defaultResolution
         }
       },
+      // Must agree with list(): getFiles() skips dot-folders and list() drops
+      // BINARY_EXTENSIONS — a path failing this predicate could never appear in
+      // a vault listing, so the sync engine must never treat its remote twin as
+      // a vault-side deletion (the binary-corruption guard).
+      listable: (p) => {
+        const segs = p.split("/");
+        if (segs.some((s) => s.startsWith("."))) return false;
+        const last = segs[segs.length - 1];
+        const ext = last.includes(".") ? last.slice(last.lastIndexOf(".") + 1).toLowerCase() : "";
+        return !BINARY_EXTENSIONS.has(ext);
+      },
     };
   }
 
@@ -456,9 +512,12 @@ export default class MugsPlugin extends Plugin {
     return mapping.agentId ? this.store.getAgents().find((a) => a.id === mapping.agentId) : undefined;
   }
 
-  /** Open (or activate) a registered custom view in its own leaf. */
+  /** Open (or activate) a registered custom view — reusing an existing leaf of
+   *  that type when one is open, otherwise splitting a new one. The old
+   *  getLeaf(false) REPLACED whatever the user was editing on every click. */
   private async openView(type: string): Promise<void> {
-    const leaf = this.app.workspace.getLeaf(false);
+    const existing = this.app.workspace.getLeavesOfType(type);
+    const leaf = existing.length > 0 ? existing[0] : this.app.workspace.getLeaf(true);
     await leaf.setViewState({ type, active: true });
   }
 
@@ -511,17 +570,19 @@ export default class MugsPlugin extends Plugin {
     }, EVENT_DEBOUNCE_MS);
   }
 
-  /** Rebuild the editor-open set from currently open, dirty workspace leaves. */
+  /** Rebuild the editor-open set from every file currently open in a view.
+   *  Conservative rule: ANY open file is treated as write-unsafe (mirrorPull skips
+   *  it; the next pass catches up once closed) — real dirtiness detection does not
+   *  exist on TFile, and over-blocking is the safe failure mode. */
   private recomputeOpenEditors(): void {
     const open = new Set<string>();
     try {
-      const leaves = (this.app.workspace as unknown as { getOpenLeaves?: () => Array<{ getFile?: () => { path: string; isDirty?: boolean } }> }).getOpenLeaves?.() ?? [];
-      for (const leaf of leaves) {
-        const file = leaf.getFile?.();
-        if (file && file.isDirty) open.add(file.path);
-      }
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        const view = (leaf as unknown as { view?: { file?: { path?: string } } }).view;
+        if (view?.file?.path) open.add(view.file.path);
+      });
     } catch {
-      // Defensive: a missing adapter method must not abort event handling.
+      // Defensive: a missing workspace method must not abort event handling.
     }
     this.editorOpen = new EditorOpenGuard(open);
   }
@@ -531,7 +592,10 @@ export default class MugsPlugin extends Plugin {
     const reg = (this as unknown as { registerMcpServer?: (def: { name: string; version: string; tools?: unknown[] }) => unknown }).registerMcpServer;
     if (typeof reg !== "function") return; // build predates MCP support — degrade gracefully
     try {
-      reg.call(this, { name: MCP_SERVER_NAME, version: this.manifest.version, tools: listAgentTools() });
+      // Register the server name/version only: the tool surface is advertised
+      // once a dispatch transport exists (listAgentTools describes the intended
+      // tools, but no handler routes calls yet — advertising them would be dead).
+      reg.call(this, { name: MCP_SERVER_NAME, version: this.manifest.version });
     } catch (e) {
       console.warn("MUGS: could not register MCP server", e);
     }
@@ -545,13 +609,14 @@ export default class MugsPlugin extends Plugin {
     const norm = normalizePath(path);
     return settings.mappings.find((m) => {
       const lf = normalizePath(m.localFolder);
+      if (lf === ".") return true; // whole-vault mapping — every path is relevant
       return norm === lf || norm.startsWith(`${lf}/`);
     });
   }
 
   /** The app became visible/hidden — update the gate and status bar. Becoming
-   *  visible again restores the last terminal state (synced/conflict/…) instead
-   *  of snapping back to "idle". */
+   *  visible again restores the last TERMINAL state (synced/conflict/skipped/error)
+   *  instead of snapping to "synced" and masking pending conflicts. */
   private onVisibilityChange(): void {
     this.hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
     if (!this.hidden && this.eventDebounceTimer) {
@@ -562,7 +627,7 @@ export default class MugsPlugin extends Plugin {
       this.updateStatusBar("hidden");
     } else {
       // Re-render the persistent state (a pass in flight keeps its phase text).
-      this.updateStatusBar(this.syncInFlight ? "syncing" : this.lastSyncedAt ? "synced" : "idle");
+      this.updateStatusBar(this.syncInFlight ? "syncing" : this.lastTerminalBarState ?? (this.lastSyncedAt ? "synced" : "idle"));
     }
   }
 
@@ -573,16 +638,30 @@ export default class MugsPlugin extends Plugin {
     const s = this.store.getSettings();
     const hasConflicts = Object.values(s.conflicts).some((list) => list.some((c) => !c.resolved));
     if (hasConflicts) {
-      void this.app.workspace.createPanelTab(this, MugsConflictsPanel);
+      this.openConflictsPanel();
       return;
     }
     void this.openView("mugs-diff");
+  }
+
+  /** Open the conflicts view in the right sidebar, reusing an open panel. The
+   *  previous createPanelTab call targeted a workspace method that does not
+   *  exist in Obsidian and always threw. */
+  private openConflictsPanel(): void {
+    const existing = this.app.workspace.getLeavesOfType(MUGS_CONFLICTS_VIEW_TYPE);
+    const leaf = existing[0] ?? this.app.workspace.getRightLeaf(false);
+    if (!leaf) {
+      new Notice("MUGS: could not open the Conflicts panel.", 8000);
+      return;
+    }
+    void leaf.setViewState({ type: MUGS_CONFLICTS_VIEW_TYPE, active: true });
   }
 
   /** Render the status-bar label for a plugin state, with optional live detail
    *  (sync phase text). A user pause always wins over everything else. */
   private updateStatusBar(state: BarState, detail?: string): void {
     if (!this.statusEl) return;
+    if (state !== "syncing") this.lastTerminalBarState = state; // remembered for visibility restore
     const paused = this.store.getSettings().sync.paused && state !== "paused";
     let text: string;
     if (paused) text = "MUGS ⏸ paused";

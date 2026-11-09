@@ -353,9 +353,11 @@ describe("syncAllMappings — sync outcomes", () => {
   const cloneIdx = cloneCall!.indexOf("clone");
   expect(cloneCall![cloneIdx + 1]).toBe("--filter=blob:none");
   expect(cloneCall).toContain("https://example.com/m1.git");
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "R1" }]);
+    // A pass that pushed records the POST-push tip as the remote baseline (the
+    // pre-push remoteSha left the 3-way base one commit stale).
+    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
     expect(state.push).toEqual([["m1", "L1"]]);
-    expect(state.pull).toEqual([["m1", "R1"]]);
+    expect(state.pull).toEqual([["m1", "L1"]]);
   });
 
   it("records a divergent file as a durable conflict on a rebase pull", async () => {
@@ -463,7 +465,7 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
       conflicts: store.store,
     });
-    expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "ok", pull: "rebase", push: true, newRemoteSha: "R1" });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "ok", pull: "rebase", push: true, newRemoteSha: "L1" });
     // Clean merge written into the clone's working tree at <cloneRoot>/<providerId>/<id>/<path>.
     expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
     // The branch is re-pointed at the remote tip before staging, so the commit + push
@@ -473,7 +475,7 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(calls.findIndex((c) => c.includes("commit"))).toBeGreaterThan(resetIdx);
     expect(store.getState()).toEqual([]); // no conflicts recorded
     expect(state.push).toEqual([["m1", "L1"]]);
-    expect(state.pull).toEqual([["m1", "R1"]]);
+    expect(state.pull).toEqual([["m1", "L1"]]); // post-push tip recorded
   });
 
   it("clears previously-recorded conflicts once a pass completes cleanly", async () => {
@@ -597,9 +599,9 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
   const cloneCall = calls.find((c) => c.includes("clone"));
     const cloneIdx = cloneCall!.indexOf("clone");
     expect(cloneCall![cloneIdx + 1]).toBe("/tmp/shared.git");
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "R1" }]);
+    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
     expect(state.push).toEqual([["m1", "L1"]]);
-    expect(state.pull).toEqual([["m1", "R1"]]);
+    expect(state.pull).toEqual([["m1", "L1"]]);
   });
 
   it("surfaces a divergent file as a durable conflict on a local rebase pull", async () => {
@@ -699,10 +701,10 @@ describe("syncAllMappings — sync outcomes", () => {
 });
 
 describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
-  it("skips writing a clean-merge result for a file open with unsaved changes", async () => {
+  it("materializes a clean-merge result into the clone even while the vault file is open (the guard protects vault writes, not staging)", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
-    const editorOpen = new EditorOpenGuard(["notes/todo.md"]); // open w/ unsaved changes
+    const editorOpen = new EditorOpenGuard(["notes/todo.md"]); // vault file open w/ unsaved changes
     const { runner } = makeRunner({
       head: "L1", remote: "R1", ancestor: false, cloned: true, // diverged, non-overlapping -> clean merge
       changedPaths: ["notes/todo.md"],
@@ -724,8 +726,10 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
       workingTree,
       editorOpen,
     });
-    // The merged result is NOT written because the file is open with unsaved changes.
-    expect(writes).toEqual([]);
+    // Clone working-tree writes are staging material and never clobber the user's
+    // open editor (the vault-side write-back guard lives in mirrorPull, in vault
+    // path space). The old repo-space check here never matched and was dead.
+    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
   });
 
@@ -788,7 +792,7 @@ describe("syncAllMappings — .obsidian/ scope gating (Area 9)", () => {
     expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
   });
 
-  it("syncs nothing under .obsidian/ when the feature is disabled (default behavior unchanged)", async () => {
+  it("syncs nothing under .obsidian/ when the feature is disabled (repo-side config must never clobber a teammate's config)", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
     const { runner } = makeRunner({
@@ -810,10 +814,11 @@ describe("syncAllMappings — .obsidian/ scope gating (Area 9)", () => {
       runner,
       lastSync: accessor,
       workingTree,
-      // Explicitly disabled -> .obsidian/ is not gated in, so it syncs like any other path.
+      // Explicitly disabled -> .obsidian/ paths are out of scope entirely: the old
+      // behavior pulled repo-side config into every user's .obsidian dir.
       obsidianConfig: { enabled: false, entries: [] },
     });
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([]);
   });
 });
 
