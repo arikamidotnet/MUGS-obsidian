@@ -56,18 +56,29 @@ function arraysEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
+/** LCS cell budget: over this, the O(n×m) dp matrix is too expensive for a
+ *  renderer main thread — the merge degrades to one whole-file conflict chunk
+ *  (a genuine divergence we cannot afford to line-merge automatically). */
+const LCS_CELL_BUDGET = 4_000_000;
+
 /**
  * Longest common subsequence between two line arrays, returned as pairs of
  * matching indices [i in x, j in y], sorted increasingly on both axes. O(n*m).
+ * The dp matrix is a flat Int32Array (4 bytes/cell, cache-friendly) — the old
+ * number[][] form allocated 2-4× the memory and thrashed GC on large inputs.
  */
 function lcsPairs(x: string[], y: string[]): Array<[number, number]> {
   const n = x.length;
   const m = y.length;
-  // dp[i][j] = LCS length of x[i:] and y[j:]. Filled bottom-up.
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  const w = m + 1;
+  // dp[i*w + j] = LCS length of x[i:] and y[j:]. Filled bottom-up.
+  const dp = new Int32Array((n + 1) * w);
   for (let i = n - 1; i >= 0; i--) {
+    const xi = x[i];
+    const row = i * w;
+    const next = row + w;
     for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[row + j] = xi === y[j] ? dp[next + j + 1] + 1 : Math.max(dp[next + j], dp[row + j + 1]);
     }
   }
   const pairs: Array<[number, number]> = [];
@@ -78,7 +89,7 @@ function lcsPairs(x: string[], y: string[]): Array<[number, number]> {
       pairs.push([i, j]);
       i++;
       j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
       i++;
     } else {
       j++;
@@ -143,6 +154,16 @@ function classifyRegion(base: string[], ours: string[], theirs: string[]): Chunk
 
 /** Run the diff3 walk over three line arrays and emit merged chunks. */
 export function diff3Chunks(base: string[], ours: string[], theirs: string[]): Chunk[] {
+  // Guard BEFORE any LCS work: giant divergent files (a multi-MB paper edited
+  // on both sides) would otherwise allocate and compute billions of cells on
+  // the renderer's main thread — one whole-file conflict is the honest result.
+  if (
+    base.length * ours.length > LCS_CELL_BUDGET ||
+    base.length * theirs.length > LCS_CELL_BUDGET ||
+    ours.length * theirs.length > LCS_CELL_BUDGET
+  ) {
+    return [{ type: "conflict", ours, theirs }];
+  }
   const baseOurs = lcsPairs(base, ours);
   const baseTheirs = lcsPairs(base, theirs);
   const theirsByBase = new Map(baseTheirs.map(([b, t]) => [b, t] as const));
@@ -193,6 +214,16 @@ function renderChunks(chunks: Chunk[]): string {
  */
 function textMerge(base: string, ours: string, theirs: string): MergeResult {
   if (base === "" && ours === "" && theirs === "") return { content: "", conflict: false };
+  // Fast paths (string equality — O(n), no allocation): a side that is
+  // unchanged, or two sides that made the identical change, must NEVER reach
+  // the O(n×m) LCS walk. Regression: a 5.7MB text file with base == ours ==
+  // theirs (the normal steady state after a push!) computed a billions-cell
+  // dp matrix on the renderer's main thread and pegged it at 100% CPU — the
+  // sync pass hung and Obsidian froze. These paths return exactly what the
+  // walk would (identical sides collapse; a one-sided change is taken whole).
+  if (ours === theirs) return { content: ours, conflict: false };
+  if (base === ours) return { content: theirs, conflict: false };
+  if (base === theirs) return { content: ours, conflict: false };
   const chunks = diff3Chunks(splitLines(base), splitLines(ours), splitLines(theirs));
   const content = renderChunks(chunks);
   const conflict = chunks.some((c) => c.type === "conflict");

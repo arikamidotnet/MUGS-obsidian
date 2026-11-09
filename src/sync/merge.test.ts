@@ -174,6 +174,41 @@ describe("diff3Chunks — region classification", () => {
   });
 });
 
+describe("threeWayMerge — large-content fast paths (regression: a multi-MB file pegged the renderer)", () => {
+  it("merges a large identical file without conflict and without the LCS walk", () => {
+    // Steady state after a push: base == ours == theirs. The old code computed
+    // an O(n×m) dp matrix (~9M cells here; billions for a 5.7MB paper).
+    const big = J(Array.from({ length: 3000 }, (_, i) => `line ${i}`));
+    const r = threeWayMerge(big, big, big);
+    expect(r.content).toBe(big);
+    expect(r.conflict).toBe(false);
+  });
+
+  it("takes theirs whole when ours equals a large base (fast path)", () => {
+    const base = J(Array.from({ length: 3000 }, (_, i) => `b ${i}`));
+    const theirs = J(Array.from({ length: 3000 }, (_, i) => `t ${i}`));
+    const r = threeWayMerge(base, base, theirs);
+    expect(r.content).toBe(theirs);
+    expect(r.conflict).toBe(false);
+  });
+
+  it("collapses identical large add/add additions via the fast path", () => {
+    const big = J(Array.from({ length: 3000 }, (_, i) => `x ${i}`));
+    const r = threeWayMerge(undefined, big, big);
+    expect(r.content).toBe(big);
+    expect(r.conflict).toBe(false);
+  });
+
+  it("degrades to a whole-file conflict when the LCS cell budget is exceeded", () => {
+    // 2000 × 3000 = 6M cells > the 4M budget — must return instantly, not hang.
+    const base = Array.from({ length: 2000 }, (_, i) => `b${i}`);
+    const ours = Array.from({ length: 3000 }, (_, i) => `o${i}`);
+    const theirs = Array.from({ length: 3000 }, (_, i) => `t${i}`);
+    const chunks = diff3Chunks(base, ours, theirs);
+    expect(chunks).toEqual([{ type: "conflict", ours, theirs }]);
+  });
+});
+
 describe("mergeAll — per-file over a diff set", () => {
   it("merges each file in order and flags conflicts", () => {
     const diffs: FileDiff[] = [
