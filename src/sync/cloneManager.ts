@@ -868,7 +868,20 @@ export class CloneManager {
     // new content) was skipped as unchanged; the exact pair + mtime-ordering rule
     // closes that. Uncertainty (startup, watcher doubt, changed fingerprint,
     // pending work) disables the skip entirely — verify, never report false success.
-    const remoteUnchanged = baseSha !== "" && remoteSha === baseSha;
+    let remoteUnchanged = baseSha !== "" && remoteSha === baseSha;
+    // A shared repository tip can advance because ANOTHER mapping changed.
+    // Equal immutable subtree IDs prove this mapping's remote bytes are unchanged;
+    // uncertain watcher evidence and pending operations still disable the shortcut.
+    const scope = mapping.remotePath.replace(/^\/+|\/+$/g, "");
+    if (!remoteUnchanged && baseSha && scope && checkRelPath(scope).ok) {
+      const treeAt = async (ref: string): Promise<string | undefined> => {
+        const result = await c.run(["rev-parse", "--verify", "--quiet", `${ref}:${scope}`]);
+        return result.code === 0 && /^[0-9a-f]{40,64}$/i.test(result.stdout.trim()) ? result.stdout.trim() : undefined;
+      };
+      const oldTree = await treeAt(baseSha);
+      const newTree = await treeAt(remoteSha);
+      remoteUnchanged = oldTree !== undefined && oldTree === newTree;
+    }
     const statAvailable = this.vaultMirror?.stat !== undefined;
     const steadyState = statAvailable;
     const lastDone = remoteUnchanged ? (this.syncs.lastCompletedAt?.(mapping.id) ?? 0) : 0;

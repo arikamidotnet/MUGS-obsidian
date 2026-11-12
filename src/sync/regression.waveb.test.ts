@@ -334,6 +334,35 @@ describe("S03: shared-clone isolation + advisory lock + legacy inventory", () =>
 });
 
 describe("E02: same-size/same-mtime replacement", () => {
+  it("does not reread an unchanged mapped subtree when another remote subtree advances", async () => {
+    const mappings: FolderMapping[] = [{ ...PUSH_ONLY[0], remotePath: "docs" }];
+    await syncAllMappings(f.deps({ mappings }));
+    const before = remoteTip();
+    const work = join(f.base, "outside-edit");
+    hermeticExecSync(`git clone -q "${f.remote}" "${work}"`);
+    writeFileSync(join(work, "outside.md"), "outside mapping\n");
+    hermeticExecSync(`git -C "${work}" add outside.md`);
+    hermeticExecSync(`git -C "${work}" commit -q -m outside`);
+    sh(`git -C "${work}" push -q origin main`);
+    const after = remoteTip();
+    expect(after).not.toBe(before);
+    f.runner.reset();
+    f.io.reads = 0;
+    const out = await syncAllMappings(f.deps({ mappings }));
+    expect(out[0]?.status).toBe("ok");
+    expect(f.io.reads).toBe(0);
+    expect(f.runner.counts["show"] ?? 0).toBe(0);
+    expect(f.runner.counts["push"] ?? 0).toBe(0);
+    expect(remoteFile("docs/F.md")).toBe("v1\n");
+    expect(remoteTip()).toBe(after);
+    expect(f.store.getSettings().lastSync.m.correspondenceSha).toBe(after);
+
+    // Even an equal remote subtree cannot bypass startup/watcher verification.
+    f.io.reads = 0;
+    await syncAllMappings(f.deps({ mappings, watcherUncertain: true }));
+    expect(f.io.reads).toBeGreaterThan(0);
+  }, 120_000);
+
   it("is detected when the watcher is uncertain (full re-verify), and the shortcut still skips when certain", async () => {
     // Native mtimes can contain micro/nanoseconds that lose precision when
     // round-tripped through JS milliseconds -> utimes seconds. Establish an
