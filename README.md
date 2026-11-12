@@ -97,6 +97,13 @@ Remaining work (not claiming completeness): mobile support (desktop-only for now
   configured provider/agent where available, with a deterministic fallback.
   A teammate's global Git configuration is not required.
 - Dirty or unpushed legacy clones block migration for review; they are not reset.
+- Legacy mappings without proven population retain remote paths missing locally.
+  A rename can therefore publish the new name while retaining the old remote name.
+  Do not force the population flag to enable deletion: first reconcile the mapping
+  against a backup and prove which paths the vault has actually received.
+- Startup verification can take several minutes on large mappings. Subsequent
+  passes can reuse unchanged scoped trees, including when another mapping advances
+  the shared repository tip.
 - Binary content is excluded from text reconciliation and reported as blocked.
   Do not assume attachment synchronization is supported by the text merge path.
 
