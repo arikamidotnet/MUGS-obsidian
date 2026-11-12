@@ -118,6 +118,31 @@ describe("MugsPlugin runtime (E05) — realistic stubs + fake timers", () => {
     vi.useRealTimers();
   });
 
+  it("a coalesced edit syncs inside the poll interval but still honors pause and visibility", async () => {
+    const PluginCls = await loadPlugin();
+    const p = new PluginCls();
+    const sync = { paused: false, intervalSeconds: 300 };
+    p.store = { getSettings: () => ({ sync, mappings: [], lastSync: {} }) };
+    p.hidden = false;
+    p.lastRunAt = Date.now();
+    p.runSync = vi.fn(async () => {});
+
+    await p.tickSync();
+    expect(p.runSync).not.toHaveBeenCalled();
+    await p.tickSync(true);
+    expect(p.runSync).toHaveBeenCalledTimes(1);
+    expect(p.runSync).toHaveBeenCalledWith(true);
+
+    p.runSync.mockClear();
+    sync.paused = true;
+    await p.tickSync(true);
+    expect(p.runSync).not.toHaveBeenCalled();
+    sync.paused = false;
+    p.hidden = true;
+    await p.tickSync(true);
+    expect(p.runSync).not.toHaveBeenCalled();
+  });
+
   async function loadPlugin() {
     // Dynamic import after mocks
     const mod = await import("./main");
@@ -149,6 +174,7 @@ describe("MugsPlugin runtime (E05) — realistic stubs + fake timers", () => {
     vi.advanceTimersByTime(1600);
 
     expect((p as any).tickSync).toHaveBeenCalledTimes(1);
+    expect((p as any).tickSync).toHaveBeenCalledWith(true);
   });
 
   it("plugin internal writes are suppressed and do not trigger tickSync (feedback guard)", async () => {

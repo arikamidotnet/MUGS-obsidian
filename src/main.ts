@@ -284,7 +284,7 @@ export default class MugsPlugin extends Plugin {
 
     this.addCommand({
       id: "show-diff",
-      name: "Show MUGS Diff (per-author changes)",
+      name: "Show MUGS Diff (per-file changes and Git authors)",
       callback: () => void this.openView("mugs-diff"),
     });
 
@@ -794,12 +794,12 @@ export default class MugsPlugin extends Plugin {
    *  Manual runSync callers should call markManualSyncRun() so scheduling
    *  timestamps are coherent (no double-interval waits after a manual click).
    */
-  private async tickSync(): Promise<void> {
+  private async tickSync(eventTriggered = false): Promise<void> {
     const settings = this.store.getSettings();
     const decision = decideRun({
       now: Date.now(),
       intervalMs: Math.max(1_000, settings.sync.intervalSeconds * 1000),
-      lastRunAt: this.lastRunAt,
+      lastRunAt: eventTriggered ? undefined : this.lastRunAt,
       pausedByUser: settings.sync.paused,
       hidden: this.hidden,
     });
@@ -839,7 +839,7 @@ export default class MugsPlugin extends Plugin {
       const fires = debounceFireTimes(this.eventTimestamps, Math.max(1, EVENT_COALESCE_MS));
       this.eventTimestamps = [];
       this.eventDebounceTimer = undefined;
-      if (fires.length > 0) void this.tickSync();
+      if (fires.length > 0) void this.tickSync(true);
     }, EVENT_COALESCE_MS);
   }
 

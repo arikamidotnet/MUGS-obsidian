@@ -70,7 +70,8 @@ Implemented features:
   in the **Conflicts panel** for an explicit ours / theirs / both choice. Editor
   guards and durable state keep deferred or failed work visible.
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon and the *Run sync* command; each mapping reports ok / push+pull / conflict / skip as a Notice. (`src/providers/factory.ts`, `src/main.ts`)
-- **Settings controls.** Add or delete credentials (provider picker + token) and folder mappings (provider/branch/direction) directly from Settings, with `.obsidian/` targets rejected outright. (`src/settingsTab.ts`)
+- **Settings controls.** Manage credentials and folder mappings, with explicit
+  Apply/Cancel drafts and validation of protected configuration scopes.
 
 Also shipped: first-sync policy, repository-and-branch clone isolation,
 event-driven sync, a clickable status bar, opt-in passphrase encryption,
@@ -108,7 +109,7 @@ Remaining work (not claiming completeness): mobile support (desktop-only for now
 ## Diff semantics (current)
 
 - **Since completed sync:** compare proven correspondence with committed HEAD.
-  If only a fetched remote tip is available, the UI labels that fallback.
+  Without proven correspondence, choose a history comparison or complete a sync.
 - **Previous commit:** compare the previous committed snapshot with HEAD.
 - **Custom older ref:** compare the selected older committed snapshot with HEAD.
 - Select a changed file to inspect its changes. Queries stay within the mapping's
