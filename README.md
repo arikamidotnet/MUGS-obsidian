@@ -4,6 +4,9 @@ Desktop-only Git sync with folder mappings, explicit sync directions, recoverabl
 conflicts, and per-file committed-snapshot comparisons. Requires system Git and
 Obsidian 1.8.0 or newer.
 
+Development requires Node 20.19+ (CI pins 20.20.2). Release dependencies are
+locked; use `npm ci` for repeatable installs.
+
 Fine-grained, folder-mapped git sync across **all** git backends (GitLab-first),
 with per-user credentials stored *inside* the vault and multi-user collaboration
 built on shared repos + backend permissions — no hosted backend, no E2E encryption.
