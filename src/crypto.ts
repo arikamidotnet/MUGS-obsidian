@@ -80,14 +80,34 @@ export async function deriveKey(hint: string): Promise<CryptoKey> {
   return pbkdf2AesKey(hint, APP_SALT, PBKDF2_ITERATIONS);
 }
 
+const BASE64_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
+
 /** Derive the AES-256-GCM key for the passphrase scheme: passphrase (never
- *  persisted) + per-vault base64 salt + iteration count (both persisted). */
+ *  persisted) + per-vault base64 salt + iteration count (both persisted).
+ *
+ * Validates before derivation:
+ * - saltB64 must be valid base64 (no invalid characters)
+ * - decoded salt must be exactly KDF_SALT_BYTES (16) long
+ * This rejects garbage before we pay for PBKDF2.
+ */
 export async function derivePassphraseKey(
   passphrase: string,
   saltB64: string,
   iterations: number,
 ): Promise<CryptoKey> {
-  return pbkdf2AesKey(passphrase, fromBase64(saltB64), iterations);
+  if (typeof saltB64 !== "string" || !BASE64_REGEX.test(saltB64)) {
+    throw new Error("derivePassphraseKey: salt must be valid base64");
+  }
+  let bytes: Uint8Array<ArrayBuffer>;
+  try {
+    bytes = fromBase64(saltB64);
+  } catch {
+    throw new Error("derivePassphraseKey: salt must be valid base64");
+  }
+  if (bytes.length !== KDF_SALT_BYTES) {
+    throw new Error(`derivePassphraseKey: salt must decode to ${KDF_SALT_BYTES} bytes, got ${bytes.length}`);
+  }
+  return pbkdf2AesKey(passphrase, bytes, iterations);
 }
 
 /** Generate a fresh random per-vault salt as base64. */

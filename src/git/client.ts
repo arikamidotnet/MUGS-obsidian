@@ -5,7 +5,7 @@
  * through the injected GitRunner (see types.ts), so tests can assert on the exact
  * args and canned output without touching a repository or the filesystem.
  */
-import type { GitResult, GitRunner } from "./types";
+import type { GitResult, GitRunner, GitRunOpts, ReadResult, ReadError } from "./types";
 
 export type PullMode = "ff" | "rebase" | "merge";
 
@@ -41,6 +41,14 @@ export interface Author {
   name: string;
   email: string;
 }
+
+/** Deterministic fallback identity used for both author and committer when no
+ *  explicit identity is supplied by the caller (e.g. local provider with no
+ *  configured agent via pickAgent, or no username on the credential). This is
+ *  documented so higher layers and tests can rely on the exact shape.
+ *  GitClient.commit *always* supplies explicit GIT_AUTHOR_* / GIT_COMMITTER_*
+ *  via the environment and never consults global git config. */
+export const FALLBACK_IDENTITY: Author = { name: "MUGS Sync", email: "mugs@local" };
 
 /** An author aggregated over a log range: commit count + latest author timestamp. */
 export interface AuthorActivity {
@@ -100,19 +108,19 @@ export class GitClient {
     return this.auth ? [...this.authArgs(), ...args] : args;
   }
 
-  /** Merge caller opts with the credential environment (and cwd when bound). */
-  private execOpts(opts?: { cwd?: string; env?: Record<string, string> }): { cwd?: string; env?: Record<string, string> } | undefined {
+  /** Merge caller opts (including GitRunOpts for signal/timeout) with credential env and cwd. */
+  private execOpts(opts?: GitRunOpts): GitRunOpts | undefined {
     const authEnv = this.authEnv();
-    const merged = { ...opts };
+    const merged: GitRunOpts = { ...(opts ?? {}) };
     if (this.cwd && merged.cwd === undefined) merged.cwd = this.cwd;
-    if (authEnv) merged.env = { ...authEnv, ...opts?.env };
-    return merged.cwd || merged.env ? merged : undefined;
+    if (authEnv) merged.env = { ...authEnv, ...(opts?.env ?? {}) };
+    return (merged.cwd || merged.env || merged.signal || merged.timeoutMs) ? merged : undefined;
   }
 
   /** Run a command that must succeed; throws with git's stderr otherwise. The
    *  thrown message quotes the command WITHOUT the credential-helper -c prefix
    *  so Notices stay readable and never contain the helper string. */
-  private async must(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult> {
+  private async must(args: string[], opts?: GitRunOpts): Promise<GitResult> {
     const r = await this.runner.run(this.fullArgs(args), this.execOpts(opts));
     if (r.code !== 0) {
       throw new Error(`git ${args.join(" ")} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
@@ -121,7 +129,7 @@ export class GitClient {
   }
 
   /** Run a command and return the raw result (for introspecting exit codes). */
-  run(args: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<GitResult> {
+  run(args: string[], opts?: GitRunOpts): Promise<GitResult> {
     return this.runner.run(this.fullArgs(args), this.execOpts(opts));
   }
 
@@ -176,12 +184,25 @@ export class GitClient {
 
   async commit(message: string, author?: Author, committer?: Author): Promise<GitResult> {
     const args = ["commit", "--message", message];
-    if (author) args.push("--author", `${author.name} <${author.email}>`);
-    // Without a committer identity git falls back to the machine's global config,
-    // which is UNSET on a fresh teammate machine — every push would fail with
-    // "tell me who you are". Env vars pin it per invocation; no config is written.
-    const env = committer ? { GIT_COMMITTER_NAME: committer.name, GIT_COMMITTER_EMAIL: committer.email } : undefined;
-    return this.must(args, env ? { env } : undefined);
+    // Always supply explicit identities for BOTH author and committer via environment
+    // variables. This guarantees hermetic operation (no dependency on global git
+    // config or ambient user.name). Callers may still pass Author objects (from
+    // pickAgent or provider username); any missing role receives a deterministic
+    // fallback (or the other provided identity for consistency).
+    const effective = author ?? committer ?? FALLBACK_IDENTITY;
+    const a = author ?? effective;
+    const c = committer ?? effective;
+    const env = {
+      GIT_AUTHOR_NAME: a.name,
+      GIT_AUTHOR_EMAIL: a.email,
+      GIT_COMMITTER_NAME: c.name,
+      GIT_COMMITTER_EMAIL: c.email,
+    };
+    // Preserve the --author flag for explicit authors (observable in call args)
+    // while the env guarantees the identity is always set even under hermetic
+    // conditions (fresh HOME, GIT_CONFIG_GLOBAL=/dev/null, etc).
+    if (author) args.push("--author", `${a.name} <${a.email}>`);
+    return this.must(args, { env });
   }
 
   async push(remote = "origin", branch?: string): Promise<GitResult> {
@@ -193,17 +214,21 @@ export class GitClient {
 
   /** Tracked files (index), one per line — the clone-side file list for mirroring.
    *  quotePath=false keeps non-ASCII/emoji names unquoted: the default C-quoting
-   *  would make them unmatchable against vault paths (phantom deletes / failed adds). */
+   *  would make them unmatchable against vault paths (phantom deletes / failed adds).
+   *  Uses -z + -- for NUL-delimited safety (E06); parses newline output tolerantly. */
   async lsFiles(): Promise<string[]> {
-    const r = await this.must(["-c", "core.quotePath=false", "ls-files"]);
-    return r.stdout.split("\n").filter((l) => l.length > 0);
+    const r = await this.must(["-c", "core.quotePath=false", "ls-files", "-z", "--"]);
+    return splitRecords(r.stdout);
   }
 
   /** Paths deleted between two refs (`git diff --name-only --diff-filter=D`).
-   *  Tree-level comparison only — safe on blobless clones (no lazy blob fetch). */
+   *  Tree-level comparison only — safe on blobless clones (no lazy blob fetch).
+   *  Uses -z (E06). */
   async deletedPaths(range: string): Promise<string[]> {
-    const r = await this.must(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", range]);
-    return r.stdout.split("\n").filter((l) => l.length > 0);
+    // NOTE: no `--` here — the range is a REVISION, not a pathspec. A `--` before it
+    // makes git reinterpret the range as a path and silently diff nothing.
+    const r = await this.must(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "-z", range]);
+    return splitRecords(r.stdout);
   }
 
   /** Mixed-reset the branch to `ref`: moves HEAD and the index, keeps the working
@@ -279,11 +304,42 @@ export class GitClient {
    * Read file content at a ref (`REF:PATH`). Resolves undefined when the path is
    * absent at that ref (deleted, or never existed) so callers can treat it as a
    * deletion in a 3-way merge.
+   *
+   * Legacy behavior preserved for existing callers (sync engine migrates in a
+   * later wave). New code should prefer {@link showTyped}.
    */
   async show(ref: string, path: string): Promise<string | undefined> {
     const r = await this.run(["show", `${ref}:${path}`]);
     if (r.code !== 0) return undefined;
     return r.stdout;
+  }
+
+  /**
+   * Typed read of file content at a ref (`REF:PATH`).
+   * Returns a discriminated union:
+   * - { kind: "content", content }
+   * - { kind: "absent" }
+   * - { kind: "error", error: { kind, message } }
+   *
+   * Error kinds: auth | missing-ref | missing-blob | permission | timeout | cancelled | corrupt | other.
+   * The message is redacted (no embedded URL userinfo or Authorization material).
+   * Callers MUST treat "absent" distinctly from "error" (never conflate).
+   */
+  async showTyped(ref: string, path: string): Promise<ReadResult> {
+    const r = await this.run(["show", `${ref}:${path}`]);
+    if (r.code === 0) {
+      return { kind: "content", content: r.stdout };
+    }
+    const err = classifyShowError(r.stderr || r.stdout);
+    // A missing-blob classification from `git show REF:PATH` when the ref itself
+    // is valid means the path simply is not present in that tree. This is the
+    // normal "absent" outcome for merge logic (treated as a deletion on that side).
+    // All other error kinds (auth, missing-ref, permission, corrupt, etc.) remain
+    // errors; an error must never be interpreted as absence by callers.
+    if (err.kind === "missing-blob") {
+      return { kind: "absent" };
+    }
+    return { kind: "error", error: err };
   }
 
   /** Epoch seconds of the last commit that touched `path` at `ref`, or undefined
@@ -317,34 +373,84 @@ export class GitClient {
   /** Paths with working-tree changes vs HEAD (staged + unstaged + untracked), one per
    *  line. Used to stage in-scope working-tree changes on push. Untracked entries are
    *  included so locally-added files — e.g. after a divergence merge re-points the
-   *  branch at the remote tip, leaving local-only adds untracked — are never stranded. */
+   *  branch at the remote tip, leaving local-only adds untracked — are never stranded.
+   *  Uses -z (NUL) porcelain v1 (E06); renames are "XY NEW<NUL>ORIG<NUL>".
+   *  Legacy newline output ("XY path", "R old -> new") is parsed tolerantly. */
   async workingTreePaths(): Promise<string[]> {
-    // -c core.quotePath=false keeps non-ASCII paths unquoted in porcelain output.
-    const r = await this.run(["-c", "core.quotePath=false", "status", "--porcelain"]);
+    const r = await this.run(["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--"]);
     if (r.code !== 0) throw new Error(`git status --porcelain failed (${r.code}): ${r.stderr.trim()}`);
     const out: string[] = [];
-    for (const line of r.stdout.split("\n")) {
-      if (!line) continue;
-      // Porcelain v1: "XY <path>" (either status char may be a space). Renames render
-      // as "R  old -> new" — take the destination so the moved path is staged.
-      const path = line.slice(3);
-      out.push(path.includes(" -> ") ? path.split(" -> ").pop()! : path);
+    if (r.stdout.includes("\u0000")) {
+      // Real git -z porcelain v1: records are "XY PATH<NUL>" and for renames/copies
+      // "XY NEW_PATH<NUL>ORIG_PATH<NUL>" — the NEW path comes FIRST, then the original.
+      const parts = r.stdout.split("\u0000").filter((s) => s.length > 0);
+      for (let i = 0; i < parts.length; i++) {
+        const rec = parts[i];
+        if (!rec) continue;
+        const isRename = rec[0] === "R" || rec[1] === "R";
+        const body = rec.slice(2).replace(/^\s+/, "");
+        if (isRename && parts[i + 1] !== undefined) {
+          out.push(body); // NEW path (the ORIG follows as its own NUL field — skip it)
+          i += 1;
+        } else {
+          out.push(body);
+        }
+      }
+    } else {
+      // Legacy line format (older fake runners / unusual git builds): "XY path",
+      // renames as "XY old -> new". Tolerant parsing keeps the old wire contract alive.
+      for (const line of r.stdout.split("\n")) {
+        if (!line.trim()) continue;
+        if (line.includes(" -> ")) {
+          out.push(line.split(" -> ").pop()!.trim());
+        } else {
+          out.push(line.slice(3).replace(/^\s+/, ""));
+        }
+      }
     }
     return out;
   }
 
-  /** Paths changed across a `base...HEAD`-style range, one per line. */
+  /** Paths changed across a `base...HEAD`-style range, one per line. Uses -z (E06).
+    *  No `--` before the range — it is a revision, not a pathspec (see deletedPaths). */
   async changedPaths(range: string): Promise<string[]> {
-    const r = await this.run(["-c", "core.quotePath=false", "diff", "--name-only", range]);
+    const r = await this.run(["-c", "core.quotePath=false", "diff", "--name-only", "-z", range]);
     if (r.code !== 0) throw new Error(`git diff --name-only ${range} failed (${r.code}): ${r.stderr.trim()}`);
-    return r.stdout.split("\n").filter((l) => l.length > 0);
+    return splitRecords(r.stdout);
   }
 
-  /** Unified diff between two refs (empty string when identical). */
+  /**
+   * Unified diff between two refs using git's three-dot (merge-base) comparison.
+   * For an explicit two-endpoint diff (fromRef..toRef) use {@link diffRange}.
+   */
   async diff(from: string, to: string): Promise<string> {
     const r = await this.run(["diff", `${from}...${to}`]);
     if (r.code !== 0) throw new Error(`git diff ${from}...${to} failed (${r.code}): ${r.stderr.trim()}`);
     return r.stdout;
+  }
+
+  /**
+   * Explicit two-endpoint tree diff: `git diff <fromRef> <toRef>` (no merge-base).
+   * This produces the diff you expect for an ancestor like HEAD vs HEAD~1.
+   * Optionally scoped to a set of pathspecs (passed after `--`).
+   */
+  async diffRange(fromRef: string, toRef: string, paths: string[] = []): Promise<string> {
+    const base = ["diff", fromRef, toRef];
+    const args = paths.length > 0 ? [...base, "--", ...paths] : base;
+    const r = await this.run(args);
+    if (r.code !== 0) throw new Error(`git diff ${fromRef} ${toRef} failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout;
+  }
+
+  /**
+   * Pathspec-scoped log lines (oneline). `git log --oneline <range> -- <paths...>`.
+   * Keeps the merge-base range form for the first argument (e.g. "base..HEAD").
+   */
+  async logLinesScoped(range: string, paths: string[]): Promise<string[]> {
+    if (!paths || paths.length === 0) return this.logLines(range);
+    const r = await this.run(["log", "--oneline", range, "--", ...paths]);
+    if (r.code !== 0) throw new Error(`git log ${range} failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
   }
 
   /** `git status --porcelain` lines. */
@@ -353,4 +459,75 @@ export class GitClient {
     if (r.code !== 0) throw new Error(`git status failed (${r.code}): ${r.stderr.trim()}`);
     return r.stdout.split("\n").filter((l) => l.length > 0);
   }
+}
+
+/**
+ * Split command output into path records: NUL-delimited when -z output is present
+ * (E06 wire format), otherwise newline-delimited (legacy fakes / exotic builds).
+ * Drops empty trailing records from a final delimiter.
+ */
+function splitRecords(s: string): string[] {
+  return (s.includes("\u0000") ? s.split("\u0000") : s.split("\n")).filter((l) => l.length > 0);
+}
+
+/**
+ * Pure classification for a failed `git show` (or equivalent blob read).
+ * Exported for unit testing the classifier in isolation.
+ * Redacts URL-embedded credentials and Authorization-like tokens.
+ */
+export function classifyShowError(text: string): ReadError {
+  const t = (text || "").toLowerCase();
+  // Redact anything resembling credentials in the raw text for the message.
+  const redacted = redactSensitive(text || "");
+
+  // Auth / credential failures (exit 128 or 1 with credential wording).
+  if (/authentication failed|access denied|http basic|could not read .*password|bad credentials|401|403/.test(t)) {
+    return { kind: "auth", message: redacted.trim() || "authentication failed" };
+  }
+
+  // Missing ref (the commit/tree named by REF does not exist locally).
+  if (/bad revision|not a valid object name|unknown revision|could not resolve reference|reference not found|missing commit|no such ref|ambiguous argument|not a tree object|invalid object name/.test(t)) {
+    return { kind: "missing-ref", message: redacted.trim() || "missing ref" };
+  }
+
+  // Missing blob / path at a valid ref (this is the "absent" signal for callers
+  // that still want to distinguish the failure mode). We map to missing-blob;
+  // upper layers decide if this is logically "absent" or a hard error.
+  if (/pathspec .* did not match|does not exist in|exists on disk, but not in|path .* does not exist|fatal: .* no such path|not found in/.test(t)) {
+    return { kind: "missing-blob", message: redacted.trim() || "path not present at ref" };
+  }
+
+  // Permission denied on the object store / pack.
+  if (/permission denied|read permission|access is not allowed/.test(t)) {
+    return { kind: "permission", message: redacted.trim() || "permission denied" };
+  }
+
+  // Timeout / network stall hints (from lowSpeed or transport layer).
+  if (/timeout|timed out|early eof|fetch-pack|index-pack.*stalled/.test(t)) {
+    return { kind: "timeout", message: redacted.trim() || "read timed out" };
+  }
+
+  // Object corruption / pack issues.
+  if (/corrupt|bad object|loose object|pack has bad|checksum mismatch|object database/.test(t)) {
+    return { kind: "corrupt", message: redacted.trim() || "corrupt object" };
+  }
+
+  // Cancellation is typically surfaced by the runner (signal abort) rather than
+  // git itself; we keep a distinct bucket for future-proofing.
+  if (/cancel|aborted|interrupted/.test(t)) {
+    return { kind: "cancelled", message: redacted.trim() || "cancelled" };
+  }
+
+  return { kind: "other", message: redacted.trim() || "git read failed" };
+}
+
+/** Redact URL-embedded credentials and Authorization-like material from messages. */
+function redactSensitive(s: string): string {
+  // user:pass@host or token@host
+  let out = s.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\/\s@]+@([^\s]+)/g, "$1<redacted>@$2");
+  // Authorization: ... headers or similar
+  out = out.replace(/authorization[^\n]*/gi, "authorization: <redacted>");
+  // Bare credential-ish tokens in URLs
+  out = out.replace(/([?&](?:token|access_token|private_token|auth)=)[^&\s]+/gi, "$1<redacted>");
+  return out;
 }

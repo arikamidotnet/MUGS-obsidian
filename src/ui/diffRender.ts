@@ -147,7 +147,14 @@ export function renderConflicts(
  */
 export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<string, string>): void {
   if (parsed.files.length === 0) {
-    host.createEl("p", { text: "Nothing changed in this range.", cls: "mugs-muted" });
+    // Render a contained empty state (styled via .mugs-diff-output .mugs-empty-state)
+    // so it matches the other "in sync" / "no baseline" cards in the Diff view.
+    const card = host.createDiv({ cls: "mugs-empty-state" });
+    card.createEl("h3", { text: "No changes in this range" });
+    card.createEl("p", {
+      text: "The chosen ref produces no diff against the comparison base. Try a different ref in the picker above (e.g. an older commit like HEAD~1).",
+      cls: "mugs-muted",
+    });
     return;
   }
 

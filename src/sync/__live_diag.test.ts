@@ -1,6 +1,19 @@
 /**
- * LIVE DIAGNOSTIC — never part of the normal suite (skipped unless MUGS_LIVE_DIAG=1).
+ * QUARANTINED LIVE DIAGNOSTIC — NEVER RUN UNDER DEFAULT `npm test`.
  *
+ * WHY QUARANTINED (qa-release, Wave A):
+ *   - This file performs real writes and pushes against the live company vault
+ *     (FBR-WRK) using the real token from its data.json.
+ *   - It is intentionally excluded from normal test discovery via vitest.config.ts
+ *     (see: exclude: ["src/sync/__live_diag.test.ts"]).
+ *   - The only supported way to run it is: MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts
+ *
+ * DO NOT REMOVE THE QUARANTINE without explicit cross-wave sign-off.
+ * If you need to run it locally for diagnostics, set the env var.
+ *
+ * Original purpose preserved below for reference.
+ *
+ * --- original header (lightly edited) ---
  * Replicates exactly what MugsPlugin.runSync() does for the FBR-WRK vault: the real
  * clone root, a Node-fs VaultMirror/WorkingTreeWriter over the real vault folders,
  * the real provider (token read from the vault's data.json at runtime, never

@@ -141,6 +141,34 @@ describe("BitbucketProvider", () => {
     const branches = await new BitbucketProvider({ baseUrl: BASE, token: "tok", transport: t }).getBranches("acme/notes");
     expect(branches.map((b) => b.name)).toEqual(["a", "b"]);
   });
+
+  it("C04: ignores cross-origin JSON next cursor (no token leak)", async () => {
+    const first = { status: 200, body: { values: [{ name: "a" }], next: "https://evil.host/2.0/repositories/acme/notes/refs?page=2" } };
+    const t = new FakeTransport({
+      "/participants": { status: 200, body: { values: [], next: null } },
+      "/refs": first,
+      "/repositories/acme%2Fnotes": { status: 200, body: { mainbranch: { name: "main" } } },
+    });
+    const branches = await new BitbucketProvider({ baseUrl: BASE, token: "tok", transport: t }).getBranches("acme/notes");
+    expect(branches.map((b) => b.name)).toEqual(["a"]);
+    // Only one call on the approved origin; cross-origin next was ignored.
+    expect(t.calls.filter((c) => c.url.includes("evil.host"))).toHaveLength(0);
+  });
+
+  it("C04: redacts token query params in Bitbucket pagination error messages", async () => {
+    // Same-origin next carrying a token query param, then that page 500s — the error
+    // must show `token=<redacted>` and never the secret value.
+    const first = { status: 200, body: { values: [{ name: "a" }], next: `${BASE}/2.0/repositories/acme/notes/refs?page=2&token=sekret` } };
+    const t = new FakeTransport({
+      "/participants": { status: 200, body: { values: [], next: null } },
+      "/refs?page=2&token=sekret": { status: 500, body: {} },
+      "/refs": first,
+      "/repositories/acme%2Fnotes": { status: 200, body: { mainbranch: { name: "main" } } },
+    });
+    const p = new BitbucketProvider({ baseUrl: BASE, token: "tok", transport: t });
+    await expect(p.getBranches("acme/notes")).rejects.toThrow(/token=<redacted>/);
+    await expect(p.getBranches("acme/notes")).rejects.not.toThrow(/sekret/);
+  });
 });
 
 describe("BitbucketProvider — allowed repos", () => {

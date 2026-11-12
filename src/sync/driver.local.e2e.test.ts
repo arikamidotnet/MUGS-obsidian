@@ -12,7 +12,12 @@ import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from ".
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
 import { cloneDir, type VaultMirror } from "./cloneManager";
+import { StoreDiffDataSource } from "../ui/defaultDataSources";
 import type { FolderMapping, Credential } from "../types";
+import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
+
+// Ensure every manual git op and every SUT git op inherits a stable identity.
+installHermeticGitIdentity();
 
 const REMOTE_URL = "file://" + join(tmpdir(), "mugs-e2e-shared.git"); // clone SOURCE (as the driver's baseUrl)
 const REMOTE_PATH = join(tmpdir(), "mugs-e2e-shared.git");             // plain bare-repo path for seeding
@@ -24,13 +29,13 @@ function seedRemote(line: string): void {
   rmSync(REMOTE_PATH, { recursive: true, force: true });
   remoteWork = join(tmpdir(), "mugs-e2e-src");
   rmSync(remoteWork, { recursive: true, force: true });
-  execSync(`git init -q -b main "${remoteWork}"`);
+  hermeticExecSync(`git init -q -b main "${remoteWork}"`);
   mkdirSync(join(remoteWork, "Notes"), { recursive: true });
   writeFileSync(join(remoteWork, "Notes", "diary.md"), `# Diary\n\n${line}\n`);
   writeFileSync(join(remoteWork, "README.md"), "# readme\n");
-  execSync(`git -C "${remoteWork}" config user.name T && git -C "${remoteWork}" config user.email t@l`);
-  execSync(`git -C "${remoteWork}" add -A && git -C "${remoteWork}" commit -q -m init`);
-  execSync(`git clone -q --bare "${remoteWork}" "${REMOTE_PATH}"`);
+  hermeticExecSync(`git -C "${remoteWork}" config user.name T && git -C "${remoteWork}" config user.email t@l`);
+  hermeticExecSync(`git -C "${remoteWork}" add -A && git -C "${remoteWork}" commit -q -m init`);
+  hermeticExecSync(`git clone -q --bare "${remoteWork}" "${REMOTE_PATH}"`);
   rmSync(remoteWork, { recursive: true, force: true });
 }
 
@@ -99,18 +104,18 @@ describe("local provider — real git end-to-end", () => {
     // Another device advances the remote with a different edit of line 3.
     const scratch = join(tmpdir(), "mugs-e2e-scratch");
     rmSync(scratch, { recursive: true, force: true });
-    execSync(`git clone -q "${REMOTE_PATH}" "${scratch}"`);
+    hermeticExecSync(`git clone -q "${REMOTE_PATH}" "${scratch}"`);
     writeFileSync(join(scratch, "Notes", "diary.md"), "# Diary\n\nREMOTE EDIT by another device.\n");
-    execSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
-    execSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "remote edit"`);
-    execSync(`git -C "${scratch}" push -q "${REMOTE_PATH}" main`);
+    hermeticExecSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+    hermeticExecSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "remote edit"`);
+    hermeticExecSync(`git -C "${scratch}" push -q "${REMOTE_PATH}" main`);
     rmSync(scratch, { recursive: true, force: true });
 
     // The MUGS clone makes its own (overlapping) edit of line 3 and commits it locally.
     const cp = clonePath();
     writeFileSync(join(cp, "Notes", "diary.md"), "# Diary\n\nLOCAL EDIT by vault user.\n");
-    execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
-    execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local edit"`);
+    hermeticExecSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+    hermeticExecSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local edit"`);
 
     // Sync #2: diverged pull should surface the overlapping file as a conflict.
     const outcomes = await syncAllMappings({
@@ -138,12 +143,12 @@ describe("local provider — real git end-to-end", () => {
     const cloneRoot = join(base, "clones");
     rmSync(base, { recursive: true, force: true });
 
-    execSync(`git init -q -b main "${work}"`);
+    hermeticExecSync(`git init -q -b main "${work}"`);
     mkdirSync(join(work, "Notes"), { recursive: true });
     writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nbase line\n");
-    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
-    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
-    execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+    hermeticExecSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    hermeticExecSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    hermeticExecSync(`git clone -q --bare "${work}" "${remotePlain}"`);
     rmSync(work, { recursive: true, force: true });
 
     const cred: Credential = { id: "cred-diverge", label: "Local", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
@@ -167,18 +172,18 @@ describe("local provider — real git end-to-end", () => {
 
     // Another device advances the remote with a non-overlapping new file.
     const scratch = join(base, "scratch");
-    execSync(`git clone -q "${remotePlain}" "${scratch}"`);
+    hermeticExecSync(`git clone -q "${remotePlain}" "${scratch}"`);
     writeFileSync(join(scratch, "Notes", "remote-addition.md"), "remote addition\n");
-    execSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
-    execSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "remote addition"`);
-    execSync(`git -C "${scratch}" push -q "${remotePlain}" main`);
+    hermeticExecSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+    hermeticExecSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "remote addition"`);
+    hermeticExecSync(`git -C "${scratch}" push -q "${remotePlain}" main`);
     rmSync(scratch, { recursive: true, force: true });
 
     // The MUGS clone commits its own non-overlapping new file -> histories diverge.
     const cp = cloneDir({ root: cloneRoot }, "cred-diverge", mappingId);
     writeFileSync(join(cp, "Notes", "local-addition.md"), "local addition\n");
-    execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
-    execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local addition"`);
+    hermeticExecSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+    hermeticExecSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local addition"`);
 
     // Sync #2: the divergence resolves as a clean merge; the branch re-points at the
     // remote tip so the push fast-forwards. Before the fix, git rejected this push as
@@ -189,7 +194,7 @@ describe("local provider — real git end-to-end", () => {
 
     // The remote now carries BOTH sides' content, and nothing was lost.
     const check = join(base, "check");
-    execSync(`git clone -q "${remotePlain}" "${check}"`);
+    hermeticExecSync(`git clone -q "${remotePlain}" "${check}"`);
     expect(readFileSync(join(check, "Notes", "remote-addition.md"), "utf8")).toBe("remote addition\n");
     expect(readFileSync(join(check, "Notes", "local-addition.md"), "utf8")).toBe("local addition\n");
     expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("base line");
@@ -206,14 +211,14 @@ describe("local provider — real git end-to-end", () => {
       rmSync(base, { recursive: true, force: true });
 
       // Seed a bare repo containing a .trash/ folder and an ordinary notes/ folder.
-      execSync(`git init -q -b main "${work}"`);
+      hermeticExecSync(`git init -q -b main "${work}"`);
       mkdirSync(join(work, ".trash"), { recursive: true });
       mkdirSync(join(work, "notes"), { recursive: true });
       writeFileSync(join(work, ".trash", "old.md"), "# old trash\n");
       writeFileSync(join(work, "notes", "foo.md"), "# foo\n");
-      execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
-      execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
-      execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+      hermeticExecSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+      hermeticExecSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+      hermeticExecSync(`git clone -q --bare "${work}" "${remotePlain}"`);
       rmSync(work, { recursive: true, force: true });
 
       const cred: Credential = { id: "cred-trash", label: "Local", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
@@ -237,15 +242,15 @@ describe("local provider — real git end-to-end", () => {
       // which is exactly what the inScope gate filters when staging on push.
       const cp = cloneDir({ root: cloneRoot }, "cred-trash", mappingId);
       writeFileSync(join(cp, "notes", "bar.md"), "# bar\n");
-      execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
-      execSync(`git -C "${cp}" add notes/bar.md && git -C "${cp}" commit -q -m "add bar"`);
+      hermeticExecSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+      hermeticExecSync(`git -C "${cp}" add notes/bar.md && git -C "${cp}" commit -q -m "add bar"`);
       writeFileSync(join(cp, ".trash", "old.md"), "# old trash MODIFIED\n"); // uncommitted
 
       // Sync #2 pushes; the gate decides whether the uncommitted .trash/ change leaves the machine.
       await syncAllMappings(deps());
 
       const check = join(base, "check.git");
-      execSync(`git clone -q "${remotePlain}" "${check}"`);
+      hermeticExecSync(`git clone -q "${remotePlain}" "${check}"`);
       expect(existsSync(join(check, "notes", "bar.md"))).toBe(true); // committed ordinary file always pushes
       const trashContent = readFileSync(join(check, ".trash", "old.md"), "utf8");
       expect(trashContent).toBe(syncTrashFolder ? "# old trash MODIFIED\n" : "# old trash\n");
@@ -450,5 +455,78 @@ describe("vault mirror + first-sync direction — real git end-to-end", () => {
     execSync(`git clone -q "${f.remotePlain}" "${check}"`);
     expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("base + vault edit");
     rmSync(f.base, { recursive: true, force: true });
+  });
+});
+
+describe("sync then diff — real git verification", () => {
+  it("after a successful sync the Diff data source reports identical with a baseline ref; an edit produces changed", async () => {
+    // Isolated bare remote + clone root.
+    const base = join(tmpdir(), "mugs-e2e-sync-diff");
+    const remotePlain = join(base, "remote.git");
+    const cloneRoot = join(base, "clones");
+    const work = join(base, "work");
+    rmSync(base, { recursive: true, force: true });
+
+    execSync(`git init -q -b main "${work}"`);
+    mkdirSync(join(work, "Notes"), { recursive: true });
+    writeFileSync(join(work, "Notes", "diary.md"), "# Diary\n\nbase\n");
+    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+    rmSync(work, { recursive: true, force: true });
+
+    const cred: Credential = { id: "cred-sd", label: "Local", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
+    const mappingId = "map-sd";
+    const mapping = { id: mappingId, label: "SD", remotePath: "", localFolder: "Synced", providerId: "cred-sd", direction: "push-pull" as const };
+
+    const store = new MugsStore(new MemoryIO());
+    await store.load();
+    store.upsertMapping(mapping);
+    const deps = () => ({
+      mappings: [mapping],
+      credentials: [cred],
+      getToken: () => "t",
+      buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
+      cloneRoot,
+      runner: new ChildProcessRunner(),
+      lastSync: storeWritableAccessor(store),
+      conflicts: storeConflictAccessor(store),
+    });
+
+    // First sync establishes the clone and records lastRemoteSha (baseline).
+    const r1 = await syncAllMappings(deps());
+    expect(r1[0].status).toBe("ok");
+    expect(store.getSettings().lastSync[mappingId]?.lastRemoteSha).toBeTruthy();
+
+    // Diff data source, wired exactly as main.ts does for the real UI.
+    const diffDs = new StoreDiffDataSource(store, cloneRoot, new ChildProcessRunner());
+    const d1 = await diffDs.getDiff({ mappingId });
+    expect(d1.outcome).toBe("identical");
+    expect(typeof d1.baseRef).toBe("string");
+    expect((d1.baseRef ?? "").length).toBeGreaterThan(0);
+
+    // Make a real commit in the clone (simulates local work since last sync).
+    const cp = cloneDir({ root: cloneRoot }, "cred-sd", mappingId);
+    writeFileSync(join(cp, "Notes", "diary.md"), "# Diary\n\nbase\n\nEDIT\n");
+    execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
+    execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m edit`);
+
+    // Sync pushes the change and advances the recorded baseline.
+    const r2 = await syncAllMappings(deps());
+    expect(r2[0].status).toBe("ok");
+
+    // Against the new baseline the tree is again identical.
+    const d2 = await diffDs.getDiff({ mappingId });
+    expect(d2.outcome).toBe("identical");
+
+    // Unsynced local change (new file) — diff vs recorded baseline must report changed + non-empty diffText.
+    writeFileSync(join(cp, "Notes", "extra.md"), "new file\n");
+    execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "add-extra"`);
+    const d3 = await diffDs.getDiff({ mappingId });
+    expect(d3.outcome).toBe("changed");
+    expect(d3.diffText.length).toBeGreaterThan(0);
+    expect(d3.baseRef).toBeTruthy();
+
+    rmSync(base, { recursive: true, force: true });
   });
 });

@@ -61,6 +61,21 @@ describe("GitClient — command construction", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).commit("mugs push", { name: "Ada", email: "ada@example.com" });
     expect(last(r).args).toEqual(["commit", "--message", "mugs push", "--author", "Ada <ada@example.com>"]);
+    // Env always carries BOTH author and committer identities explicitly.
+    expect(last(r).opts?.env).toMatchObject({ GIT_AUTHOR_NAME: "Ada", GIT_AUTHOR_EMAIL: "ada@example.com", GIT_COMMITTER_NAME: "Ada", GIT_COMMITTER_EMAIL: "ada@example.com" });
+  });
+
+  it("always supplies explicit GIT_AUTHOR_* and GIT_COMMITTER_* via env (even with no author passed)", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).commit("plain commit");
+    const e = last(r).opts?.env;
+    expect(e?.GIT_AUTHOR_NAME).toBeDefined();
+    expect(e?.GIT_AUTHOR_EMAIL).toBeDefined();
+    expect(e?.GIT_COMMITTER_NAME).toBeDefined();
+    expect(e?.GIT_COMMITTER_EMAIL).toBeDefined();
+    // The documented fallback identity is used when nothing is supplied.
+    expect(e?.GIT_AUTHOR_NAME).toBe("MUGS Sync");
+    expect(e?.GIT_AUTHOR_EMAIL).toBe("mugs@local");
   });
 
   it("pushes with and without a branch, with stall detection", async () => {
@@ -169,15 +184,25 @@ describe("GitClient — first-init topology helpers", () => {
   });
 
   it("lsFiles lists tracked paths", async () => {
-    const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
+    const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\u0000sub/b.md\u0000", stderr: "" }));
     expect(await client(r).lsFiles()).toEqual(["a.md", "sub/b.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "ls-files"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "ls-files", "-z", "--"]);
   });
 
   it("deletedPaths asks git for the deleted-only diff of a range", async () => {
-    const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\n", stderr: "" }));
+    const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\u0000", stderr: "" }));
     expect(await client(r).deletedPaths("OLD..HEAD")).toEqual(["gone.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
+    // The range is a revision: no `--` before it (a `--` there would reinterpret it
+    // as a pathspec and silently diff nothing).
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "-z", "OLD..HEAD"]);
+  });
+
+  it("changedPaths parses both NUL (-z) and legacy newline output", async () => {
+    const zr = new FakeRunner(() => ({ code: 0, stdout: "a.md\u0000sub/b.md\u0000", stderr: "" }));
+    expect(await client(zr).changedPaths("base...HEAD")).toEqual(["a.md", "sub/b.md"]);
+    expect(last(zr).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "-z", "base...HEAD"]);
+    const nr = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
+    expect(await client(nr).changedPaths("base...HEAD")).toEqual(["a.md", "sub/b.md"]);
   });
 
   it("lastModifiedAt parses the last commit time of a path at a ref", async () => {
@@ -234,11 +259,18 @@ describe("GitClient — query parsing and errors", () => {
     expect(last(r).args).toEqual(["diff", "base...HEAD"]);
   });
 
-  it("workingTreePaths lists modified and untracked paths, resolving renames", async () => {
+  it("workingTreePaths lists modified and untracked paths, resolving renames (NUL -z format)", async () => {
+    // Porcelain -z v1 rename record: "XY NEW_PATH<NUL>ORIG_PATH<NUL>" — new path FIRST.
+    const out = [" M notes/a.md", "?? notes/new.md", "R  notes/moved.md", "notes/old.md"].join("\u0000");
+    const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
+    expect(await client(r).workingTreePaths()).toEqual(["notes/a.md", "notes/new.md", "notes/moved.md"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--"]);
+  });
+
+  it("workingTreePaths tolerates legacy newline porcelain (old fakes)", async () => {
     const out = [" M notes/a.md", "?? notes/new.md", "R  notes/old.md -> notes/moved.md"].join("\n");
     const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
     expect(await client(r).workingTreePaths()).toEqual(["notes/a.md", "notes/new.md", "notes/moved.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "status", "--porcelain"]);
   });
 });
 

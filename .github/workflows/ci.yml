@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
 
+# Node baseline: GitHub-hosted runners provide Node 20 by default in the stable
+# ubuntu-latest image at the time of writing. We pin to 20 here for reproducible
+# CI and broad compatibility with the Obsidian plugin ecosystem and GitHub Actions
+# cache behavior. Local development may use Node 24+; CI remains on 20.
+# Hermetic: this workflow intentionally does NOT set global git identity.
+# Git identity for commits is a product concern (owned by git-runtime / qa-release).
+# Tests must run without relying on host git config (GIT_CONFIG_GLOBAL=/dev/null
+# etc. is the responsibility of the test harness, not this workflow).
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -17,3 +26,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Version/consistency gate (R04): verifies package/manifest/versions agreement.
+      # Does not bump versions; fails on drift.
+      - run: node scripts/check-release.js

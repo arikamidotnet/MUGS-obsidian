@@ -8,16 +8,21 @@
  * Run: npx vitest run src/sync/runSync.harness.test.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor } from "./driver";
+import { buildProvider } from "../providers/factory";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
-import { buildProvider } from "../providers/factory";
+import { cloneDir, type VaultMirror } from "./cloneManager";
+import { StoreDiffDataSource } from "../ui/defaultDataSources";
 import type { FolderMapping, Credential, MugsSettings } from "../types";
+import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
 
+// Hermetic git: never depend on machine global identity.
+installHermeticGitIdentity();
 const REMOTE_PATH = join(tmpdir(), `mugs-harness-${process.pid}.git`);
 const CLONE_ROOT = join(tmpdir(), `mugs-harness-clones-${process.pid}`);
 let remoteWork: string;
@@ -27,13 +32,13 @@ function seedRemote(): void {
   rmSync(REMOTE_PATH, { recursive: true, force: true });
   remoteWork = join(tmpdir(), `mugs-harness-src-${process.pid}`);
   rmSync(remoteWork, { recursive: true, force: true });
-  execSync(`git init -q -b main "${remoteWork}"`);
+  hermeticExecSync(`git init -q -b main "${remoteWork}"`);
   mkdirSync(join(remoteWork, "Notes"), { recursive: true });
   writeFileSync(join(remoteWork, "Notes", "diary.md"), "# Diary\n\nhello from remote\n");
   writeFileSync(join(remoteWork, "README.md"), "# readme\n");
-  execSync(`git -C "${remoteWork}" config user.name T && git -C "${remoteWork}" config user.email t@l`);
-  execSync(`git -C "${remoteWork}" add -A && git -C "${remoteWork}" commit -q -m init`);
-  execSync(`git clone -q --bare "${remoteWork}" "${REMOTE_PATH}"`);
+  hermeticExecSync(`git -C "${remoteWork}" config user.name T && git -C "${remoteWork}" config user.email t@l`);
+  hermeticExecSync(`git -C "${remoteWork}" add -A && git -C "${remoteWork}" commit -q -m init`);
+  hermeticExecSync(`git clone -q --bare "${remoteWork}" "${REMOTE_PATH}"`);
   rmSync(remoteWork, { recursive: true, force: true });
 }
 
@@ -105,20 +110,25 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
     });
 
     expect(outcomes.length).toBe(1);
-    expect(outcomes[0].status).toBe("ok");
+    expect(outcomes[0].status, `skip reason: ${outcomes[0].reason}`).toBe("ok");
     // Clone dir should now contain the pulled files.
     const diary = join(CLONE_ROOT, "cred-local", "map-notes", "Notes", "diary.md");
     expect(require("node:fs").existsSync(diary)).toBe(true);
   });
 
+  // Verified green under hermetic env: the SUT commit path inherits the hermetic
+  // identity from process.env (GitClient.commit only overrides env when a committer
+  // is supplied; local-provider committerFor returns undefined). The production
+  // identity seam (git-runtime E07) should still be hardened so commits never
+  // depend on ambient process env — but no test currently fails on it.
   it("pulls a NEW remote change into the clone dir (push-pull direction)", async () => {
     // Append a new commit to the bare repo directly.
     const tmp = join(tmpdir(), `mugs-harness-seed-${process.pid}`);
     rmSync(tmp, { recursive: true, force: true });
-    execSync(`git clone -q "${REMOTE_PATH}" "${tmp}"`);
+    hermeticExecSync(`git clone -q "${REMOTE_PATH}" "${tmp}"`);
     writeFileSync(join(tmp, "Notes", "diary.md"), "# Diary\n\nhello from remote\n+ second line pushed to remote\n");
-    execSync(`git -C "${tmp}" add -A && git -C "${tmp}" commit -q -m "add line"`);
-    execSync(`git -C "${tmp}" push -q origin main`);
+    hermeticExecSync(`git -C "${tmp}" add -A && git -C "${tmp}" commit -q -m "add line"`);
+    hermeticExecSync(`git -C "${tmp}" push -q origin main`);
     rmSync(tmp, { recursive: true, force: true });
 
     const settings = makeSettings();
@@ -138,7 +148,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       pickAgent: (m) => m.agentId ? store.getAgents().find((a) => a.id === m.agentId) : undefined,
     });
 
-    expect(outcomes[0].status).toBe("ok");
+    expect(outcomes[0].status, `skip reason: ${outcomes[0].reason}`).toBe("ok");
     const diary = join(CLONE_ROOT, "cred-local", "map-notes", "Notes", "diary.md");
     const content = require("node:fs").readFileSync(diary, "utf8");
     expect(content).toContain("+ second line pushed to remote");
@@ -150,8 +160,8 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
     const targetDir = join(CLONE_ROOT, "cred-local", "map-notes", "Notes");
     mkdirSync(targetDir, { recursive: true });
     writeFileSync(join(targetDir, "local-note.md"), "# local note\ncreated from vault\n");
-    execSync(`git -C "${targetDir}" config user.name V && git -C "${targetDir}" config user.email v@l`);
-    execSync(`git -C "${targetDir}" add -A && git -C "${targetDir}" commit -q -m "add local note"`);
+    hermeticExecSync(`git -C "${targetDir}" config user.name V && git -C "${targetDir}" config user.email v@l`);
+    hermeticExecSync(`git -C "${targetDir}" add -A && git -C "${targetDir}" commit -q -m "add local note"`);
 
     const settings = makeSettings();
     const outcomes = await syncAllMappings({
@@ -170,11 +180,11 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       pickAgent: (m) => m.agentId ? store.getAgents().find((a) => a.id === m.agentId) : undefined,
     });
 
-    expect(outcomes[0].status).toBe("ok");
+    expect(outcomes[0].status, `skip reason: ${outcomes[0].reason}`).toBe("ok");
     // Verify the push landed on the bare repo by cloning it fresh.
     const verify = join(tmpdir(), `mugs-harness-verify-${process.pid}`);
     rmSync(verify, { recursive: true, force: true });
-    execSync(`git clone -q "${REMOTE_PATH}" "${verify}"`);
+    hermeticExecSync(`git clone -q "${REMOTE_PATH}" "${verify}"`);
     expect(require("node:fs").existsSync(join(verify, "Notes", "local-note.md"))).toBe(true);
     rmSync(verify, { recursive: true, force: true });
   });

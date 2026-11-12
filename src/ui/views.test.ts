@@ -231,7 +231,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const text = collectText(v.contentEl);
     // A fully synced mapping must NOT read as "no comparison available" — it says
     // exactly what happened, with the baseline SHA shortened for readability.
-    expect(text).toContain("No changes since last sync");
+    expect(text).toContain("In sync — no changes since last sync");
     expect(text).toContain("abc123de");
     expect(text).not.toContain("abc123def4abc123def4");
   });

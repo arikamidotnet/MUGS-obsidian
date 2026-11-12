@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { withQuery, extractNextLink, paginateAll, FetchTransport, type HttpTransport, type HttpResponse } from "./http";
+import { withQuery, extractNextLink, paginateAll, FetchTransport, type HttpTransport, type HttpResponse, safeExtractNextLink, safeResolveNext, redactUrl } from "./http";
 
 /** Fake transport that routes on URL substring and records calls. */
 class FakeTransport implements HttpTransport {
@@ -91,6 +91,138 @@ describe("paginateAll", () => {
   it("throws on a non-2xx response while paginating", async () => {
     const t = new FakeTransport(() => ({ status: 500, body: {} }));
     await expect(paginateAll(t, "https://host/projects", {})).rejects.toThrow(/500/);
+  });
+
+  it("refuses to follow cross-origin next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/projects": {
+        status: 200,
+        body: [{ id: 1 }],
+        linkHeader: '<https://evil.host/projects?page=2>; rel="next"',
+      },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/projects", { Authorization: "Bearer x" });
+    // Only the first page should be fetched; the cross-origin next must be ignored.
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+    // Headers for the first call must have contained the auth.
+    expect(t.calls[0].headers.Authorization || t.calls[0].headers.authorization).toBeDefined();
+  });
+
+  it("redacts URLs in pagination error messages (C04)", async () => {
+    const t = new FakeTransport(() => ({
+      status: 200,
+      body: [{ id: 1 }],
+      linkHeader: '<https://user:sekret@host/p?page=2>; rel="next"',
+    }));
+    // The next page will 500; the error message must not contain the userinfo.
+    const pages2: Record<string, HttpResponse> = {
+      "https://user:sekret@host/p?page=2": { status: 500, body: {} },
+    };
+    // Patch handler to switch after first call
+    const fake = new FakeTransport((u) => (u.includes("page=2") ? pages2[u]! : { status: 200, body: [{ id: 1 }], linkHeader: '<https://user:sekret@host/p?page=2>; rel="next"' }));
+    await expect(paginateAll(fake, "https://host/p", {})).rejects.toThrow(/<redacted>/);
+    // And the secret must not be present.
+    await expect(paginateAll(fake, "https://host/p", {})).rejects.not.toThrow(/sekret/);
+  });
+
+  it("ignores javascript: next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/p": { status: 200, body: [{ id: 1 }], linkHeader: '<javascript:alert(1)>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("ignores data: next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/p": { status: 200, body: [{ id: 1 }], linkHeader: '<data:text/html,xx>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("ignores protocol-relative next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/p": { status: 200, body: [{ id: 1 }], linkHeader: '<//evil.host/p2>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("ignores port-mismatch next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host:8443/p": { status: 200, body: [{ id: 1 }], linkHeader: '<https://api.host:8444/p2>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host:8443/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("ignores scheme-mismatch (http vs https) next links (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/p": { status: 200, body: [{ id: 1 }], linkHeader: '<http://api.host/p2>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it("ignores cross-origin absolute next even if Link appears relative-ish (C04)", async () => {
+    const pages: Record<string, HttpResponse> = {
+      "https://api.host/p": { status: 200, body: [{ id: 1 }], linkHeader: '<https://evil.host/xx>; rel="next"' },
+    };
+    const t = new FakeTransport((url) => pages[url]!);
+    const all = await paginateAll(t, "https://api.host/p", { Authorization: "Bearer x" });
+    expect(all.map((p: any) => p.id)).toEqual([1]);
+    expect(t.calls).toHaveLength(1);
+  });
+});
+
+// --- safeResolveNext / safeExtractNextLink (C04) ---------------------------
+describe("safeResolveNext / safeExtractNextLink (C04)", () => {
+  const base = "https://api.host:8443/base";
+  it("accepts same-origin absolute", () => {
+    expect(safeResolveNext("https://api.host:8443/n", base)).toMatch(/api.host:8443/);
+  });
+  it("accepts relative resolved to same origin", () => {
+    expect(safeResolveNext("/next", base)).toMatch(/api.host:8443/);
+  });
+  it("rejects cross-origin absolute", () => {
+    expect(safeResolveNext("https://evil.host/n", base)).toBeNull();
+  });
+  it("rejects javascript:", () => {
+    expect(safeResolveNext("javascript:alert(1)", base)).toBeNull();
+  });
+  it("rejects data:", () => {
+    expect(safeResolveNext("data:text/html,xx", base)).toBeNull();
+  });
+  it("rejects protocol-relative", () => {
+    expect(safeResolveNext("//evil.host/n", base)).toBeNull();
+  });
+  it("rejects port mismatch", () => {
+    expect(safeResolveNext("https://api.host:8444/n", base)).toBeNull();
+  });
+  it("rejects scheme mismatch (http vs https)", () => {
+    expect(safeResolveNext("http://api.host:8443/n", base)).toBeNull();
+  });
+  it("path traversal on same-origin stays same-origin (C04 origin gate does not enforce path containment)", () => {
+    // /../../evil against https://api.host:8443/base normalizes to same-origin path; accepted by origin check.
+    const res = safeResolveNext("/../../evil", base);
+    expect(res).toMatch(/api.host:8443/);
+  });
+  it("safeExtractNextLink extracts then resolves (C04)", () => {
+    expect(safeExtractNextLink('<https://api.host:8443/n2>; rel="next"', base)).toMatch(/n2/);
+    expect(safeExtractNextLink('<//evil.host/n2>; rel="next"', base)).toBeNull();
   });
 });
 

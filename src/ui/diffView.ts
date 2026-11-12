@@ -185,8 +185,12 @@ export class DiffView extends ItemView {
       return;
     }
     if (outcome === "identical") {
-      output.createEl("p", {
-        text: `No changes since last sync (baseline: ${shortSha(baseRef)}).`,
+      // Friendly, honest all-clear: what it means + how to see a real diff
+      // (compare against an older ref via the picker above).
+      const card = output.createDiv({ cls: "mugs-empty-state" });
+      card.createEl("h3", { text: "In sync — no changes since last sync" });
+      card.createEl("p", {
+        text: `This mapping matches its last-synced baseline (${shortSha(baseRef)}). Edits appear here after the next sync pushes them; to inspect history, type an older ref (e.g. ${shortSha(baseRef)}~1) in the picker above.`,
         cls: "mugs-muted",
       });
       return;
@@ -196,7 +200,9 @@ export class DiffView extends ItemView {
         outcome === "no-clone" ? "the repository has not been cloned yet — run a sync first"
         : outcome === "no-baseline" ? "no baseline exists yet — run a sync first"
         : "this mapping no longer exists"; // no-mapping
-      output.createEl("p", { text: `No comparison available — ${why}.`, cls: "mugs-muted" });
+      const card = output.createDiv({ cls: "mugs-empty-state" });
+      card.createEl("h3", { text: "No comparison available" });
+      card.createEl("p", { text: `${why.charAt(0).toUpperCase()}${why.slice(1)}.`, cls: "mugs-muted" });
       return;
     }
     const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);

@@ -20,6 +20,9 @@ import { MugsStore, MemoryIO } from "../store";
 import { cloneDir, type VaultMirror, type WorkingTreeWriter } from "./cloneManager";
 import { resolveConflictFile } from "./conflict";
 import type { FolderMapping, Credential } from "../types";
+import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
+
+installHermeticGitIdentity();
 
 /** Filesystem VaultMirror over <vaultRoot>/Synced — the seam main.ts wires, text only,
  *  including the stat seam the steady-state snapshot shortcut requires. */
@@ -103,31 +106,31 @@ function makeFixture(name: string) {
       mkdirSync(abs.slice(0, abs.lastIndexOf("/")), { recursive: true });
       writeFileSync(abs, c);
     }
-    execSync(`git init -q -b main "${work}"`);
-    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
-    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
-    execSync(`git clone -q --bare "${work}" "${remotePlain}"`);
+    hermeticExecSync(`git init -q -b main "${work}"`);
+    hermeticExecSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    hermeticExecSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    hermeticExecSync(`git clone -q --bare "${work}" "${remotePlain}"`);
     rmSync(work, { recursive: true, force: true });
   };
   /** A second device: clone, write files, commit, push. */
   const secondDevice = (files: Record<string, string>, message: string): void => {
     const scratch = join(base, "scratch");
     rmSync(scratch, { recursive: true, force: true });
-    execSync(`git clone -q "${remotePlain}" "${scratch}"`);
+    hermeticExecSync(`git clone -q "${remotePlain}" "${scratch}"`);
     for (const [p, c] of Object.entries(files)) {
       const abs = join(scratch, p);
       mkdirSync(abs.slice(0, abs.lastIndexOf("/")), { recursive: true });
       writeFileSync(abs, c);
     }
-    execSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
-    execSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "${message}"`);
-    execSync(`git -C "${scratch}" push -q "${remotePlain}" main`);
+    hermeticExecSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+    hermeticExecSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "${message}"`);
+    hermeticExecSync(`git -C "${scratch}" push -q "${remotePlain}" main`);
     rmSync(scratch, { recursive: true, force: true });
   };
   const remoteHas = (rel: string): string => {
     const check = join(base, "check");
     rmSync(check, { recursive: true, force: true });
-    execSync(`git clone -q "${remotePlain}" "${check}"`);
+    hermeticExecSync(`git clone -q "${remotePlain}" "${check}"`);
     return existsSync(join(check, rel)) ? readFileSync(join(check, rel), "utf8") : "";
   };
   return { base, remotePlain, cloneRoot, vaultRoot, syncedVault, cred, mapping, workingTree, store, deps, seedRemote, secondDevice, remoteHas, cleanup: () => rmSync(base, { recursive: true, force: true }) };

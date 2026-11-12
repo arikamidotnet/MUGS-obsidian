@@ -185,6 +185,29 @@ export class MugsStore {
     if (!sec.encryptCredentials) return true; // encryption off — nothing is locked
     if (!sec.kdf) return this.migrateToPassphrase(passphrase);
     if (!passphrase) return false;
+
+    // If already unlocked this session, treat a subsequent call as a verification attempt.
+    // A wrong passphrase must not clobber runtime tokens or flip state.
+    if (this.unlockedFlag) {
+      // Verify by deriving a trial key and checking it can decrypt at least one
+      // pw-cipher stored token whose plaintext we already know via runtime.
+      const trialKey = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+      for (const c of this.settings.credentials) {
+        if (!c.token || !c.token.startsWith(PASSPHRASE_PREFIX)) continue;
+        const known = this.runtimeTokens.get(c.id);
+        if (known === undefined) continue;
+        try {
+          const pt = await decryptAesGcm(c.token, trialKey);
+          if (pt === known) return true; // same effective key, no-op re-unlock
+        } catch {
+          // trial key cannot open a known-good token → wrong passphrase
+          return false;
+        }
+      }
+      // No probe possible (no pw-cipher with known runtime) — conservatively accept as no-op.
+      return true;
+    }
+
     const key = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
     let legacyKey: CryptoKey | undefined;
     const legacy = async (): Promise<CryptoKey> => (legacyKey ??= await deriveKey(keyHint(this.settings)));
@@ -206,7 +229,68 @@ export class MugsStore {
       this.passphraseKey = key;
       this.unlockedFlag = true;
     }
-    return failures === 0;
+    // Treat any remaining unreadable passphrase-scheme tokens as a failure for the
+    // "full unlock" contract: unlock returns true only when every locked token is readable.
+    const remainingPwUnreadable = this.settings.credentials.some(
+      (c) => c.token && c.token.startsWith(PASSPHRASE_PREFIX) && this.unreadableTokens.has(c.id)
+    );
+    const allGood = failures === 0 && !remainingPwUnreadable;
+    if (allGood) {
+      this.passphraseKey = key;
+      this.unlockedFlag = true;
+    }
+    return allGood;
+  }
+
+  /**
+   * Explicit decrypt-all transaction to disable encryption.
+   * Preconditions:
+   * - must be fully unlocked (passphrase scheme, no unreadable tokens this session).
+   * On success: every credential token is rewritten to its plaintext in-memory value,
+   * security.encryptCredentials is set false, kdf removed (hint already absent for pw scheme).
+   * On any per-item failure (cannot obtain plaintext for a credential): return {ok:false, failures:[ids]},
+   * and the previous durable state (encrypted) remains valid; caller must not save a half-disabled state.
+   * The result is observable so callers (next wave) can surface the outcome.
+   */
+  async disableEncryption(): Promise<{ ok: boolean; failures: string[] }> {
+    const sec = this.security();
+    if (!sec.encryptCredentials) {
+      return { ok: true, failures: [] };
+    }
+    if (sec.kdf && !this.unlockedFlag) {
+      // Not fully unlocked — cannot guarantee we can emit plaintext for everything.
+      // Surface a failure without mutating durable state.
+      const stillBad = this.settings.credentials
+        .filter((c) => c.token && !isMasked(c.token) && isStoredCipher(c.token) && !this.runtimeTokens.has(c.id))
+        .map((c) => c.id);
+      return { ok: false, failures: stillBad.length ? stillBad : ["*"] };
+    }
+    const failures: string[] = [];
+    for (const c of this.settings.credentials) {
+      if (!c.token || isMasked(c.token)) continue;
+      if (isStoredCipher(c.token)) {
+        const pt = this.runtimeTokens.get(c.id);
+        if (pt === undefined) {
+          failures.push(c.id);
+          continue;
+        }
+        c.token = pt;
+      }
+      // plaintext or already plaintext passes through
+    }
+    if (failures.length > 0) {
+      // Do not flip the durable security flag; previous encrypted state stays valid.
+      return { ok: false, failures };
+    }
+    // Full success — commit disable
+    this.settings.security = { ...sec, encryptCredentials: false };
+    // Remove kdf and any stale hint for cleanliness (additive, minimal)
+    const s2 = this.security();
+    delete (s2 as any).kdf;
+    delete (s2 as any).encryptionKeyHint;
+    this.unlockedFlag = false;
+    this.passphraseKey = undefined;
+    return { ok: true, failures: [] };
   }
 
   /**
@@ -257,28 +341,57 @@ export class MugsStore {
    * the supplied passphrase with a fresh per-vault salt, drop the hint field
    * and store the KDF params. The supplied passphrase becomes the vault
    * passphrase. Called by `unlock` on the first unlock of a legacy vault.
+   *
+   * ATOMICITY: only when ALL candidate tokens are recoverable do we replace
+   * the durable security block (install kdf, delete hint) and rewrite tokens
+   * under the new scheme. On any failure we leave the previous durable
+   * document fully valid (legacy ciphertext + hint intact) so that a later
+   * complete recovery can still succeed. Successfully decrypted tokens are
+   * made available via runtime for this session without mutating storage.
+   * Retries are idempotent: no double-encryption occurs because we only
+   * rewrite on a full-success commit.
    */
   private async migrateToPassphrase(passphrase: string): Promise<boolean> {
     if (!passphrase) return false;
     const sec = this.security();
     const legacyKey = await deriveKey(keyHint(this.settings));
-    const salt = generateSalt();
-    const iterations = DEFAULT_KDF_ITERATIONS;
-    const key = await derivePassphraseKey(passphrase, salt, iterations);
+    // First pass: attempt to obtain plaintext for every candidate without
+    // mutating stored tokens or security metadata. Track failures.
+    const work: Array<{ c: any; pt: string }> = [];
     let failures = 0;
     for (const c of this.settings.credentials) {
       if (!c.token || isMasked(c.token)) continue;
+      // If already in target scheme in memory (should not happen pre-commit), leave it.
+      if (c.token.startsWith(PASSPHRASE_PREFIX)) continue;
       try {
         const pt = await decryptToken(c.token, legacyKey);
-        c.token = await encryptAesGcm(pt, key);
-        this.runtimeTokens.set(c.id, pt);
-        this.unreadableTokens.delete(c.id);
+        work.push({ c, pt });
       } catch (err) {
-        // Kept as the old ciphertext; retried on the next unlock.
         this.unreadableTokens.add(c.id);
         failures++;
         console.error("MUGS: could not migrate the stored token for", c.label, err);
       }
+    }
+    if (failures > 0) {
+      // Partial failure: do not install KDF, do not delete hint, do not rewrite
+      // any stored token to the new scheme. Durable document remains the
+      // previous valid legacy state. Make readable ones usable this session.
+      for (const { c, pt } of work) {
+        this.runtimeTokens.set(c.id, pt);
+        this.unreadableTokens.delete(c.id);
+      }
+      this.passphraseKey = undefined;
+      this.unlockedFlag = false;
+      return false;
+    }
+    // Full success path: now safe to commit migration atomically.
+    const salt = generateSalt();
+    const iterations = DEFAULT_KDF_ITERATIONS;
+    const key = await derivePassphraseKey(passphrase, salt, iterations);
+    for (const { c, pt } of work) {
+      c.token = await encryptAesGcm(pt, key);
+      this.runtimeTokens.set(c.id, pt);
+      this.unreadableTokens.delete(c.id);
     }
     const next: SecuritySettings = {
       ...sec,
@@ -289,7 +402,7 @@ export class MugsStore {
     this.settings.security = next;
     this.passphraseKey = key;
     this.unlockedFlag = true;
-    return failures === 0;
+    return true;
   }
 
   getSettings(): MugsSettings {
@@ -303,8 +416,20 @@ export class MugsStore {
     return s;
   }
 
-  /** Add or replace a credential. Returns the stored (masked for display) copy. */
-  upsertCredential(input: Omit<Credential, "token"> & { token: string }): Credential {
+  /** Add or replace a credential. Returns the stored (masked for display) copy.
+   *
+   * While the store is locked (passphrase scheme active and no successful unlock
+   * this session), supplying a *real secret* (neither masked nor stored-cipher)
+   * is rejected. This prevents creating runtime-only credentials that cannot be
+   * durably persisted, and prevents persisting an unusable LOCKED_PERSIST_MASK
+   * for a brand-new token.
+   *
+   * Re-passing a masked or already-cipher form (e.g., to change label) is allowed.
+   */  upsertCredential(input: Omit<Credential, "token"> & { token: string }): Credential {
+    const isRealSecret = !isMasked(input.token) && !isStoredCipher(input.token);
+    if (isRealSecret && this.isLocked()) {
+      throw new Error("MUGS: cannot add or replace a real credential secret while the store is locked");
+    }
     const cred = { ...input };
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
@@ -410,51 +535,70 @@ export class MugsStore {
     this.settings.sync.obsidianConfig = { ...this.settings.sync.obsidianConfig, enabled };
   }
 
+  // The chain value is never read — only ordering matters — so its type is irrelevant.
+  private saveChain: Promise<unknown> = Promise.resolve({ ok: true });
+
   /** Persist current settings. Tokens are encrypted at rest when enabled.
    *  Refused while data.json is unreadable so a corrupt file is never overwritten
-   *  with fresh defaults (the user is told to fix or restore it first). */
-  async save(): Promise<void> {
-    if (this.loadErrorMessage) {
-      console.warn("MUGS: refusing to save over unreadable data.json — fix or restore it, then reload the plugin.");
-      return;
-    }
-    const toWrite = structuredClone(this.settings);
-    const sec = toWrite.security as SecuritySettings;
-    if (sec.encryptCredentials && sec.kdf) {
-      if (this.unlockedFlag && this.passphraseKey) {
-        // Unlocked: (re-)encrypt every readable token under the passphrase key.
-        // Undecryptable stored tokens are left untouched (the right passphrase
-        // on a later unlock can still recover them).
+   *  with fresh defaults (the user is told to fix or restore it first).
+   *
+   *  Returns an observable SaveResult. Calls are serialized.
+   */
+  async save(): Promise<SaveResult> {
+    // Enqueue: the actual work runs after the previous save completes.
+    // Clone happens *inside* the slot so later mutations are seen by later saves.
+    const myTurn = this.saveChain.then(async (): Promise<SaveResult> => {
+      if (this.loadErrorMessage) {
+        console.warn("MUGS: refusing to save over unreadable data.json — fix or restore it, then reload the plugin.");
+        return { ok: false, reason: "load-error" };
+      }
+      const toWrite = structuredClone(this.settings);
+      const sec = toWrite.security as SecuritySettings;
+      if (sec.encryptCredentials && sec.kdf) {
+        if (this.unlockedFlag && this.passphraseKey) {
+          // Unlocked: (re-)encrypt every readable token under the passphrase key.
+          // Undecryptable stored tokens are left untouched (the right passphrase
+          // on a later unlock can still recover them).
+          for (const c of toWrite.credentials) {
+            if (this.unreadableTokens.has(c.id)) continue;
+            const real = this.runtimeTokens.get(c.id) ?? c.token;
+            if (!real || isMasked(real)) continue;
+            if (real === c.token && isStoredCipher(c.token)) continue;
+            c.token = await encryptAesGcm(real, this.passphraseKey);
+          }
+        } else {
+          // Locked: no passphrase key in memory, so nothing new can be encrypted.
+          // Existing ciphertext/masks pass through unchanged; a plaintext token
+          // (e.g. a credential added while locked) is replaced with an all-bullet
+          // mask (isMasked-recognizable on the next load) instead of being leaked.
+          for (const c of toWrite.credentials) {
+            if (!isStoredCipher(c.token) && !isMasked(c.token)) {
+              c.token = LOCKED_PERSIST_MASK;
+            }
+          }
+        }
+      } else if (sec.encryptCredentials) {
+        // Legacy hint scheme (no kdf yet) — unchanged pre-migration behavior.
+        // Derive once and reuse across credentials. Undecryptable stored tokens are
+        // left untouched (the right key hint can still recover them).
+        const key = await deriveKey(keyHint(toWrite));
         for (const c of toWrite.credentials) {
           if (this.unreadableTokens.has(c.id)) continue;
           const real = this.runtimeTokens.get(c.id) ?? c.token;
-          if (!real || isMasked(real)) continue;
-          if (real === c.token && isStoredCipher(c.token)) continue;
-          c.token = await encryptAesGcm(real, this.passphraseKey);
-        }
-      } else {
-        // Locked: no passphrase key in memory, so nothing new can be encrypted.
-        // Existing ciphertext/masks pass through unchanged; a plaintext token
-        // (e.g. a credential added while locked) is replaced with an all-bullet
-        // mask (isMasked-recognizable on the next load) instead of being leaked.
-        for (const c of toWrite.credentials) {
-          if (!isStoredCipher(c.token) && !isMasked(c.token)) {
-            c.token = LOCKED_PERSIST_MASK;
-          }
+          c.token = await encryptBytes(real, key);
         }
       }
-    } else if (sec.encryptCredentials) {
-      // Legacy hint scheme (no kdf yet) — unchanged pre-migration behavior.
-      // Derive once and reuse across credentials. Undecryptable stored tokens are
-      // left untouched (the right key hint can still recover them).
-      const key = await deriveKey(keyHint(toWrite));
-      for (const c of toWrite.credentials) {
-        if (this.unreadableTokens.has(c.id)) continue;
-        const real = this.runtimeTokens.get(c.id) ?? c.token;
-        c.token = await encryptBytes(real, key);
-      }
-    }
-    await this.io.write(toWrite);
+      await this.io.write(toWrite);
+      return { ok: true };
+    });
+    // Keep the chain alive even when a write rejects: a rejected chained promise
+    // would otherwise make every later save() no-op into that same rejection
+    // instead of retrying. The caller still observes myTurn's own result.
+    this.saveChain = myTurn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return myTurn;
   }
 
   /** Resolve the live token for a credential id (runtime secret). Undecryptable
@@ -469,6 +613,22 @@ export class MugsStore {
     return stored;
   }
 }
+
+/**
+ * Result of a save attempt. Observable to callers so that sync (next wave)
+ * can never report success on a silent non-save.
+ *
+ * Contract (for Wave B):
+ * - { ok: true } — persisted (encryption applied per current runtime state).
+ * - { ok: false, reason: 'load-error' } — refused because a prior load of data.json failed;
+ *   the corrupt file was not overwritten. Callers must surface the loadError to the user.
+ *
+ * Saves are serialized (queued). A snapshot is cloned inside the execution slot
+ * (not at call time), so a later save cannot be overwritten by a stale earlier snapshot.
+ */
+export type SaveResult =
+  | { ok: true }
+  | { ok: false; reason: "load-error" };
 
 /** Throw if adding a mapping would sync a blocked `.obsidian/` folder. A dedicated
  *  `.obsidian/` scope is permitted only when obsidian config sync is enabled. */
