@@ -12,15 +12,16 @@
  * WorkingTreeWriter + ConflictStore) so the pure decision logic stays unit-testable
  * and the runtime path compiles/bundles.
  */
-import { GitClient, type GitAuth, type Author } from "../git/client";
+import { GitClient, FALLBACK_IDENTITY, type GitAuth, type Author } from "../git/client";
 import type { FolderMapping, FileConflict, SyncPolicy, ObsidianConfigPolicy, Agent } from "../types";
 import { authorRefForAgent } from "./attribution";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedChange, type FileVersions } from "./conflict";
-import type { SyncPlanKind, PendingOperation } from "../types";
+import type { SyncPlanKind, PendingOperation, RepoIdentity } from "../types";
 import { checkRelPath } from "../git/safePath";
+import { identityCloneDir, identityKey, canonicalizeRemote, withIdentityLock } from "./repoIdentity";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
@@ -226,6 +227,9 @@ export interface SyncResult {
   blocked?: BlockedFile[];
   /** ADDITIVE (S01): count of pendingOps stuck in "failed" state after recovery. */
   pendingFailures?: number;
+  /** ADDITIVE (S03): reason when kind is "blocked" (dirty/unpushed legacy clone,
+   *  cross-process lock). Recoverable — never auto-reset. */
+  blockedReason?: string;
 }
 
 export class CloneManager {
@@ -387,22 +391,134 @@ export class CloneManager {
    *  default; "push" uploads the vault onto the remote without downloading its
    *  history); `opts.onStatus` receives human-readable phase text for live UI. */
   async syncMapping(mapping: FolderMapping, repo: RepoSummary, auth?: GitAuth, opts: SyncOpts = {}): Promise<SyncResult> {
-    const dir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? repo.id);
     const branch = resolveSyncBranch(mapping, repo);
     const base = this.syncs.lastRemoteSha(mapping.id) ?? "";
     const status = opts.onStatus;
 
+    // S03 (contract §3): the clone dir is keyed by the RESOLVED RepoIdentity —
+    // provider + repo + concrete branch — never by display slugs.
+    const identity: RepoIdentity = {
+      providerId: mapping.providerId,
+      repoId: mapping.repoRef ?? repo.id,
+      branch,
+      canonicalRemote: canonicalizeRemote(repo.httpUrlToRepo),
+    };
+    let dir: string;
+    try {
+      dir = identityCloneDir(this.layout.root, identity);
+    } catch (err) {
+      return this.blockedResult(mapping.id, `unsafe clone identity: ${String(err).slice(0, 160)}`);
+    }
+
+    // S03 legacy inventory: a pre-identity clone (provider/repoSlug layout) with ANY
+    // local state — dirty worktree, staged index, or unpushed commits — BLOCKS the
+    // mapping with a recoverable explanation. It is NEVER reset to migrate. Only an
+    // ACTUAL on-disk legacy clone is inventoried (the .git/HEAD probe), so synthetic
+    // runners without a filesystem are unaffected.
+    const legacyDir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? repo.id);
+    const legacyOnDisk = await this.seams.workingTree?.readFile?.(`${legacyDir}/.git/HEAD`) !== undefined;
+    if (legacyDir !== dir && legacyOnDisk && (await this.isCloned(legacyDir))) {
+      const dirty = await this.client.at(legacyDir).workingTreePaths();
+      let unpushed = false;
+      if (branch !== "HEAD") {
+        const r = await this.client.at(legacyDir).run(["log", "--oneline", `origin/${branch}..HEAD`]);
+        unpushed = r.code === 0 && r.stdout.trim().length > 0;
+      }
+      if (dirty.length > 0 || unpushed) {
+        return this.blockedResult(
+          mapping.id,
+          `legacy clone at ${legacyDir} holds ${dirty.length} uncommitted change(s)${unpushed ? " and unpushed commits" : ""} — review and push or clean it manually; MUGS will not reset it`,
+        );
+      }
+      status?.("migrating clean legacy clone to the shared per-identity layout");
+    }
+
+    // S03 isolation: operations on one identity serialize through the in-process
+    // keyed mutex + an advisory lock file (pid+timestamp) guarding cross-process.
+    return withIdentityLock(identityKey(identity), () => this.syncMappingLocked(mapping, repo, auth, opts, identity, dir, branch, base, status));
+  }
+
+  /** The sync pass proper, run under the identity lock. */
+  private async syncMappingLocked(
+    mapping: FolderMapping,
+    repo: RepoSummary,
+    auth: GitAuth | undefined,
+    opts: SyncOpts,
+    identity: RepoIdentity,
+    dir: string,
+    branch: string,
+    base: string,
+    status?: (m: string) => void,
+  ): Promise<SyncResult> {
+    const lockFile = `${dir}/.mugs-sync.lock`;
+    const lockContents = `${process.pid}:${Date.now()}`;
+    if (this.seams.workingTree?.readFile) {
+      const existing = await this.seams.workingTree.readFile(lockFile);
+      if (existing) {
+        const existingPid = Number.parseInt(existing.split(":")[0] ?? "", 10);
+        if (Number.isFinite(existingPid) && existingPid !== process.pid) {
+          // Cross-process contention: a test process must never compete with the
+          // running plugin (contract §3). Blocked, recoverable — never stolen.
+          return this.blockedResult(mapping.id, `clone for ${identity.repoId}@${identity.branch} is locked by another process (pid ${existingPid}) — retry after it finishes`);
+        }
+      }
+      await this.seams.workingTree.writeFile(lockFile, lockContents);
+    }
+    try {
+      return await this.runSyncPass(mapping, repo, auth, opts, dir, branch, base, status);
+    } finally {
+      try {
+        await this.seams.workingTree?.deleteFile?.(lockFile);
+      } catch {
+        // a stale lock of OUR OWN pid is reclaimed on the next pass
+      }
+    }
+  }
+
+  /** A blocked result: recoverable, surfaced with a reason, never an auto-reset. */
+  private blockedResult(mappingId: string, reason: string): SyncResult {
+    return {
+      mappingId,
+      pull: "none",
+      push: false,
+      needsConflictResolution: false,
+      conflicts: [],
+      renames: [],
+      kind: "blocked",
+      counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 },
+      blocked: [],
+      blockedReason: reason,
+    };
+  }
+
+  private async runSyncPass(
+    mapping: FolderMapping,
+    repo: RepoSummary,
+    auth: GitAuth | undefined,
+    opts: SyncOpts,
+    dir: string,
+    branch: string,
+    base: string,
+    status?: (m: string) => void,
+  ): Promise<SyncResult> {
     // Bind git ops to the clone dir; without a cwd they would run in process.cwd().
     const c = this.client.withAuth(auth).at(dir);
 
     // Committer identity for every push this pass (fresh-machine safe).
     const committer = this.committerFor(mapping, auth, repo);
     const firstPush = base === "" && (opts.firstSync ?? "pull") === "push" && mapping.direction !== "pull-only";
+    let freshClone = false;
     if (!(await this.isCloned(dir))) {
       status?.(firstPush ? "first sync: cloning repository (refs only, no history download)" : "first sync: cloning repository");
       // Clear any half-cloned remains — git refuses to clone into a non-empty dir.
       this.seams.rmDir?.(dir);
       await this.client.withAuth(auth).clone(repo.httpUrlToRepo, dir, { filter: "blob:none", noCheckout: firstPush });
+      freshClone = true;
+    }
+    // S03: a branch-keyed worktree must actually BE that branch — a fresh clone
+    // defaults to the remote's HEAD branch, so re-point it at the mapping's branch.
+    if (freshClone && !firstPush && branch !== "HEAD") {
+      await c.run(["checkout", "-B", branch, `origin/${branch}`]);
     }
     if (firstPush) return this.firstSyncPush(mapping, branch, c, dir, status, committer);
 
@@ -550,20 +666,20 @@ export class CloneManager {
       );
       if (stagedPaths.length > 0) {
         status?.(base === "" ? `first sync: committing vault content (${stagedPaths.length} files)` : `committing (${stagedPaths.length} files)`);
-        await c.add(stagedPaths);
+        // Stage adds AND merge-driven removals; `add -A -- <paths>` never errors on
+        // a path the merge deleted from the working tree.
+        await this.stageScoped(c, stagedPaths);
         // S04: commit eligibility is STAGED-ONLY and SCOPED. The gate is a pathspec-
-        // scoped `git diff --cached --name-only -- <stagedPaths>`, so pre-existing
-        // index entries OUTSIDE this mapping's scope (another mapping's or a user's
-        // staged work in the shared clone) can neither enter the commit nor trip an
-        // empty one. Full porcelain stays discovery-only.
-        if (await this.hasScopedStagedChanges(c, stagedPaths)) {
-          const agent = this.pickAgent?.(mapping);
-          const author = agent ? authorRefForAgent(agent) : undefined;
-          await c.commit(
-            formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath, ownerHuman: author?.ownerHuman }),
-            author?.email ? { name: author.name, email: author.email } : undefined,
-            committer,
-          );
+        // scoped `git diff --cached --name-only -- <stagedPaths>`; the commit itself
+        // is built from a TEMPORARY index seeded with ONLY this mapping's staged
+        // entries, so unrelated index state in the shared clone (another mapping's
+        // or the user's) can never enter the commit nor trip an empty one.
+        const agent = this.pickAgent?.(mapping);
+        const authorRef = agent ? authorRefForAgent(agent) : undefined;
+        const author: Author | undefined = authorRef?.email ? { name: authorRef.name, email: authorRef.email } : undefined;
+        const message = formatCommitMessage({ op: "push", label: mapping.label, remotePath: mapping.remotePath, ownerHuman: authorRef?.ownerHuman });
+        const committed = await this.scopedCommit(c, dir, branch, stagedPaths, message, author, committer);
+        if (committed) {
           status?.("pushing to remote");
           await c.push("origin", branch);
           this.syncs.recordPush(mapping.id, await c.currentHead());
@@ -1051,6 +1167,90 @@ export class CloneManager {
       if (r.stdout.split("\u0000").some((s) => s.length > 0)) return true;
     }
     return false;
+  }
+
+  /** Stage adds AND merge-driven removals for exactly this mapping's paths.
+   *  `add -A -- <paths>` never errors on a path the merge deleted from the tree. */
+  private async stageScoped(c: GitClient, paths: string[]): Promise<void> {
+    const CHUNK = 500;
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      await c.run(["-c", "core.autocrlf=false", "add", "-A", "--", ...paths.slice(i, i + CHUNK)]);
+    }
+  }
+
+  /**
+   * S04 scoped commit: build the commit from a TEMPORARY index seeded with ONLY this
+   * mapping's staged entries, so unrelated index state in a shared clone (another
+   * mapping's in-flight staging, a user's manual add) can never enter the commit.
+   * The shared index itself is left untouched. Returns false when the scoped tree
+   * equals HEAD (nothing to commit) — the caller then falls back to an unpushed-only
+   * push. Never creates an empty commit.
+   */
+  private async scopedCommit(
+    c: GitClient,
+    dir: string,
+    branch: string,
+    paths: string[],
+    message: string,
+    author?: Author,
+    committer?: Author,
+  ): Promise<boolean> {
+    if (!(await this.hasScopedStagedChanges(c, paths))) return false;
+    const tmpIndex = `${dir}/.git/mugs-scoped-index`;
+    const ix = { env: { GIT_INDEX_FILE: tmpIndex } } as const;
+    const a = author ?? committer ?? FALLBACK_IDENTITY;
+    const cm = committer ?? author ?? FALLBACK_IDENTITY;
+    const identEnv = {
+      env: {
+        GIT_INDEX_FILE: tmpIndex,
+        GIT_AUTHOR_NAME: a.name,
+        GIT_AUTHOR_EMAIL: a.email,
+        GIT_COMMITTER_NAME: cm.name,
+        GIT_COMMITTER_EMAIL: cm.email,
+      },
+    } as const;
+    // 1) Seed the temp index from HEAD.
+    if ((await c.run(["read-tree", "HEAD"], ix)).code !== 0) return false;
+    // 2) Copy THIS mapping's staged entries from the shared index (mode/sha/stage).
+    const CHUNK = 500;
+    const listed: string[] = [];
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      const scope = paths.slice(i, i + CHUNK);
+      const r = await c.run(["-c", "core.quotePath=false", "ls-files", "-s", "-z", "--", ...scope]);
+      if (r.code !== 0) return false;
+      for (const rec of r.stdout.split("\u0000").filter((s) => s.length > 0)) {
+        const sp = rec.indexOf(" ");
+        const tab = rec.indexOf("\t");
+        if (sp < 0 || tab < 0) continue;
+        const mode = rec.slice(0, sp);
+        const rest = rec.slice(sp + 1);
+        const sha = rest.slice(0, rest.indexOf(" "));
+        const path = rec.slice(tab + 1);
+        if (!mode || !sha || !path) continue;
+        listed.push(path);
+        if ((await c.run(["update-index", "--add", "--cacheinfo", `${mode},${sha},${path}`], ix)).code !== 0) return false;
+      }
+    }
+    // 3) Staged DELETIONS (a path absent from the shared index) are removed from the
+    //    temp index so the commit records the removal.
+    const deletions = paths.filter((p) => !listed.includes(p));
+    for (const p of deletions) {
+      await c.run(["update-index", "--force-remove", "--", p], ix);
+    }
+    // 4) Write the scoped tree; skip the commit when it equals HEAD (empty change).
+    const wt = await c.run(["write-tree"], ix);
+    if (wt.code !== 0) return false;
+    const tree = wt.stdout.trim();
+    const headTree = await c.run(["rev-parse", "HEAD^{tree}"]);
+    if (headTree.code === 0 && headTree.stdout.trim() === tree) return false;
+    // 5) commit-tree + move the branch. The shared index/worktree stay as they were.
+    const ct = await c.run(["commit-tree", tree, "-p", "HEAD", "-m", message], identEnv);
+    if (ct.code !== 0) return false;
+    const commitSha = ct.stdout.trim();
+    const ref = branch === "HEAD" ? "HEAD" : `refs/heads/${branch}`;
+    const ur = await c.run(["update-ref", ref, commitSha, "HEAD"].slice(0, ref === "HEAD" ? 3 : 4), identEnv);
+    if (ur.code !== 0) return false;
+    return true;
   }
 
   /** Pull the clone's current in-scope content into the vault folder: writes for

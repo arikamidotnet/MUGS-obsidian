@@ -4,7 +4,8 @@ import type { Provider, RepoSummary } from "../providers/types";
 import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
-import { syncAllMappings, storeWritableAccessor } from "./driver";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
+import { identityCloneDir, canonicalizeRemote } from "./repoIdentity";
 import { EditorOpenGuard } from "./editorOpen";
 import { resumeKey } from "./resume";
 import { MugsStore, MemoryIO } from "../store";
@@ -153,6 +154,11 @@ function spyAccessor(base?: string): { accessor: Parameters<typeof syncAllMappin
 }
 
 const CLONE_ROOT = "/vault/.mugs-clones";
+
+/** S03: the identity-keyed clone dir a fake-runner pass uses for a given repo id.
+ *  fakeRepo(id) exposes https://example.com/<id>.git; branch resolves to main. */
+const idDir = (repoId: string): string =>
+  identityCloneDir(CLONE_ROOT, { providerId: "c1", repoId, branch: "main", canonicalRemote: canonicalizeRemote(`https://example.com/${repoId}.git`) });
 
 describe("syncAllMappings — skips", () => {
   it("skips a mapping with no matching credential", async () => {
@@ -575,12 +581,13 @@ describe("syncAllMappings — sync outcomes", () => {
     });
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "ok", pull: "rebase", push: true, newRemoteSha: "L1" });
     // Clean merge written into the clone's working tree at <cloneRoot>/<providerId>/<id>/<path>.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
     // The branch is re-pointed at the remote tip before staging, so the commit + push
     // land as a fast-forward instead of on the old diverged HEAD (non-FF rejection).
     const resetIdx = calls.findIndex((c) => c.includes("reset"));
     expect(calls[resetIdx]?.includes("origin/main")).toBe(true);
-    expect(calls.findIndex((c) => c.includes("commit"))).toBeGreaterThan(resetIdx);
+    // S04: the commit is built via commit-tree over a scoped temp index.
+    expect(calls.findIndex((cl) => cl.some((a) => a.startsWith("commit")))).toBeGreaterThan(resetIdx);
     expect(store.getState()).toEqual([]); // no conflicts recorded
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]); // post-push tip recorded
@@ -653,7 +660,7 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
     });
     // Only the in-scope file is merged/written; the excluded .log is dropped.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/a.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/a.md`, J(["A", "b", "C"])]]);
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
   });
 
@@ -848,7 +855,7 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
     // Clone working-tree writes are staging material and never clobber the user's
     // open editor (the vault-side write-back guard lives in mirrorPull, in vault
     // path space). The old repo-space check here never matched and was dead.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
   });
 
@@ -877,7 +884,7 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
       workingTree,
       editorOpen,
     });
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
   });
 });
 
@@ -908,7 +915,7 @@ describe("syncAllMappings — .obsidian/ scope gating (Area 9)", () => {
       obsidianConfig: { enabled: true, entries: [] },
     });
     // Only the vault-wide theme is merged/written; personal settings.json stays local.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("obs")}/.obsidian/themes/x.css`, J(["A", "b", "C"])]]);
   });
 
   it("syncs nothing under .obsidian/ when the feature is disabled (repo-side config must never clobber a teammate's config)", async () => {
@@ -985,7 +992,7 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
 
 describe("syncAllMappings — agent attribution on push (Area 10)", () => {
   it("attributes an agent's push to that agent with an On-behalf-of trailer", async () => {
-    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] }); // clone + unpushed
+    const { runner, calls, callOpts } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] }); // clone + unpushed
     const actingAgent: Agent = { id: "agent-1", displayName: "Research Bot", committerEmail: "bot@local", ownerHuman: "Ada" };
     await syncAllMappings({
       mappings: [mapping()],
@@ -997,12 +1004,17 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor, // unpushed -> push
       pickAgent: () => actingAgent,
     });
-    const commitCall = calls.find((c) => c.includes("commit"))!;
+    // S04: the commit is built via commit-tree over a scoped temp index (args are
+    // auth-prefixed, so match the verb anywhere in the argv).
+    const idx = calls.findIndex((cl) => cl.includes("commit-tree"));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const commitCall = calls[idx];
     // Message carries the on-behalf-of trailer for the owner…
     expect(commitCall.join(" ")).toContain("On-behalf-of: Ada");
-    // …and the commit is authored by the agent's committer identity.
-    const authorIdx = commitCall.indexOf("--author");
-    expect(commitCall[authorIdx + 1]).toBe("Research Bot <bot@local>");
+    // …and the commit is authored by the agent's committer identity (via env).
+    const env = callOpts[idx]?.env ?? {};
+    expect(env["GIT_AUTHOR_NAME"]).toBe("Research Bot");
+    expect(env["GIT_AUTHOR_EMAIL"]).toBe("bot@local");
   });
 
   it("leaves attribution to git defaults when no agent acts on the mapping", async () => {
@@ -1017,9 +1029,9 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor,
       pickAgent: () => undefined, // no agent -> plain sync commit
     });
-    const commitCall = calls.find((c) => c.includes("commit"))!;
-    expect(commitCall.join(" ")).not.toContain("On-behalf-of");
-    expect(commitCall).not.toContain("--author");
+    const idx = calls.findIndex((cl) => cl.includes("commit-tree"));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(calls[idx].join(" ")).not.toContain("On-behalf-of");
   });
 });
 

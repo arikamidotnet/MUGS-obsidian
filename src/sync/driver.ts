@@ -29,7 +29,9 @@ import type { SyncPolicy } from "../types";
 export interface SyncOutcome {
   mappingId: string;
   label: string;
-  status: "ok" | "conflict" | "skipped";
+  /** "blocked" is ADDITIVE (S03): a recoverable stop (dirty/unpushed legacy clone,
+   *  cross-process lock) — surfaced with `reason`, never auto-reset. */
+  status: "ok" | "conflict" | "skipped" | "blocked";
   /** Human-readable reason when skipped (e.g. "no credential", "repo not found"). */
   reason?: string;
   pull?: SyncResult["pull"];
@@ -192,7 +194,9 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
       const remotePath = rawUrl.startsWith("file://") ? rawUrl.slice("file://".length) : rawUrl;
       repos = [
         {
-          id: mapping.id,
+          // S03: honor a pinned repoRef so scoped links over one local repo share a
+          // single identity-keyed clone; legacy links keep the mapping id as the key.
+          id: mapping.repoRef ?? mapping.id,
           name: mapping.label ?? mapping.id,
           pathWithNamespace: mapping.remotePath,
           httpUrlToRepo: remotePath,
@@ -232,6 +236,11 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
         uncertain: deps.watcherUncertain,
       };
       const result = await manager.syncMapping(mapping, repo, auth, sopts);
+      if (result.kind === "blocked") {
+        // S03: recoverable stop — surfaced, never silently retried into a reset.
+        record(outcome(mapping, "blocked", { reason: result.blockedReason, kind: result.kind, counts: result.counts }));
+        continue;
+      }
       if (result.conflicts.length > 0) {
         deps.lastSync.recordConflict?.(mapping.id);
         record(outcome(mapping, "conflict", { pull: result.pull, conflicts: result.conflicts, kind: result.kind, counts: result.counts, blocked: result.blocked }));
