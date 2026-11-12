@@ -13,7 +13,7 @@
  * seams (ChildProcessRunner, store-backed accessor) and calls this from the ribbon
  * and command.
  */
-import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy, Agent } from "../types";
+import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy, Agent, PendingOperation, SyncPlanKind } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
 import type { HttpTransport } from "../providers/http";
 import type { ProviderInput } from "../providers/factory";
@@ -29,7 +29,9 @@ import type { SyncPolicy } from "../types";
 export interface SyncOutcome {
   mappingId: string;
   label: string;
-  status: "ok" | "conflict" | "skipped";
+  /** "blocked" is ADDITIVE (S03): a recoverable stop (dirty/unpushed legacy clone,
+   *  cross-process lock) — surfaced with `reason`, never auto-reset. */
+  status: "ok" | "conflict" | "skipped" | "blocked";
   /** Human-readable reason when skipped (e.g. "no credential", "repo not found"). */
   reason?: string;
   pull?: SyncResult["pull"];
@@ -37,6 +39,14 @@ export interface SyncOutcome {
   newRemoteSha?: string;
   /** Files that diverged and need manual resolution (present when status is "conflict"). */
   conflicts?: FileConflict[];
+  /** ADDITIVE (contract §2): plan kind — "idle" for a verified no-op (never "ok" implying work). */
+  kind?: SyncPlanKind;
+  /** ADDITIVE (contract §2): plan counts. */
+  counts?: SyncResult["counts"];
+  /** ADDITIVE (S02/§9): per-file blocked outcomes with redacted reasons. */
+  blocked?: SyncResult["blocked"];
+  /** ADDITIVE (S01): pendingOps stuck in "failed" after recovery. */
+  pendingFailures?: number;
 }
 
 /** Options accepted by the injected provider factory (mirrors buildProvider). */
@@ -92,6 +102,19 @@ export interface SyncDriverDeps {
   /** Optional: notified when a legacy mapping (no repoRef) resolves to a repo, so the
    *  caller can backfill repoRef — that pins the shared clone dir and fixes UI paths. */
   onRepoResolved?: (mappingId: string, repoRef: string) => void;
+  /**
+   * ADDITIVE (Wave B, contract §2 / §7 / §11):
+   * When true, perform discovery + planning only; return plans and counts but perform
+   * ZERO mutations (no clone writes, no vault writes/deletes, no add/commit/push).
+   * Used by live canaries and read-only previews.
+   */
+  dryRun?: boolean;
+  /** Optional cancellation signal threaded to all GitRunOpts (contract §7). */
+  signal?: AbortSignal;
+  /** ADDITIVE (contract §8 / E02): watcher uncertainty (startup pass, lost events,
+   *  changed configFingerprint). Disables the steady-state stat shortcut for the pass
+   *  so a same-size/same-mtime replacement is re-verified, never a false success. */
+  watcherUncertain?: boolean;
 }
 
 /**
@@ -114,8 +137,16 @@ export function resolveRepo(
   return undefined;
 }
 
-/** Run one sync pass over every mapping and return a per-mapping outcome list. */
-export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome[]> {
+/** Options for syncAllMappings (ADDITIVE per contract). */
+export interface SyncAllOptions {
+  dryRun?: boolean;
+  signal?: AbortSignal;
+}
+
+/** Run one sync pass over every mapping and return a per-mapping outcome list.
+ *  Second parameter is ADDITIVE (opts) for dryRun + cancellation (contract §2, §7, §11).
+ */
+export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions = {}): Promise<SyncOutcome[]> {
   const client = new GitClient(deps.runner);
   const layout = { root: deps.cloneRoot };
   const manager = new CloneManager(client, layout, deps.lastSync, {
@@ -163,7 +194,9 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
       const remotePath = rawUrl.startsWith("file://") ? rawUrl.slice("file://".length) : rawUrl;
       repos = [
         {
-          id: mapping.id,
+          // S03: honor a pinned repoRef so scoped links over one local repo share a
+          // single identity-keyed clone; legacy links keep the mapping id as the key.
+          id: mapping.repoRef ?? mapping.id,
           name: mapping.label ?? mapping.id,
           pathWithNamespace: mapping.remotePath,
           httpUrlToRepo: remotePath,
@@ -195,22 +228,30 @@ export async function syncAllMappings(deps: SyncDriverDeps): Promise<SyncOutcome
     if (!mapping.repoRef) deps.onRepoResolved?.(mapping.id, repo.id);
 
     try {
-      const opts: SyncOpts = {
+      const sopts: SyncOpts = {
         firstSync: deps.firstSyncDirection ?? "pull",
         onStatus: deps.onStatus,
+        dryRun: opts.dryRun,
+        signal: opts.signal,
+        uncertain: deps.watcherUncertain,
       };
-      const result = await manager.syncMapping(mapping, repo, auth, opts);
+      const result = await manager.syncMapping(mapping, repo, auth, sopts);
+      if (result.kind === "blocked") {
+        // S03: recoverable stop — surfaced, never silently retried into a reset.
+        record(outcome(mapping, "blocked", { reason: result.blockedReason, kind: result.kind, counts: result.counts }));
+        continue;
+      }
       if (result.conflicts.length > 0) {
         deps.lastSync.recordConflict?.(mapping.id);
-        record(outcome(mapping, "conflict", { pull: result.pull, conflicts: result.conflicts }));
+        record(outcome(mapping, "conflict", { pull: result.pull, conflicts: result.conflicts, kind: result.kind, counts: result.counts, blocked: result.blocked }));
         continue;
       }
       if (result.needsConflictResolution) {
         deps.lastSync.recordConflict?.(mapping.id);
-        record(outcome(mapping, "conflict", { pull: result.pull }));
+        record(outcome(mapping, "conflict", { pull: result.pull, kind: result.kind, counts: result.counts }));
         continue;
       }
-      record(outcome(mapping, "ok", { pull: result.pull, push: result.push, newRemoteSha: result.newRemoteSha }));
+      record(outcome(mapping, "ok", { pull: result.pull, push: result.push, newRemoteSha: result.newRemoteSha, kind: result.kind, counts: result.counts, blocked: result.blocked, pendingFailures: result.pendingFailures }));
     } catch (error) {
       skip(mapping, errorMessage(error));
     }
@@ -241,6 +282,22 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
     vaultPopulated: (id) => store.getSettings().lastSync[id]?.vaultPopulated,
     recordVaultSync: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, vaultPopulated: true })),
+    // Newest completed pull/push — the steady-state shortcut's mtime reference.
+    lastCompletedAt: (id) => {
+      const s = store.getSettings().lastSync[id];
+      const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
+      return at > 0 ? at : undefined;
+    },
+    // Per-file fingerprints recorded at the last completed pass — the shortcut's
+    // change detector pairs an old mtime with an EXACT stat match against this.
+    contentSnapshot: (id) => store.getSettings().lastSync[id]?.contentSnapshot,
+    recordContentSnapshot: (id, snap) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, contentSnapshot: snap })),
+    // ADDITIVE (S01): durable pendingOps + proven correspondence round-trip through
+    // the store so deferred work and the proven sync point survive restarts.
+    pendingOps: (id) => store.getSettings().lastSync[id]?.pendingOps,
+    recordPendingOps: (id, ops) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, pendingOps: ops })),
+    recordCorrespondence: (id, sha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, correspondenceSha: sha })),
+    recordCloneDir: (id, dir) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, cloneDir: dir })),
   };
 }
 

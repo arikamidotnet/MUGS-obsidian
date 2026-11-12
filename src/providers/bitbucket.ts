@@ -15,7 +15,7 @@
  */
 import type { Provider, RepoSummary, BranchSummary, Member } from "./types";
 import { repoSummarySchema, branchSummarySchema, memberSchema, type MemberRole } from "./schema";
-import { FetchTransport, withQuery, type HttpTransport } from "./http";
+import { FetchTransport, withQuery, type HttpTransport, safeResolveNext, redactUrl } from "./http";
 import { cloneUrlFor, resolveDefaultBranch } from "./repoUrls";
 
 /** Bitbucket participant roles mapped to the normalized MUGS member role. */
@@ -81,21 +81,37 @@ interface BitbucketRef {
 /**
  * Paginate a Bitbucket /2.0 list that pages via a JSON `next` cursor, returning
  * the concatenated `values` arrays. Callers cast to their element type.
+ * C04: validates every `next` cursor against the approved base origin and never forwards
+ * auth headers to cross-origin next URLs. Redacts URLs in error messages.
  */
 async function paginateValues(
   transport: HttpTransport,
   url: string,
   headers: Record<string, string>,
+  baseForOrigin: string,
 ): Promise<unknown[]> {
   const acc: unknown[] = [];
   let next: string | null = url;
   while (next) {
-    // Cast the body to a page shape; typed at the call sites.
-    const res = await transport.get<unknown>(next, { headers });
-    if (res.status >= 400) throw new Error(`Bitbucket ${res.status} error paginating ${next}`);
+    // Gate headers: drop auth if the next URL is cross-origin.
+    let sendHeaders = headers;
+    try {
+      if (new URL(next).origin !== new URL(baseForOrigin).origin) {
+        const { Accept, accept, ...rest } = headers as any;
+        sendHeaders = Accept || accept ? { Accept: (Accept || accept) as string } : {};
+      }
+    } catch {
+      sendHeaders = {};
+    }
+
+    const res = await transport.get<unknown>(next, { headers: sendHeaders });
+    if (res.status >= 400) throw new Error(`Bitbucket ${res.status} error paginating (${redactUrl(next)})`);
     const page = res.body as { values?: unknown[]; next?: string | null } | undefined;
     if (Array.isArray(page?.values)) acc.push(...page.values);
-    next = page?.next ?? null;
+
+    // Validate and resolve the JSON `next` cursor using the current page as resolution base.
+    const candidate = safeResolveNext(page?.next ?? null, next);
+    next = candidate;
   }
   return acc;
 }
@@ -162,7 +178,7 @@ export class BitbucketProvider implements Provider {
     }
     // Bitbucket pages with `pagelen` (per_page is ignored; default 10/page).
     const url = withQuery(`${this.baseUrl}/2.0/repositories`, { include_public: false, pagelen: 100 });
-    const raw = (await paginateValues(this.transport, url, this.headers())) as BitbucketRepo[];
+    const raw = (await paginateValues(this.transport, url, this.headers(), this.baseUrl)) as BitbucketRepo[];
     return raw.map((r) => mapProject(r));
   }
 
@@ -186,7 +202,7 @@ export class BitbucketProvider implements Provider {
 
   async getMembers(repoId: string): Promise<Member[]> {
     const url = withQuery(`${this.baseUrl}/2.0/repositories/${encodeRepoPath(repoId)}/participants`, { pagelen: 100 });
-    const raw = (await paginateValues(this.transport, url, this.headers())) as BitbucketParticipant[];
+    const raw = (await paginateValues(this.transport, url, this.headers(), this.baseUrl)) as BitbucketParticipant[];
     return raw.map((p) => mapParticipant(p));
   }
 
@@ -201,13 +217,13 @@ export class BitbucketProvider implements Provider {
     let writeCapable = DEFAULT_WRITE_CAPABLE;
     if (this.actingUsername) {
       const participantsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/participants`, { pagelen: 100 });
-      const participants = (await paginateValues(this.transport, participantsUrl, this.headers())) as BitbucketParticipant[];
+      const participants = (await paginateValues(this.transport, participantsUrl, this.headers(), this.baseUrl)) as BitbucketParticipant[];
       const me = participants.find((p) => p.user?.username === this.actingUsername);
       writeCapable = me ? WRITE_CAPABLE_ROLES.has(me.role) : DEFAULT_WRITE_CAPABLE;
     }
 
     const refsUrl = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/refs`, { kind: "branch", pagelen: 100 });
-    const refs = (await paginateValues(this.transport, refsUrl, this.headers())) as BitbucketRef[];
+    const refs = (await paginateValues(this.transport, refsUrl, this.headers(), this.baseUrl)) as BitbucketRef[];
     return refs.map((b) =>
       branchSummarySchema.parse({
         name: b.name,
@@ -222,7 +238,7 @@ export class BitbucketProvider implements Provider {
   async listDirectories(repoId: string, path = ""): Promise<string[]> {
     const encoded = encodeRepoPath(repoId);
     const url = withQuery(`${this.baseUrl}/2.0/repositories/${encoded}/src`, path ? { path } : {});
-    const raw = (await paginateValues(this.transport, url, this.headers())) as Array<{ type: string; path: string }>;
+    const raw = (await paginateValues(this.transport, url, this.headers(), this.baseUrl)) as Array<{ type: string; path: string }>;
     const dirs = raw.filter((c) => c.type === "tracked").map((c) => c.path.split("/").pop() ?? "");
     return [...new Set(dirs)].sort();
   }

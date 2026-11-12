@@ -20,6 +20,11 @@ export interface MapRow {
   lastPushAt?: number;
   /** Most recent pull time (ms epoch), if known. */
   lastPullAt?: number;
+  /** Set when sync cannot run for this mapping at all (e.g. its credential was
+   *  deleted) — the Map view renders the row as skipped with this on hover. */
+  skipReason?: string;
+  /** Unresolved conflict files awaiting manual resolution, when > 0. */
+  conflictCount?: number;
 }
 
 /** Supplies the data the Map view renders. */
@@ -32,12 +37,32 @@ export interface DiffQuery {
   mappingId: string;
   /** Optional explicit "to" ref (defaults to HEAD). */
   ref?: string;
+  /** Explicit UI comparisons always end at HEAD; legacy ref remains a "to" ref. */
+  mode?: "since-sync" | "previous" | "custom";
+  olderRef?: string;
 }
+
+/** Precise outcome behind a Diff result — the view renders a different message per case.
+ *  `git-error` exists because a failed diff must never be reported as "no changes". */
+export type DiffOutcome = "no-mapping" | "no-clone" | "no-baseline" | "git-error" | "identical" | "changed";
 
 export interface DiffResult {
   diffText: string;
   authorsByFile: AuthorsByFile;
-}
+  /** Resolved baseline ref or SHA used for the comparison, when known. */
+  baseRef?: string;
+  outcome: DiffOutcome;
+  /** Human-readable detail for failure outcomes (e.g. git's stderr). */
+  detail?: string;
+  /** Truthful label for the "from" endpoint per contract DiffEndpoint kinds. */
+  fromLabel?: string;
+  /** Label for the "to" side (e.g. "HEAD (committed snapshot)"). */
+  toLabel?: string;
+  /** Caveat when the shown diff is a committed snapshot only. */
+  note?: string;
+  /** Classified error for distinct offline/auth messages. */
+  errorKind?: "auth" | "timeout" | "missing-ref" | "other";
+} 
 
 /** Supplies the data the Diff view renders. */
 export interface DiffDataSource {

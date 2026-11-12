@@ -1,0 +1,130 @@
+name: Release
+
+# Gated release pipeline (R03).
+# - Triggered only via workflow_dispatch (never auto on tag push).
+# - Build job runs required checks on the EXACT revision (github.sha).
+# - Artifacts (main.js, manifest.json, styles.css) are built once and uploaded with SHA256 checksums.
+# - Publish job is separately gated (needs: build) and uses minimal permissions.
+# - Provenance metadata (commit SHA, version) is included in the release body.
+# - This job does NOT publish to npm or any registry; it creates a GitHub Release only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (must exactly match package.json and manifest.json)'
+        required: true
+        type: string
+      create_release:
+        description: 'Create the GitHub Release from the built artifacts'
+        required: true
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Verify version consistency
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: node scripts/check-release.js "$RELEASE_VERSION"
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p dist
+          cp main.js manifest.json styles.css dist/
+          cd dist
+          sha256sum main.js manifest.json styles.css > checksums.txt
+          cat checksums.txt
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ github.sha }}
+          path: dist/
+          retention-days: 7
+
+  publish:
+    needs: build
+    # Only run if the caller explicitly requested release creation.
+    if: ${{ github.event.inputs.create_release == 'true' }}
+    runs-on: ubuntu-latest
+    # Minimal permissions: only contents:write to create a release.
+    permissions:
+      contents: write
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-${{ github.sha }}
+          path: dist/
+
+      - name: Create GitHub Release with provenance
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          SHA="$RELEASE_SHA"
+          (cd dist && sha256sum --check checksums.txt)
+          NOTES_FILE="$(mktemp)"
+
+          cat > "$NOTES_FILE" <<EOF
+          MUGS — Multi-User Git Sync v${VERSION}
+
+          Built from commit: ${SHA}
+          CI run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Artifacts (SHA256):
+          $(cat dist/checksums.txt)
+
+          This release was created by the gated release workflow.
+          Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
+
+          Highlights:
+          - Per-file Diff browsing with explicit comparison modes, line counts, and file-level Git authors.
+          - Direction-safe sync, editor-aware deferred operations, scoped commits, and recoverable conflicts.
+          - Serialized settings persistence and safer credential migration and metadata edits.
+
+          Diff compares committed snapshots; unsynced vault edits are not included.
+          Binary text reconciliation is blocked rather than risking content corruption.
+          Back up vault content, plugin data, and clones before upgrading. Rollback requires
+          compatible settings/state as well as the previous plugin assets; do not delete dirty clones.
+          EOF
+
+          gh release create "${VERSION}" \
+            --target "$SHA" \
+            --title "${VERSION} — reliable sync and per-file Diff" \
+            --notes-file "$NOTES_FILE" \
+            dist/main.js \
+            dist/manifest.json \
+            dist/styles.css \
+            dist/checksums.txt

@@ -3,7 +3,7 @@ import { setMugsContext, getMugsContext, __resetMugsContextForTests, type MugsCo
 
 const ctx: MugsContext = {
   map: { getRows: async () => [] },
-  diff: { getDiff: async () => ({ diffText: "", authorsByFile: {} }) },
+diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, outcome: "changed" as const }) },
   conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
 };
 

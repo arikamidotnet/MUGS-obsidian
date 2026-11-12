@@ -4,7 +4,8 @@ import type { Provider, RepoSummary } from "../providers/types";
 import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
-import { syncAllMappings, storeWritableAccessor } from "./driver";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
+import { identityCloneDir, canonicalizeRemote } from "./repoIdentity";
 import { EditorOpenGuard } from "./editorOpen";
 import { resumeKey } from "./resume";
 import { MugsStore, MemoryIO } from "../store";
@@ -58,6 +59,8 @@ interface ContentScenario {
   /** Epoch seconds served by every `git log -1 --format=%ct <ref> -- <path>` call
    *  (the remote-side recency input for automatic conflict resolution). */
   pathLogTimeSecs?: number;
+  /** Paths served by `git ls-files` (the clone-side tracked-file list). */
+  lsFiles?: string[];
 }
 
 /** A git runner that never touches disk: rev-parse/merge-base/show/diff are canned,
@@ -96,7 +99,10 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         const ref = refPath.slice(0, idx);
         const path = refPath.slice(idx + 1);
         const content = showMap[ref]?.[path];
-        if (content === undefined) return { code: 128, stdout: "", stderr: "" };
+        // Mimic real git's stderr for a path missing from the tree — showTyped's
+        // classifier maps this exact message to {kind:"absent"} (an error result
+        // must stay reserved for genuine read failures, S02).
+        if (content === undefined) return { code: 128, stdout: "", stderr: `fatal: path '${path}' does not exist in '${ref}'` };
         return { code: 0, stdout: content, stderr: "" };
       }
       if (cmd === "status") return { code: 0, stdout: changedPaths.map((p) => ` M ${p}`).join("\n"), stderr: "" }; // porcelain (push staging)
@@ -105,6 +111,7 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
       }
       if (cmd === "log") return { code: 0, stdout: o.pathLogTimeSecs !== undefined ? String(o.pathLogTimeSecs) : "", stderr: "" };
+      if (cmd === "ls-files") return { code: 0, stdout: (o.lsFiles ?? []).join("\n"), stderr: "" };
       return { code: 0, stdout: "", stderr: "" }; // clone / fetch / ls-files / reset / add / commit / push
     },
   };
@@ -147,6 +154,11 @@ function spyAccessor(base?: string): { accessor: Parameters<typeof syncAllMappin
 }
 
 const CLONE_ROOT = "/vault/.mugs-clones";
+
+/** S03: the identity-keyed clone dir a fake-runner pass uses for a given repo id.
+ *  fakeRepo(id) exposes https://example.com/<id>.git; branch resolves to main. */
+const idDir = (repoId: string): string =>
+  identityCloneDir(CLONE_ROOT, { providerId: "c1", repoId, branch: "main", canonicalRemote: canonicalizeRemote(`https://example.com/${repoId}.git`) });
 
 describe("syncAllMappings — skips", () => {
   it("skips a mapping with no matching credential", async () => {
@@ -330,7 +342,10 @@ describe("syncAllMappings — sync outcomes", () => {
       runner,
       lastSync: accessor,
     });
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1",
+      kind: "apply-remote", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.pull).toEqual([["m1", "R1"]]);
     expect(state.push).toEqual([]);
     expect(state.conflict).toEqual([]);
@@ -355,7 +370,10 @@ describe("syncAllMappings — sync outcomes", () => {
   expect(cloneCall).toContain("https://example.com/m1.git");
     // A pass that pushed records the POST-push tip as the remote baseline (the
     // pre-push remoteSha left the 3-way base one commit stale).
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1",
+      kind: "publish-local", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]);
   });
@@ -431,13 +449,109 @@ describe("syncAllMappings — sync outcomes", () => {
       policy: { ...DEFAULT_SYNC_POLICY }, // autoMerge + recencyWins on, "both" fallback
       vaultMirror,
     });
-    // Overlapping add/add auto-resolved by recency: the newer vault copy wins.
+    // S06 (contract §4): the engine NEVER silently auto-resolves. The genuine
+    // add/add divergence is recorded and surfaced; the recency INPUTS are still
+    // gathered (both timestamps) so the UI can offer one-click suggestions.
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
+    expect(store.getState()).toEqual([
+      { path: "todo.md", base: undefined, ours: "a\nLOCAL\nc\n", theirs: "a\nREMOTE\nc\n", oursSavedAt: OURS_MS, theirsModifiedAt: 1_000_000_000 },
+    ]);
+    // Nothing was auto-written into the clone and nothing was committed/pushed.
+    expect(writes).toEqual([]);
+    expect(calls.some((cl) => cl.includes("commit"))).toBe(false);
+  });
+
+  it("skips per-file reads and shows entirely on an unchanged push-only pass (steady-state shortcut)", async () => {
+    // Regression: every pass re-read every vault file and ran `git show` per
+    // in-scope path (~2 minutes on a 2,000-file vault — the status bar was busy
+    // ~40% of the time). With the remote tip unchanged and vault mtimes
+    // predating the last completed pass, the merge universe is empty and the
+    // pass does no content work at all.
+    const LAST_DONE = Date.now();
+    const reads: string[] = [];
+    const FP: [number, number] = [LAST_DONE - 1000, 7];
+    const vaultMirror = {
+      list: async () => ["todo.md"],
+      read: async (_folder: string, rel: string) => { reads.push(rel); return "a\nb\nc\n"; },
+      write: async () => {},
+      remove: async () => {},
+      mtime: async () => LAST_DONE - 1000, // untouched since the last pass
+      stat: async () => ({ mtime: FP[0], size: FP[1] }),
+    };
+    const { runner, calls } = makeRunner({
+      head: "R1", remote: "R1", ancestor: true, cloned: true, // remote tip == baseline
+      lsFiles: ["todo.md"], // the clone tracks the file — without the shortcut it would be shown
+    });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping({ direction: "push-only" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: {
+        lastRemoteSha: () => "R1",
+        recordPull: () => undefined,
+        recordPush: () => undefined,
+        recordConflict: () => undefined,
+        lastCompletedAt: () => LAST_DONE,
+        // The snapshot recorded at the last completed pass matches the file's
+        // current stat — this pairing (not mtime alone) is what permits the skip.
+        contentSnapshot: () => ({ "todo.md": FP }),
+        recordContentSnapshot: () => undefined,
+      },
+      vaultMirror,
+    });
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
-    expect(store.getState()).toEqual([]); // nothing surfaced for manual resolve
-    // The ours-winner was written into the clone working tree and staged for push.
-    expect(writes).toEqual([[`${CLONE_ROOT}/c1/m1/todo.md`, "a\nLOCAL\nc\n"]]);
-    expect(calls.some((cl) => cl.includes("add") && cl.includes("todo.md"))).toBe(true);
-    expect(calls.some((cl) => cl.includes("commit"))).toBe(true);
+    // No content work at all: no `git show`, no vault reads — even though the
+    // clone tracks the file (ls-files listed it) and the mirror has it.
+    expect(calls.some((cl) => cl.includes("show"))).toBe(false);
+    expect(reads).toEqual([]);
+  });
+
+  it("re-reads a file whose old mtime no longer matches the recorded snapshot (restored file)", async () => {
+    // The mtime-only shortcut skipped files restored from a backup (old mtime, new
+    // content). With the snapshot rule, a stat mismatch forces the full safe path.
+    const LAST_DONE = Date.now();
+    const reads: string[] = [];
+    const vaultMirror = {
+      list: async () => ["todo.md"],
+      read: async (_folder: string, rel: string) => { reads.push(rel); return "a\nRESTORED\nc\n"; },
+      write: async () => {},
+      remove: async () => {},
+      mtime: async () => LAST_DONE - 1000, // OLD mtime...
+      stat: async () => ({ mtime: LAST_DONE - 1000, size: 12 }), // ...but the size no longer matches the snapshot
+    };
+    const { runner, calls } = makeRunner({
+      head: "R1", remote: "R1", ancestor: true, cloned: true,
+      lsFiles: ["todo.md"],
+      showMap: {
+        R1: { "todo.md": "a\nb\nc\n" },
+        HEAD: { "todo.md": "a\nb\nc\n" },
+        "origin/main": { "todo.md": "a\nb\nc\n" },
+      },
+    });
+    await syncAllMappings({
+      mappings: [mapping({ direction: "push-only" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: {
+        lastRemoteSha: () => "R1",
+        recordPull: () => undefined,
+        recordPush: () => undefined,
+        recordConflict: () => undefined,
+        lastCompletedAt: () => LAST_DONE,
+        // Snapshot says size 7; the file stats size 12 — must NOT be skipped.
+        contentSnapshot: () => ({ "todo.md": [LAST_DONE - 1000, 7] }),
+        recordContentSnapshot: () => undefined,
+      },
+      vaultMirror,
+    });
+    expect(reads).toEqual(["todo.md"]); // the restored file was actually read
+    expect(calls.some((cl) => cl.includes("show"))).toBe(true);
   });
 
   it("auto-merges a clean divergence into the working tree and pushes", async () => {
@@ -467,12 +581,13 @@ describe("syncAllMappings — sync outcomes", () => {
     });
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", label: "Notes", status: "ok", pull: "rebase", push: true, newRemoteSha: "L1" });
     // Clean merge written into the clone's working tree at <cloneRoot>/<providerId>/<id>/<path>.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
     // The branch is re-pointed at the remote tip before staging, so the commit + push
     // land as a fast-forward instead of on the old diverged HEAD (non-FF rejection).
     const resetIdx = calls.findIndex((c) => c.includes("reset"));
     expect(calls[resetIdx]?.includes("origin/main")).toBe(true);
-    expect(calls.findIndex((c) => c.includes("commit"))).toBeGreaterThan(resetIdx);
+    // S04: the commit is built via commit-tree over a scoped temp index.
+    expect(calls.findIndex((cl) => cl.some((a) => a.startsWith("commit")))).toBeGreaterThan(resetIdx);
     expect(store.getState()).toEqual([]); // no conflicts recorded
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]); // post-push tip recorded
@@ -545,7 +660,7 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
     });
     // Only the in-scope file is merged/written; the excluded .log is dropped.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/a.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/a.md`, J(["A", "b", "C"])]]);
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
   });
 
@@ -578,7 +693,10 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
       runner,
       lastSync: accessor,
     });
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1",
+      kind: "apply-remote", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.pull).toEqual([["m1", "R1"]]);
     expect(state.push).toEqual([]);
   });
@@ -599,7 +717,10 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
   const cloneCall = calls.find((c) => c.includes("clone"));
     const cloneIdx = cloneCall!.indexOf("clone");
     expect(cloneCall![cloneIdx + 1]).toBe("/tmp/shared.git");
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1",
+      kind: "publish-local", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]);
   });
@@ -635,7 +756,7 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
 });
 
 describe("syncAllMappings — sync outcomes", () => {
-  it("auto-resolves a genuine conflict via injected policy instead of surfacing it", async () => {
+  it("surfaces a genuine conflict even with an injected policy (S06: no silent auto-resolution)", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
     const store = memoryConflictStore();
@@ -661,11 +782,16 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
       policy: { ...DEFAULT_SYNC_POLICY, defaultResolution: "theirs" },
     });
-    // Auto-resolved to theirs and written into the working tree; NOT surfaced as a conflict.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["a", "REMOTE", "c"])]]);
-    expect(store.getState()).toEqual([]);
-    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
-    expect(state.conflict).toEqual([]);
+    // S06 (contract §4): even with an injected policy (autoMerge + "theirs"), the
+    // engine surfaces the genuine conflict instead of silently resolving it —
+    // resolution is an explicit one-click user action (conflictActions), never a
+    // silent engine default.
+    expect(writes).toEqual([]);
+    expect(store.getState()).toEqual([
+      { path: "notes/todo.md", base: J(["a", "shared", "c"]), ours: J(["a", "LOCAL", "c"]), theirs: J(["a", "REMOTE", "c"]) },
+    ]);
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
+    expect(state.conflict).toEqual(["m1"]);
   });
 
   it("still surfaces a conflict when no policy is injected (default behavior unchanged)", async () => {
@@ -729,7 +855,7 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
     // Clone working-tree writes are staging material and never clobber the user's
     // open editor (the vault-side write-back guard lives in mirrorPull, in vault
     // path space). The old repo-space check here never matched and was dead.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
     expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
   });
 
@@ -758,7 +884,7 @@ describe("syncAllMappings — editor-open write-back guard (Area D)", () => {
       workingTree,
       editorOpen,
     });
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("m1")}/notes/todo.md`, J(["A", "b", "C"])]]);
   });
 });
 
@@ -789,7 +915,7 @@ describe("syncAllMappings — .obsidian/ scope gating (Area 9)", () => {
       obsidianConfig: { enabled: true, entries: [] },
     });
     // Only the vault-wide theme is merged/written; personal settings.json stays local.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/obs/.obsidian/themes/x.css", J(["A", "b", "C"])]]);
+    expect(writes).toEqual([[`${idDir("obs")}/.obsidian/themes/x.css`, J(["A", "b", "C"])]]);
   });
 
   it("syncs nothing under .obsidian/ when the feature is disabled (repo-side config must never clobber a teammate's config)", async () => {
@@ -839,6 +965,16 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
     expect(resumeKey(s.lastSync["m1"] ?? {})).toBe("R1\u00002");
   });
 
+  it("persists a per-file content snapshot for the steady-state shortcut", async () => {
+    const store = new MugsStore(new MemoryIO());
+    await store.load();
+    const acc = storeWritableAccessor(store);
+    acc.recordContentSnapshot?.("m1", { "notes/a.md": [111, 7] });
+    expect(acc.contentSnapshot?.("m1")).toEqual({ "notes/a.md": [111, 7] });
+    // Persisted into the same lastSync record (survives save/reload via the schema).
+    expect(store.getSettings().lastSync["m1"]?.contentSnapshot).toEqual({ "notes/a.md": [111, 7] });
+  });
+
   it("increments the op id on push while preserving the base SHA", async () => {
     const io = new MemoryIO();
     const store = new MugsStore(io);
@@ -856,7 +992,7 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
 
 describe("syncAllMappings — agent attribution on push (Area 10)", () => {
   it("attributes an agent's push to that agent with an On-behalf-of trailer", async () => {
-    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] }); // clone + unpushed
+    const { runner, calls, callOpts } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: false, changedPaths: ["notes/todo.md"] }); // clone + unpushed
     const actingAgent: Agent = { id: "agent-1", displayName: "Research Bot", committerEmail: "bot@local", ownerHuman: "Ada" };
     await syncAllMappings({
       mappings: [mapping()],
@@ -868,12 +1004,17 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor, // unpushed -> push
       pickAgent: () => actingAgent,
     });
-    const commitCall = calls.find((c) => c.includes("commit"))!;
+    // S04: the commit is built via commit-tree over a scoped temp index (args are
+    // auth-prefixed, so match the verb anywhere in the argv).
+    const idx = calls.findIndex((cl) => cl.includes("commit-tree"));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const commitCall = calls[idx];
     // Message carries the on-behalf-of trailer for the owner…
     expect(commitCall.join(" ")).toContain("On-behalf-of: Ada");
-    // …and the commit is authored by the agent's committer identity.
-    const authorIdx = commitCall.indexOf("--author");
-    expect(commitCall[authorIdx + 1]).toBe("Research Bot <bot@local>");
+    // …and the commit is authored by the agent's committer identity (via env).
+    const env = callOpts[idx]?.env ?? {};
+    expect(env["GIT_AUTHOR_NAME"]).toBe("Research Bot");
+    expect(env["GIT_AUTHOR_EMAIL"]).toBe("bot@local");
   });
 
   it("leaves attribution to git defaults when no agent acts on the mapping", async () => {
@@ -888,9 +1029,9 @@ describe("syncAllMappings — agent attribution on push (Area 10)", () => {
       lastSync: spyAccessor("").accessor,
       pickAgent: () => undefined, // no agent -> plain sync commit
     });
-    const commitCall = calls.find((c) => c.includes("commit"))!;
-    expect(commitCall.join(" ")).not.toContain("On-behalf-of");
-    expect(commitCall).not.toContain("--author");
+    const idx = calls.findIndex((cl) => cl.includes("commit-tree"));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(calls[idx].join(" ")).not.toContain("On-behalf-of");
   });
 });
 

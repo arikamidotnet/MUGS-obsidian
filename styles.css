@@ -1,3 +1,42 @@
+.mugs-diff-view { container-type: inline-size; }
+.mugs-diff-browser {
+  display: grid;
+  grid-template-columns: minmax(150px, 28%) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.mugs-diff-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 65vh;
+  overflow: auto;
+}
+.mugs-diff-file-choice {
+  text-align: left;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.mugs-diff-file-choice[aria-pressed="true"] {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.mugs-diff-focused { min-width: 0; overflow-x: auto; }
+.mugs-diff-endpoints { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
+  .mugs-diff-file-list { max-height: 180px; }
+}
+@container (max-width: 600px) {
+  .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
+  .mugs-diff-file-list { max-height: 180px; }
+}
+.mugs-diff-file-header:focus-visible,
+.mugs-diff-hunk-header:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
 /*
  * MUGS — Multi-User Git Sync
  * Stylesheet for the Map view, Diff view, Conflicts panel and settings UI.
@@ -109,6 +148,25 @@
   color: var(--text-normal);
 }
 
+/* Diff output empty states get a contained card look so the "in sync"
+   and "no baseline" messages feel like deliberate UI, not stray text. */
+.mugs-diff-output .mugs-empty-state {
+  padding: 28px 20px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  margin: 8px 0 4px;
+}
+
+.mugs-diff-output .mugs-empty-state h3 {
+  margin-bottom: 6px;
+}
+
+.mugs-diff-output .mugs-empty-state p {
+  margin: 0;
+  line-height: 1.45;
+}
+
 /* --- Getting Started card (top of settings) ------------------------------- */
 
 .mugs-getting-started {
@@ -153,7 +211,7 @@
 .mugs-section {
   border: 1px solid var(--background-modifier-border);
   border-radius: 10px;
-  padding: 10px 18px 18px;
+  padding: 14px 18px 18px;
   margin-bottom: 18px;
   background: var(--background-modifier-hover);
 }
@@ -267,26 +325,52 @@
   min-width: 120px;
 }
 
-.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* "never pulls" chip on push-only cards — a quiet warning that remote content never flows back. */
+.mugs-map-card-never { flex-shrink: 0; }
 
 /* --- Diff view ------------------------------------------------------------- */
 
-.mugs-diff-view { padding: 12px 8px 16px; }
+/* Same gutter rhythm as the Map view; extra bottom room so the last file block
+   doesn't sit on the status bar. */
+.mugs-diff-view { padding: 12px 16px 24px; }
 
 .mugs-diff-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  align-items: flex-end;
-  padding-bottom: 12px;
+  gap: 10px 12px;
+  align-items: center;
+  padding: 2px 0 12px;
   border-bottom: 1px solid var(--background-modifier-border);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .mugs-diff-mapping-select, .mugs-diff-ref-input {
   min-width: 0;
   flex-shrink: 0;
+}
+
+/* The picker row: label + mapping select + ref input + hint on ONE line. The
+   ref container is a div (block) — without this flex rule it forced the input
+   and hint onto their own lines, stacking the row three deep. */
+.mugs-diff-range {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+/* Match the ref input's height/radius so the picker row reads as one control. */
+.mugs-diff-mapping-select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
 }
 
 .mugs-diff-ref-input {
@@ -306,36 +390,53 @@
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
+/* Ref input + recent-refs dropdown live in one inline group. */
+.mugs-diff-ref-container { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+/* Recent-refs dropdown next to the ref input (hidden until a first ref is applied). */
+.mugs-diff-ref-dropdown { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); font-size: var(--font-ui-smaller); }
+
+/* Inline message under the picker when the typed ref can't be a branch/tag/commit. */
+.mugs-diff-ref-error { color: var(--text-error, #f85149); font-size: var(--font-ui-smaller); margin: 8px 0; }
+
 .mugs-diff-range-label, .mugs-diff-mapping-name, .mugs-diff-range-hint { font-size: var(--font-ui-smaller); }
 .mugs-diff-range-label { color: var(--text-muted); }
 .mugs-diff-range-hint { color: var(--text-faint); margin-left: 6px; }
 
 .mugs-diff-output { width: 100%; }
 
-/* Conflict resolution banner */
+/* Conflict resolution banner (shown at top of Diff view when conflicts exist) */
 .mugs-conflicts {
   background: var(--background-modifier-error-hover);
   border: 1px solid var(--text-error);
   border-left-width: 4px;
-  border-radius: 6px;
-  padding: 10px 14px;
-  margin-bottom: 14px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 4px 0 16px;
 }
 
-.mugs-conflicts-title { margin: 0 0 8px; font-weight: 600; color: var(--text-error); }
+.mugs-conflicts-title { margin: 0 0 10px; font-weight: 600; color: var(--text-error); font-size: var(--font-ui-medium); }
+
+.mugs-conflicts + .mugs-empty-state {
+  margin-top: 8px;
+}
 
 /* Conflict row */
-.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.mugs-conflict-row + .mugs-conflict-row { border-top: 1px solid var(--background-modifier-border); }
+
+/* Inline error under a row whose resolution failed (e.g. file open with unsaved changes). */
+.mugs-conflict-row-error { margin: 2px 0 6px; font-size: var(--font-ui-smaller); color: var(--text-error, #f85149); }
 .mugs-conflict-path {
   font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
 }
 
 /* Diff file blocks */
-.mugs-diff-file { border: 1px solid var(--background-modifier-border); border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+.mugs-diff-file { border: 1px solid var(--background-modifier-border); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
 
 .mugs-diff-file-header {
-  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   font-size: var(--font-ui-small); font-weight: 600; background: var(--background-secondary);
   border-bottom: 1px solid var(--background-modifier-border); overflow: hidden;
 }
@@ -359,21 +460,28 @@
 /* Diff hunk table */
 .mugs-diff-hunk { width: 100%; border-collapse: collapse; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
 
-.mugs-diff-hunk td { padding: 0 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
-.mugs-diff-sign     { width: 1%; min-width: 24px; text-align: center; user-select: none; color: var(--text-muted); }
+.mugs-diff-hunk td { padding: 2px 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.mugs-diff-sign     { width: 1%; min-width: 26px; text-align: center; user-select: none; color: var(--text-muted); }
 
-.mugs-diff-lineno    { width: 1%; min-width: 38px; text-align: right; user-select: none; color: var(--text-faint); padding-right: 10px; }
+.mugs-diff-lineno    { width: 1%; min-width: 42px; text-align: right; user-select: none; color: var(--text-faint); padding-right: 10px; }
 .mugs-diff-row-added   td.mugs-diff-content { background: var(--background-modifier-success-hover); }
 .mugs-diff-row-removed td.mugs-diff-content { background: var(--background-modifier-error-hover); }
 
 .mugs-diff-added   { color: var(--text-on-emphasis, #3fb950); }
 .mugs-diff-removed { color: var(--text-error, #f85149); }
-.mugs-diff-content { padding-left: 8px; }
+.mugs-diff-content { padding-left: 6px; }
 
 /* Collapsible hunk header */
-.mugs-diff-hunk-header { display: flex; align-items: center; gap: 6px; padding: 4px 10px; margin: 6px 0; border-radius: 5px; background: var(--background-secondary); cursor: pointer; user-select: none; }
+.mugs-diff-hunk-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; margin: 8px 0 4px; border-radius: 6px; background: var(--background-secondary); cursor: pointer; user-select: none; }
 .mugs-diff-hunk-header:hover { background: var(--background-modifier-hover); }
 .mugs-diff-chevron { width: 1ch; transition: transform 0.1s ease; }
+
+/* Per-hunk label row (range + optional section + author) gets a little more room */
+.mugs-diff-hunk-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.mugs-diff-hunk-range { font-family: var(--font-monospace); }
+.mugs-diff-hunk-section { color: var(--text-muted); }
+
+.mugs-diff-hunk-counts { display: inline-flex; gap: 4px; margin-left: auto; }
 
 /* --- Conflict action labels (ours/theirs did X) --------------------------- */
 
@@ -388,14 +496,14 @@
 
 /* --- Conflicts sidebar panel ---------------------------------------------- */
 
-.mugs-conflicts-panel { padding: 12px; }
+.mugs-conflicts-panel { padding: 12px 14px 20px; }
 
-.mugs-conflicts-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.mugs-conflicts-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .mugs-conflicts-panel-title   { margin: 0; font-size: var(--font-ui-medium); font-weight: 600; }
 .mugs-conflicts-panel-refresh { font-size: var(--font-ui-smaller); }
 
-.mugs-conflicts-panel-group    { border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; background: var(--background-modifier-hover); }
-.mugs-conflicts-panel-group-title { margin: 2px 0 6px; font-size: var(--font-ui-small); font-weight: 600; }
+.mugs-conflicts-panel-group    { border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--background-modifier-hover); }
+.mugs-conflicts-panel-group-title { margin: 2px 0 8px; font-size: var(--font-ui-small); font-weight: 600; }
 
 /* --- Review Queue ---------------------------------------------------------- */
 

@@ -196,11 +196,61 @@ export interface MugsSettings {
   /** Curated cleanup/review queue, keyed by mappingId (Area 8). Empty by default. */
   staging: Record<string, StagedChange[]>;
   security: {
-    /** When true, token field is encrypted at rest in data.json. */
+    /** When true, tokens are encrypted at rest in data.json. */
     encryptCredentials: boolean;
-    /** Placeholder for a future KDF-derived key input (not used yet). */
+    /** LEGACY: hint-derived key input from the old scheme. Kept so old data.json
+     *  files still load; dropped on migration to the passphrase KDF. */
     encryptionKeyHint?: string;
+    /** Passphrase-KDF parameters (structural twin of schema.ts KdfParams). Presence
+     *  marks the vault as using the passphrase scheme; the passphrase itself is
+     *  NEVER persisted — only these public parameters. */
+    kdf?: { algorithm: "PBKDF2-SHA-256"; salt: string; iterations: number };
   };
+}
+
+/** Kind of durable pending operation (not yet applied+verified). */
+export type PendingOpKind = "vault-write" | "vault-delete" | "clone-commit" | "remote-push";
+
+/** Durable operation not yet fully applied+verified. Non-empty list BLOCKS
+ *  correspondence advance and forces replan/verify before any new reconciliation.
+ *  opId is idempotent: `${mappingId}:${passOpId}:${kind}:${path}`. */
+export interface PendingOperation {
+  opId: string;            // idempotent: `${mappingId}:${passOpId}:${kind}:${path}`
+  kind: PendingOpKind;
+  path: string;            // mapping-relative, safePath-validated
+  content?: string;        // payload for vault-write (absent for delete/commit/push)
+  refSha?: string;         // commit/push context
+  state: "pending" | "applied-unverified" | "failed";
+  createdAt: number;
+  attempts: number;
+  lastError?: string;      // redacted, never secrets
+}
+
+/** Kinds of sync plans produced by the discovery/planning phase. */
+export type SyncPlanKind = "idle" | "publish-local" | "apply-remote" | "merge-clean" | "conflict" | "blocked" | "retry-pending";
+
+/** One planned action inside a SyncPlan. */
+export interface PlannedAction {
+  path: string;                                   // mapping-relative
+  op: "vault-write" | "vault-delete" | "stage" | "commit" | "push";
+  directionPermitted: boolean;                    // checked at PLAN time and re-checked pre-apply
+  requiresEditorCheck: boolean;                   // writes AND deletes
+}
+
+/** Sync plan for one mapping: the result of discovery+planning. Empty actions for idle. */
+export interface SyncPlan {
+  mappingId: string;
+  kind: SyncPlanKind;
+  actions: PlannedAction[];                       // empty for idle
+  counts: { publish: number; apply: number; deferred: number; conflicted: number };
+}
+
+/** Repository identity used for clone layout and keyed isolation (not display slugs). */
+export interface RepoIdentity {
+  providerId: string;
+  repoId: string;          // owner/repo (safePath.checkRepoSlug) or local key
+  branch: string;          // RESOLVED concrete branch (checkRefName), never "default"/""
+  canonicalRemote: string; // normalized URL, no credentials
 }
 
 /** The default sync policy — single source of truth shared by schema defaults. */
@@ -259,5 +309,49 @@ export interface LastSyncState {
    *  folder — the signal that a vault-absent in-scope file is a real user deletion
    *  (rather than a file the vault has simply never seen). */
   vaultPopulated?: boolean;
+  /** Per-file (mtimeMs, size) fingerprints recorded at the last completed push-only
+   *  pass. The steady-state shortcut skips a file only when its current stat pair
+   *  matches this snapshot AND its mtime predates the pass — an old mtime alone
+   *  (restored file, external edit) can no longer hide a content change. */
+  contentSnapshot?: Record<string, [number, number]>;
   status: SyncStatus;
+
+  /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
+   *  application completed AND state persisted. Distinct from lastRemoteSha
+   *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
+  correspondenceSha?: string;
+  /** Hash of (direction, remotePath, localFolder, branch, includes, excludes, syncTrashFolder).
+   *  Any change invalidates contentSnapshot shortcuts and replans from scratch. */
+  configFingerprint?: string;
+  /** Durable operations not yet fully applied+verified. Non-empty list BLOCKS
+   *  correspondence advance and forces replan/verify before any new reconciliation. */
+  pendingOps?: PendingOperation[];
+  /** Resolved identity clone dir (`<cloneRoot>/<shortHash(identity)>/<branch>`)
+   *  recorded at the last pass — lets the UI and tests locate the clone without
+   *  recomputing the RepoIdentity or hardcoding the layout. */
+  cloneDir?: string;
 }
+
+/** Outcome of a manual conflict resolution transaction. */
+export type ResolveOutcome =
+  | { ok: true; applied: boolean }
+  | { ok: false; error: string; retryable: boolean };
+
+/** Choice passed to a resolver. Copied here for shared surface; actual impl in conflict.ts. */
+export type ResolveChoice = "ours" | "theirs" | "both";
+
+/** Contract-defined resolver signature (app-runtime owns the transaction). */
+export type ConflictResolver = (c: FileConflict, choice: ResolveChoice) => Promise<ResolveOutcome>;
+
+/**
+ * Diff endpoint selectors (diff-ui consumes; git-runtime provides truth).
+ * baseline uses correspondenceSha (last completed sync).
+ */
+export type DiffEndpoint =
+  | { kind: "baseline"; sha: string }          // = correspondenceSha, labeled "last completed sync"
+  | { kind: "head" }                            // committed snapshot
+  | { kind: "remote-ref"; ref: string }         // labeled "fetched remote tip (not last sync)"
+  | { kind: "explicit"; ref: string };
+
+/** Result of a store.save() call. {ok:false} must be treated as failure by callers. */
+export type SaveResult = { ok: true } | { ok: false; reason: "load-error" };

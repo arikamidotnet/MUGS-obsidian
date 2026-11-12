@@ -11,7 +11,7 @@
  * view and the sidebar panel tint the same author identically. Folding + action
  * labels are pure presentation built on describeConflictActions / attributeHunks.
  */
-import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff } from "./diffModel";
+import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile } from "./diffModel";
 import { describeConflictActions, type ConflictAction } from "../sync/conflictActions";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
@@ -23,18 +23,20 @@ function paleTint(hsl: string): string {
 }
 
 /** Render one unresolved conflict as a labeled row with resolution buttons.
- * `onResolve` receives the conflict and the chosen winner so callers can persist it. */
+ * `onResolve` receives the conflict and the chosen winner so callers can persist it.
+ * Returns the row element so callers can attach per-row notes (e.g. a failed
+ * resolution's error message) directly under it. */
 export function renderConflictRow(
   container: HTMLElement,
   c: FileConflict,
   onResolve: (c: FileConflict, choice: ResolveChoice) => void,
-): void {
+  busyPaths?: Set<string>,
+): HTMLElement {
   const { ours, theirs } = describeConflictActions(c);
 
   const row = container.createDiv({ cls: "mugs-conflict-row" });
   const pathEl = row.createSpan({ text: c.path, cls: "mugs-conflict-path" });
   if (c.oursSavedAt || c.theirsModifiedAt) {
-    // Show a small timestamp hint for recency-based conflicts.
     let when = "";
     if (c.oursSavedAt) when += `saved ${relativeTime(Date.now() - c.oursSavedAt)}`;
     if (c.theirsModifiedAt && c.oursSavedAt) when += " · ";
@@ -46,7 +48,9 @@ export function renderConflictRow(
   renderActionLabel(labels, ours);
   renderActionLabel(labels, theirs);
 
-  new ConflictButtons(row, c, onResolve).mount();
+  const disabled = !!busyPaths?.has(c.path);
+  new ConflictButtons(row, c, onResolve, disabled).mount();
+  return row;
 }
 
 /** Human-friendly relative time. */
@@ -74,23 +78,39 @@ class ConflictButtons {
     private host: HTMLElement,
     private c: FileConflict,
     private onResolve: (c: FileConflict, choice: ResolveChoice) => void,
+    private disabled = false,
   ) {}
 
   mount(): void {
     const wrap = this.host.createDiv({ cls: "mugs-conflict-buttons" });
-    this.button(wrap, "Take ours", "ours");
-    this.button(wrap, "Take theirs", "theirs");
-    this.button(wrap, "Merge both", "both");
+    // Honest labels: when a side deleted the file, choosing it DELETES the file on
+    // both sides (vault and clone) — the button and its tooltip must say so,
+    // not imply a content pick.
+    const deletion = "Delete this file on both sides — your vault copy and the synced repository copy.";
+    this.button(
+      wrap,
+      this.c.oursAbsent ? "Take ours (delete file)" : "Take ours",
+      "ours",
+      this.c.oursAbsent ? deletion : "Keep our version of this file",
+    );
+    this.button(
+      wrap,
+      this.c.theirsAbsent ? "Take theirs (delete file)" : "Take theirs",
+      "theirs",
+      this.c.theirsAbsent ? deletion : "Use their version of this file",
+    );
+    this.button(wrap, "Merge both", "both", "Merge both versions where possible");
   }
 
-  private button(wrap: HTMLElement, text: string, choice: ResolveChoice): void {
+  private button(wrap: HTMLElement, text: string, choice: ResolveChoice, title: string): void {
     const btn = wrap.createEl("button", {
       type: "button",
       text,
       cls: `mugs-conflict-btn mugs-conflict-btn-${choice}`,
     });
     // Native title tooltip for hover accessibility.
-    btn.setAttribute("title", `${choice === "ours" ? "Keep our version of this file" : choice === "theirs" ? "Use their version of this file" : "Merge both versions where possible"}`);
+    btn.setAttribute("title", title);
+    btn.disabled = this.disabled;
     btn.addEventListener("click", () => {
       // Visual feedback: disable the clicked button briefly.
       btn.disabled = true;
@@ -102,19 +122,56 @@ class ConflictButtons {
   }
 }
 
+/** Select one changed file without rerunning git or hiding unresolved conflicts. */
+export function renderFileBrowser(parsed: ParsedDiff, host: HTMLElement, authorsByFile: AuthorsByFile = {}): void {
+  const browser = host.createDiv({ cls: "mugs-diff-browser" });
+  const list = browser.createDiv({ cls: "mugs-diff-file-list" });
+  list.setAttribute("aria-label", "Changed files");
+  const focused = browser.createDiv({ cls: "mugs-diff-focused" });
+  const palette = assignAuthorColors(parsed.files.flatMap((f) => f.hunks.flatMap((h) => h.author ? [h.author] : [])));
+  const buttons: HTMLButtonElement[] = [];
+  const authors = (name: string) => [...new Set((authorsByFile[name] ?? []).map((author) => author.name).filter(Boolean))];
+  const select = (index: number): void => {
+    focused.empty();
+    buttons.forEach((button, i) => button.setAttribute("aria-pressed", String(i === index)));
+    const names = authors(parsed.files[index].name);
+    focused.createEl("p", {
+      text: names.length ? `Git file authors in this range: ${names.join(", ")}. Attribution is file-level, not per-line or the current editor.` : "Author unavailable",
+      cls: "mugs-diff-file-authors mugs-muted",
+    });
+    renderDiff({ ...parsed, files: [parsed.files[index]] }, focused, palette);
+  };
+  parsed.files.forEach((file, index) => {
+    const names = authors(file.name);
+    const added = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "added").length;
+    const removed = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "removed").length;
+    const button = list.createEl("button", { text: `${file.name} · +${added} −${removed} · ${names.length ? names.join(", ") : "Author unavailable"}`, cls: "mugs-diff-file-choice", type: "button" });
+    buttons.push(button);
+    button.addEventListener("click", () => select(index));
+  });
+  if (parsed.files.length) select(0);
+}
+
+/** An inline per-row error for a failed resolution, shown in addition to the Notice.
+ *  Rendered directly under the conflict's path so the affected row is unambiguous. */
+export function renderRowError(row: HTMLElement, message: string): void {
+  row.createEl("p", { text: message, cls: "mugs-conflict-row-error" });
+}
+
 /** Render unresolved conflicts with a summary title above the diff. */
 export function renderConflicts(
   conflicts: FileConflict[],
   host: HTMLElement,
   onResolve: (c: FileConflict, choice: ResolveChoice) => void,
+  busyPaths?: Set<string>,
 ): void {
   if (conflicts.length === 0) return;
   const box = host.createDiv({ cls: "mugs-conflicts" });
   box.createEl("h3", {
-    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need manual resolution`,
+    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "" : "s"} manual resolution`,
     cls: "mugs-conflicts-title",
   });
-  for (const c of conflicts) renderConflictRow(box, c, onResolve);
+  for (const c of conflicts) renderConflictRow(box, c, onResolve, busyPaths);
 }
 
 /**
@@ -124,7 +181,14 @@ export function renderConflicts(
  */
 export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<string, string>): void {
   if (parsed.files.length === 0) {
-    host.createEl("p", { text: "Nothing changed in this range.", cls: "mugs-muted" });
+    // Render a contained empty state (styled via .mugs-diff-output .mugs-empty-state)
+    // so it matches the other "in sync" / "no baseline" cards in the Diff view.
+    const card = host.createDiv({ cls: "mugs-empty-state" });
+    card.createEl("h3", { text: "No changes in this range" });
+    card.createEl("p", {
+      text: "The chosen ref produces no diff against the comparison base. Try a different ref in the picker above (e.g. an older commit like HEAD~1).",
+      cls: "mugs-muted",
+    });
     return;
   }
 
@@ -152,6 +216,10 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
   }
 
   const header = block.createDiv({ cls: "mugs-diff-file-header" });
+  header.setAttribute("role", "button");
+  header.setAttribute("tabindex", "0");
+  header.setAttribute("aria-expanded", "true");
+  header.setAttribute("aria-label", `Toggle changes for ${file.name}`);
   header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
   const summary = header.createSpan({ cls: "mugs-diff-summary" });
   summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
@@ -170,14 +238,24 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
   let fileOpen = true;
   const body = block.createDiv({ cls: "mugs-diff-file-body" });
+  if (file.binary) body.createEl("p", { text: "Binary file changed; textual diff is not available.", cls: "mugs-muted" });
+  if (file.renamedFrom) body.createEl("p", { text: `Renamed from ${file.renamedFrom}`, cls: "mugs-muted" });
+  if (!file.binary && !file.renamedFrom && file.hunks.length === 0) body.createEl("p", { text: "File metadata changed (no text hunks).", cls: "mugs-muted" });
   body.style.display = "";
 
   // Click the file header to collapse/expand all hunks.
-  header.addEventListener("click", (e) => {
+  const toggleFile = (e: Event) => {
     e.stopPropagation();
     fileOpen = !fileOpen;
+    header.setAttribute("aria-expanded", String(fileOpen));
     chevron.textContent = fileOpen ? "▾" : "▸";
     body.style.display = fileOpen ? "" : "none";
+  };
+  header.addEventListener("click", toggleFile);
+  header.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    toggleFile(e);
   });
 
   // Render hunks into the collapsible body.
@@ -201,6 +279,10 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   }
 
   const header = block.createDiv({ cls: "mugs-diff-hunk-header" });
+  header.setAttribute("role", "button");
+  header.setAttribute("tabindex", "0");
+  header.setAttribute("aria-expanded", "true");
+  header.setAttribute("aria-label", `Toggle changes starting at line ${hunk.newStart}`);
   if (authorColor) header.style.borderLeftColor = authorColor;
 
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
@@ -219,12 +301,18 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   const setOpen = (e?: Event) => {
     e?.stopPropagation(); // don't trigger file-level collapse
     open = !open;
+    header.setAttribute("aria-expanded", String(open));
     chevron.textContent = open ? "▾" : "▸";
     header.classList.toggle("mugs-diff-hunk-open", open);
     body.style.display = open ? "" : "none";
   };
 
   header.addEventListener("click", setOpen);
+  header.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    setOpen(e);
+  });
 
   // Render lines with proper old/new line numbers.
   let oldNo = hunk.oldStart;
@@ -245,7 +333,10 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
     const signEl = row.insertCell().createSpan({ text: line.type === "added" ? "+" : line.type === "removed" ? "-" : " ", cls: `mugs-diff-sign mugs-diff-${line.type}` });
 
     // Content with author tint for changed lines.
-    const contentEl = row.insertCell().createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
+    // Align class on the TD (CSS rules target td.mugs-diff-content) while keeping span for text+tint.
+    const contentCell = row.insertCell();
+    contentCell.addClass("mugs-diff-content");
+    const contentEl = contentCell.createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
     if (authorColor && line.type !== "context") {
       signEl.style.borderLeftColor = authorColor;
       contentEl.style.backgroundColor = paleTint(authorColor);

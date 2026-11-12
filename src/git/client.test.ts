@@ -31,10 +31,10 @@ describe("GitClient — command construction", () => {
     expect(last(r).args).toEqual(["clone", "https://host/repo.git", "/clones/repo"]);
   });
 
-  it("fetches the default remote (origin)", async () => {
+  it("fetches the default remote (origin) with stall detection", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--prune", "origin"]);
   });
 
   it("pulls in each mode with the right flags", async () => {
@@ -61,14 +61,29 @@ describe("GitClient — command construction", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).commit("mugs push", { name: "Ada", email: "ada@example.com" });
     expect(last(r).args).toEqual(["commit", "--message", "mugs push", "--author", "Ada <ada@example.com>"]);
+    // Env always carries BOTH author and committer identities explicitly.
+    expect(last(r).opts?.env).toMatchObject({ GIT_AUTHOR_NAME: "Ada", GIT_AUTHOR_EMAIL: "ada@example.com", GIT_COMMITTER_NAME: "Ada", GIT_COMMITTER_EMAIL: "ada@example.com" });
   });
 
-  it("pushes with and without a branch", async () => {
+  it("always supplies explicit GIT_AUTHOR_* and GIT_COMMITTER_* via env (even with no author passed)", async () => {
+    const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    await client(r).commit("plain commit");
+    const e = last(r).opts?.env;
+    expect(e?.GIT_AUTHOR_NAME).toBeDefined();
+    expect(e?.GIT_AUTHOR_EMAIL).toBeDefined();
+    expect(e?.GIT_COMMITTER_NAME).toBeDefined();
+    expect(e?.GIT_COMMITTER_EMAIL).toBeDefined();
+    // The documented fallback identity is used when nothing is supplied.
+    expect(e?.GIT_AUTHOR_NAME).toBe("MUGS Sync");
+    expect(e?.GIT_AUTHOR_EMAIL).toBe("mugs@local");
+  });
+
+  it("pushes with and without a branch, with stall detection", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).push("origin", "main");
-    expect(last(r).args).toEqual(["push", "origin", "main"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin", "main"]);
     await client(r).push();
-    expect(last(r).args).toEqual(["push", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin"]);
   });
 
   it("mixed-resets to a ref", async () => {
@@ -99,17 +114,18 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("attaches the same helper to fetch and push, keeping the named remote", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     const c = client(r, "/c/y").withAuth({ username: "u", token: "t" });
+    const STALL = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"];
     await c.fetch();
-    expect(last(r).args).toEqual([...HELPER_ARGS, "fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, ...STALL, "fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toMatchObject({ MUGS_GIT_TOKEN: "t" });
     await c.push("origin", "main");
-    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, ...STALL, "push", "origin", "main"]);
   });
 
   it("leaves network commands untouched when no auth is set (local provider)", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toBeUndefined();
   });
 
@@ -117,7 +133,7 @@ describe("GitClient — HTTP(S) credentials", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     const bound = client(r).withAuth({ username: "u", token: "t" }).at("/c/y");
     await bound.push("origin", "main");
-    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin", "main"]);
     expect(last(r).opts).toMatchObject({ cwd: "/c/y", env: { MUGS_GIT_TOKEN: "t" } });
     // Even a local read like rev-parse carries the helper: on a blobless clone a
     // lazy blob fetch can trigger from any content-touching command.
@@ -134,7 +150,7 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("throws readable errors that omit the credential-helper prefix", async () => {
     const r = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad" }));
     await expect(client(r).withAuth({ username: "u", token: "t" }).fetch()).rejects.toThrow(
-      "git fetch --prune origin failed (128): fatal: bad",
+      "git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune origin failed (128): fatal: bad",
     );
   });
 });
@@ -168,21 +184,40 @@ describe("GitClient — first-init topology helpers", () => {
   });
 
   it("lsFiles lists tracked paths", async () => {
-    const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
+    const r = new FakeRunner(() => ({ code: 0, stdout: "a.md\u0000sub/b.md\u0000", stderr: "" }));
     expect(await client(r).lsFiles()).toEqual(["a.md", "sub/b.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "ls-files"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "ls-files", "-z", "--"]);
   });
 
   it("deletedPaths asks git for the deleted-only diff of a range", async () => {
-    const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\n", stderr: "" }));
+    const r = new FakeRunner(() => ({ code: 0, stdout: "gone.md\u0000", stderr: "" }));
     expect(await client(r).deletedPaths("OLD..HEAD")).toEqual(["gone.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "OLD..HEAD"]);
+    // The range is a revision: no `--` before it (a `--` there would reinterpret it
+    // as a pathspec and silently diff nothing).
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D", "-z", "OLD..HEAD"]);
+  });
+
+  it("changedPaths parses both NUL (-z) and legacy newline output", async () => {
+    const zr = new FakeRunner(() => ({ code: 0, stdout: "a.md\u0000sub/b.md\u0000", stderr: "" }));
+    expect(await client(zr).changedPaths("base...HEAD")).toEqual(["a.md", "sub/b.md"]);
+    expect(last(zr).args).toEqual(["-c", "core.quotePath=false", "diff", "--name-only", "-z", "base...HEAD"]);
+    const nr = new FakeRunner(() => ({ code: 0, stdout: "a.md\nsub/b.md\n", stderr: "" }));
+    expect(await client(nr).changedPaths("base...HEAD")).toEqual(["a.md", "sub/b.md"]);
   });
 
   it("lastModifiedAt parses the last commit time of a path at a ref", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "1789032181\n", stderr: "" }));
     expect(await client(r).lastModifiedAt("origin/main", "notes/todo.md")).toBe(1789032181);
     expect(last(r).args).toEqual(["log", "-1", "--format=%ct", "origin/main", "--", "notes/todo.md"]);
+  });
+
+  it("commitExists proves the commit object is present, unlike rev-parse --verify", async () => {
+    const ok = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    expect(await client(ok).commitExists("abc123")).toBe(true);
+    expect(last(ok).args).toEqual(["cat-file", "-e", "abc123^{commit}"]);
+    // A re-clone can lose the recorded baseline object entirely — this must read false.
+    const missing = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "" }));
+    expect(await client(missing).commitExists("deadbeef")).toBe(false);
   });
 
   it("lastModifiedAt yields undefined for a path the ref never saw", async () => {
@@ -224,11 +259,18 @@ describe("GitClient — query parsing and errors", () => {
     expect(last(r).args).toEqual(["diff", "base...HEAD"]);
   });
 
-  it("workingTreePaths lists modified and untracked paths, resolving renames", async () => {
+  it("workingTreePaths lists modified and untracked paths, resolving renames (NUL -z format)", async () => {
+    // Porcelain -z v1 rename record: "XY NEW_PATH<NUL>ORIG_PATH<NUL>" — new path FIRST.
+    const out = [" M notes/a.md", "?? notes/new.md", "R  notes/moved.md", "notes/old.md"].join("\u0000");
+    const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
+    expect(await client(r).workingTreePaths()).toEqual(["notes/a.md", "notes/new.md", "notes/moved.md"]);
+    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--"]);
+  });
+
+  it("workingTreePaths tolerates legacy newline porcelain (old fakes)", async () => {
     const out = [" M notes/a.md", "?? notes/new.md", "R  notes/old.md -> notes/moved.md"].join("\n");
     const r = new FakeRunner(() => ({ code: 0, stdout: out, stderr: "" }));
     expect(await client(r).workingTreePaths()).toEqual(["notes/a.md", "notes/new.md", "notes/moved.md"]);
-    expect(last(r).args).toEqual(["-c", "core.quotePath=false", "status", "--porcelain"]);
   });
 });
 

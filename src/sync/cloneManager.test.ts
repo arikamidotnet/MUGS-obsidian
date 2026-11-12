@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planSync, cloneDir, resolveSyncBranch, type PlanInput } from "./cloneManager";
+import { planSync, cloneDir, resolveSyncBranch, isSnapshotStale, type PlanInput } from "./cloneManager";
 
 /** Build an ancestry oracle from explicit (ancestor -> descendant) edges. */
 const oracleFrom = (edges: [string, string][]): ((anc: string, desc: string[]) => boolean) => {
@@ -88,6 +88,29 @@ describe("cloneDir", () => {
 
   it("honors a custom slug function from the layout", () => {
     expect(cloneDir({ root: "c", slug: (s) => s.toUpperCase() }, "GitLab", "Proj")).toBe("c/GITLAB/PROJ");
+  });
+});
+
+describe("isSnapshotStale — steady-state skip rule", () => {
+  it("skips a file only when stat matches the snapshot AND predates the last pass", () => {
+    expect(isSnapshotStale([100, 5], [100, 5], 200)).toBe(true);
+  });
+
+  it("never skips without a previous snapshot (first run after upgrade)", () => {
+    expect(isSnapshotStale([100, 5], undefined, 200)).toBe(false);
+  });
+
+  it("never skips when the mtime or size changed (restored/edited file)", () => {
+    expect(isSnapshotStale([150, 5], [100, 5], 200)).toBe(false);
+    expect(isSnapshotStale([100, 6], [100, 5], 200)).toBe(false);
+  });
+
+  it("never skips a file newer than the last completed pass", () => {
+    expect(isSnapshotStale([300, 5], [300, 5], 200)).toBe(false);
+  });
+
+  it("never skips when the stat itself is unavailable (safe direction)", () => {
+    expect(isSnapshotStale(undefined, [100, 5], 200)).toBe(false);
   });
 });
 

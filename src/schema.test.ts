@@ -6,8 +6,37 @@ import {
   normalizeVaultPath,
   mugsSettingsSchema,
 } from "./schema";
+import { DEFAULT_SYNC_POLICY } from "./types";
 
 describe("data-plane schema (contract)", () => {
+  it("parses nested shared input defaults and never aliases shared settings", () => {
+    const before = structuredClone(DEFAULT_SYNC_POLICY);
+    const first = parseSettings({});
+    const second = parseSettings({ sync: {} });
+    for (const settings of [first, second]) {
+      expect(settings.sync.firstSyncDirection).toBe("pull");
+      expect(settings.sync.obsidianConfig).toEqual({
+        enabled: before.obsidianConfig.enabled,
+        entries: before.obsidianConfig.entries.map((entry) => ({ ...entry, includes: entry.includes ?? [], excludes: entry.excludes ?? [] })),
+      });
+    }
+    first.sync.obsidianConfig.entries.push({ path: "test.json", scope: "personal", includes: [], excludes: [] });
+    expect(second.sync.obsidianConfig.entries).toHaveLength(before.obsidianConfig.entries.length);
+    expect(DEFAULT_SYNC_POLICY).toEqual(before);
+  });
+
+  it("retains nested array defaults, unknown-field stripping, and structured issues", () => {
+    const settings = parseSettings({ unknownFutureField: true, sync: {
+      paused: true, obsidianConfig: { enabled: true, entries: [{ path: "app.json", scope: "personal", unknown: "strip" }] },
+    } });
+    expect(settings.sync.paused).toBe(true);
+    expect(settings.sync.obsidianConfig.entries).toEqual([{ path: "app.json", scope: "personal", includes: [], excludes: [] }]);
+    expect(settings).not.toHaveProperty("unknownFutureField");
+    const invalid = mugsSettingsSchema.safeParse({ sync: { intervalSeconds: 0 } });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) expect(invalid.error.issues.some((issue) => issue.path.join(".") === "sync.intervalSeconds")).toBe(true);
+  });
+
   it("applies defaults for a partial/empty settings blob", () => {
     const s = parseSettings(null);
     expect(s.credentials).toEqual([]);
@@ -75,6 +104,35 @@ describe("data-plane schema (contract)", () => {
     // scoped links silently degraded to the legacy id-based repo match on reload.
     const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "d", localFolder: "notes", providerId: "c1", repoRef: "42" }] });
     expect(s.mappings[0].repoRef).toBe("42");
+  });
+
+  it("accepts and preserves a security.kdf block (passphrase scheme)", () => {
+    const s = parseSettings({
+      version: 1,
+      security: { encryptCredentials: true, kdf: { salt: "abc123", iterations: 310000 } },
+    });
+    expect(s.security.kdf).toEqual({ algorithm: "PBKDF2-SHA-256", salt: "abc123", iterations: 310000 });
+  });
+
+  it("treats kdf as optional (legacy vaults without it still parse)", () => {
+    const s = parseSettings({ version: 1, security: { encryptCredentials: true, encryptionKeyHint: "hint" } });
+    expect(s.security.kdf).toBeUndefined();
+    expect(s.security.encryptionKeyHint).toBe("hint");
+  });
+
+  it("rejects a kdf block with a non-positive iteration count", () => {
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { salt: "abc", iterations: 0 } } }),
+    ).toThrow();
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { salt: "abc", iterations: -5 } } }),
+    ).toThrow();
+  });
+
+  it("rejects a kdf block without a salt", () => {
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { iterations: 1000 } } }),
+    ).toThrow();
   });
 });
 

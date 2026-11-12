@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { MemoryTrashStore, trashPath } from "./trash";
+import { MemoryTrashStore, FileSystemTrashStore, trashPath } from "./trash";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 describe("trashPath", () => {
   it("places trashed files under <clone>/.mugs-trash/<mapping>/<path>", () => {
@@ -43,11 +46,48 @@ describe("MemoryTrashStore", () => {
     expect(t.has("m2", "a.md")).toBe(true);
   });
 
-  it("overwrites existing content for the same mapping + path", () => {
+  it("S06: a second deletion at the same path VERSIONS the record — the first recovery copy survives", () => {
     const t = new MemoryTrashStore();
     t.trash("m1", "a.md", "first");
     t.trash("m1", "a.md", "second");
+    // Latest wins for a plain read (restore gets the most recent copy)…
     expect(t.get("m1", "a.md")).toBe("second");
-    expect(t.size).toBe(1);
+    // …but the FIRST recovery copy is never overwritten.
+    expect(t.versionsOf("m1", "a.md")).toEqual(["first", "second"]);
+    expect(t.size).toBe(1); // distinct paths, not versions
+  });
+});
+
+describe("FileSystemTrashStore (S06 versioning + safe restore)", () => {
+  it("keeps both recovery copies when the same path is deleted twice, and restoreTo refuses to clobber a newer file without intent", () => {
+    const base = mkdtempSync(join(tmpdir(), "mugs-trash-"));
+    try {
+      const store = new FileSystemTrashStore(join(base, "trash"));
+      store.trash("m1", "notes/a.md", "first copy");
+      store.trash("m1", "notes/a.md", "second copy");
+      expect(store.restore("m1", "notes/a.md")).toBe("second copy");
+      // versioned files on disk: both copies exist as separate files
+      const dir = join(base, "trash", "m1", "notes");
+      expect(existsSync(dir)).toBe(true);
+
+      // restoreTo: safe by construction, refuses to clobber an existing file
+      // (the destination is <vault>/<relPath> = vault/notes/a.md).
+      const vault = join(base, "vault");
+      mkdirSync(join(vault, "notes"), { recursive: true });
+      writeFileSync(join(vault, "notes", "a.md"), "NEWER USER CONTENT");
+      const blocked = store.restoreTo("m1", "notes/a.md", vault);
+      expect(blocked).toEqual({ ok: false, reason: "target-exists" });
+      expect(readFileSync(join(vault, "notes", "a.md"), "utf8")).toBe("NEWER USER CONTENT");
+
+      // With explicit intent (overwrite: true) the restore proceeds.
+      const forced = store.restoreTo("m1", "notes/a.md", vault, { overwrite: true });
+      expect(forced).toMatchObject({ ok: true });
+      expect(readFileSync(join(vault, "notes", "a.md"), "utf8")).toBe("second copy");
+
+      // Containment: traversal paths are rejected, never sanitized.
+      expect(store.restoreTo("m1", "../escape.md", vault)).toMatchObject({ ok: false, reason: "unsafe-path" });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });

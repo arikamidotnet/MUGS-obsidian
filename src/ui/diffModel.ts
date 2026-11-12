@@ -52,6 +52,12 @@ export interface DiffHunk {
 export interface DiffFile {
   name: string;
   hunks: DiffHunk[];
+  /** Binary file (content not shown as text). */
+  binary?: boolean;
+  /** For renames: original path. */
+  renamedFrom?: string;
+  /** For renames: new path (often same as name). */
+  renamedTo?: string;
 }
 
 export interface ParsedDiff {
@@ -86,6 +92,17 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
         files.push(state.file);
       }
       continue;
+    }
+    // Binary / rename markers (must be seen while a file is open)
+    const lower = rawLine.toLowerCase();
+    if (state.file) {
+      if (lower.includes("binary files") || lower.includes("git binary patch")) {
+        state.file.binary = true;
+      }
+      const rf = rawLine.match(/^rename from\s+(.+)$/i);
+      if (rf) state.file.renamedFrom = stripPrefix(rf[1]);
+      const rt = rawLine.match(/^rename to\s+(.+)$/i);
+      if (rt) state.file.renamedTo = stripPrefix(rt[1]);
     }
 
     const hunk = rawLine.match(HUNK_HEADER);
@@ -136,7 +153,7 @@ export function attributeHunks(parsed: ParsedDiff, authorsByFile: AuthorsByFile 
 
   return {
     files: parsed.files.map((f) => ({
-      name: f.name,
+      ...f,
       hunks: f.hunks.map((h) => {
         const author = lookup(h.file);
         return author ? { ...h, author: author.name, email: author.email } : h;
@@ -174,6 +191,27 @@ export function assignAuthorColors(authors: Iterable<string>): Map<string, strin
 function basename(p: string): string {
   const i = p.lastIndexOf("/");
   return i === -1 ? p : p.slice(i + 1);
+}
+
+/**
+ * Validate a ref typed into the Diff picker BEFORE it reaches git. Returns a
+ * short, jargon-free reason when the text can't be a usable branch/tag/commit
+ * (empty, spaces, a leading dash that git would parse as an option, a range,
+ * control characters, …). Pure — pinned by tests; the view shows the message
+ * inline instead of round-tripping a hopeless ref and reporting a git error.
+ */
+export function validateRef(ref: string): string | undefined {
+  const s = ref.trim();
+  if (!s) return "Enter a branch, tag, or commit to compare — for example main or HEAD.";
+  if (/\s/.test(s)) return "A ref can't contain spaces. Use the branch or tag name, or the commit SHA.";
+  if (s.startsWith("-")) return "A ref can't start with a dash.";
+  if (s.includes("..")) return "Compare one ref at a time — ranges like a..b aren't supported here.";
+  if (/[\u0000-\u001f\u007f]/.test(s)) return "A ref can't contain control characters.";
+  if (s.startsWith("/") || s.endsWith("/")) return "A ref can't start or end with a slash.";
+  if (s.includes("@{")) return "A ref can't contain '@{'.";
+  if (s.endsWith(".lock")) return "A ref can't end with '.lock'.";
+  if (s.endsWith(".")) return "A ref can't end with a period.";
+  return undefined;
 }
 
 /**
