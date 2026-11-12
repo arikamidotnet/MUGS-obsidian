@@ -1,19 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
 import { parseSettings } from "./schema";
 
-/** The live vault where MUGS is installed; scratch validation of the real seed.
- *  Skips (rather than fails) on machines without this vault. */
-const VAULT_DATA = "/home/arikami/Documents/FBR-WRK/.obsidian/plugins/mugs-obsidian/data.json";
+/** Exercise legacy folder-scoped settings without reading a real vault or token. */
+const seed = {
+  credentials: [{
+    id: "work", label: "Synthetic account", kind: "gitlab",
+    token: "synthetic-test-token", repos: ["example/team-notes"],
+  }],
+  mappings: [{
+    id: "legacy-notes", label: "Notes", providerId: "work",
+    remotePath: "Notes", localFolder: "Notes", direction: "push-only",
+  }],
+};
 
-describe.skipIf(!existsSync(VAULT_DATA))("vault data.json seed (test env)", () => {
+describe("synthetic legacy data.json seed", () => {
   it("parses without throwing and wires the gitlab credential + folder mappings", () => {
-    const s = parseSettings(JSON.parse(readFileSync(VAULT_DATA, "utf8")));
+    const s = parseSettings(seed);
 
     // One gitlab credential, allowlisted to the single shared repo.
     expect(s.credentials).toHaveLength(1);
     expect(s.credentials[0].kind).toBe("gitlab");
-    expect(s.credentials[0].repos).toContain("fbr-rom/FBR-WRK");
+    expect(s.credentials[0].repos).toContain("example/team-notes");
 
     // Folder-scoped links: every mapping points at that credential and pairs a
     // remote folder with the same-named vault folder. These are legacy links with
