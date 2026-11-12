@@ -294,6 +294,21 @@ export const DEFAULT_SETTINGS: MugsSettings = {
 };
 
 /** Last-sync bookkeeping for a single mapping, keyed by mapping id. */
+export interface ReconciliationFile {
+  /** Immutable commit and blob reviewed/verified for this exact repository path. */
+  ref: string;
+  blob: string;
+}
+
+export interface ReconciliationState {
+  version: 1;
+  /** Binds evidence and decisions to repository, branch, mapping roots and policy. */
+  fingerprint: string;
+  proven: Record<string, ReconciliationFile>;
+  review: Record<string, ReconciliationFile & { reason?: string }>;
+  decisions: Record<string, ReconciliationFile & { action: "delete" | "recover" }>;
+}
+
 export interface LastSyncState {
   mappingId: string;
   lastPushAt?: number;
@@ -330,6 +345,8 @@ export interface LastSyncState {
    *  recorded at the last pass — lets the UI and tests locate the clone without
    *  recomputing the RepoIdentity or hardcoding the layout. */
   cloneDir?: string;
+  /** Content-proven path ownership; legacy population/stat flags are not evidence. */
+  reconciliation?: ReconciliationState;
 }
 
 /** Outcome of a manual conflict resolution transaction. */

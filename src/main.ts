@@ -15,16 +15,19 @@ import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
 import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
+import { ReconciliationModal, type ReconciliationReviewRow } from "./ui/reconciliationModal";
 import { setMugsContext } from "./ui/dataSources";
 import {
   StoreMapDataSource,
   StoreDiffDataSource,
   StoreConflictDataSource,
   DEFAULT_CLONE_DIRNAME,
+  resolveCloneDir,
 } from "./ui/defaultDataSources";
-import type { MugsSettings, FolderMapping, Agent } from "./types";
+import type { MugsSettings, FolderMapping, Agent, ReconciliationState } from "./types";
 import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
+import { GitClient } from "./git/client";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
 import { decideRun, debounceFireTimes } from "./sync/schedule";
@@ -250,6 +253,9 @@ export default class MugsPlugin extends Plugin {
     // NOTE: the Review Queue has no producer yet (nothing ever creates staging
     // entries), so its ribbon/command entry points are hidden until it is wired —
     // an always-empty queue advertised in the UI erodes trust.
+    // Reconciliation review IS produced: the engine's path-level verification
+    // queues unknown remote-only files per mapping, so its surface is exposed.
+    this.addRibbonIcon("alert-circle", "MUGS: Reconcile remote-only files", () => this.openReconciliationModal());
 
     this.addCommand({
       id: "show-settings",
@@ -292,6 +298,12 @@ export default class MugsPlugin extends Plugin {
       id: "show-conflicts",
       name: "Show MUGS Conflicts (right sidebar, with action labels)",
       callback: () => this.openConflictsPanel(),
+    });
+
+    this.addCommand({
+      id: "reconcile-remote-only",
+      name: "Reconcile remote-only files (explicit review of retained files)",
+      callback: () => this.openReconciliationModal(),
     });
 
   }
@@ -411,6 +423,13 @@ export default class MugsPlugin extends Plugin {
         for (const o of outcomes.filter((o) => o.status === "skipped")) {
           const reason = o.reason ? ` — ${o.reason}` : "";
           new Notice(`MUGS — ${o.label} skipped${reason}`, 8000);
+        }
+        // Advisory review items: the pass succeeded, but files are retained for an
+        // explicit decision (unknown remote-only, withheld deletions, unverified
+        // content). Surface them so the reconciliation queue is discoverable.
+        for (const o of outcomes.filter((o) => o.status === "ok" && (o.blocked?.length ?? 0) > 0)) {
+          const n = o.blocked!.length;
+          new Notice(`MUGS — ${o.label}: ${n} file${n === 1 ? "" : "s"} retained for review (remote-only or unverified). Run "Reconcile remote-only files" to decide.`, 8000);
         }
       } else {
         const skipped = outcomes.filter((o) => o.status === "skipped");
@@ -668,6 +687,75 @@ export default class MugsPlugin extends Plugin {
    *  Records each both-sides-deleted file's prior content before it is removed (Area 3). */
   private trashStore(): FileSystemTrashStore {
     return new FileSystemTrashStore(`${this.cloneRoot()}/.mugs-trash`);
+  }
+
+  /** Rows for the reconciliation modal: one per unknown remote-only review entry,
+   *  across every mapping carrying reconciliation state. */
+  private reconciliationRows(): ReconciliationReviewRow[] {
+    const settings = this.store.getSettings();
+    const rows: ReconciliationReviewRow[] = [];
+    for (const m of settings.mappings) {
+      const state = settings.lastSync[m.id]?.reconciliation;
+      if (!state) continue;
+      for (const [path, entry] of Object.entries(state.review)) {
+        rows.push({
+          mappingId: m.id,
+          mappingLabel: m.label ?? m.id,
+          path,
+          ref: entry.ref,
+          blob: entry.blob,
+          fingerprint: state.fingerprint,
+          direction: m.direction,
+          reason: entry.reason,
+        });
+      }
+    }
+    return rows;
+  }
+
+  /** Open the explicit reconciliation modal over the engine's current review queue.
+   *  Rows are frozen at open; preview reads the reviewed blob from the mapping's
+   *  clone; decide records a revision-bound decision and runs a pass that executes
+   *  it under full preconditions (re-queuing the path when any check fails). */
+  private openReconciliationModal(): void {
+    new ReconciliationModal(this.app, {
+      rows: this.reconciliationRows(),
+      preview: async (row) => {
+        const mapping = this.store.getSettings().mappings.find((m) => m.id === row.mappingId);
+        if (!mapping) throw new Error("the mapping no longer exists");
+        const dir = resolveCloneDir(this.store, this.cloneRoot(), mapping);
+        const read = await new GitClient(new ChildProcessRunner()).at(dir).showTyped(row.ref, row.path);
+        if (read.kind === "content") return read.content;
+        if (read.kind === "absent") throw new Error("the file is no longer on the remote at the reviewed commit");
+        throw new Error(read.error.message);
+      },
+      decide: async (row, action) => {
+        const ls = this.store.getSettings().lastSync[row.mappingId];
+        const state: ReconciliationState | undefined = ls?.reconciliation;
+        const entry = state?.review[row.path];
+        if (!ls || !state || !entry) throw new Error("this file is no longer in the review queue — reopen reconciliation");
+        if (entry.ref !== row.ref || entry.blob !== row.blob) {
+          throw new Error("the review queue changed since it opened — reopen reconciliation");
+        }
+        // Revision-bound intent: the next pass executes it under full preconditions
+        // (scope, ref, blob, editor guard, recoverable backup before deletion) and
+        // re-queues the path when any check fails — a stale decision never deletes.
+        this.store.setLastSync({
+          ...ls,
+          reconciliation: { ...state, decisions: { ...state.decisions, [row.path]: { ref: row.ref, blob: row.blob, action } } },
+        });
+        const saved = await this.store.save();
+        if (!saved.ok) throw new Error("could not persist the decision — nothing was applied yet");
+        await this.runSync(true);
+        const after = this.store.getSettings().lastSync[row.mappingId]?.reconciliation;
+        if (after?.decisions[row.path]) {
+          throw new Error("the decision is recorded and applies on the next completed sync pass");
+        }
+        if (after?.review[row.path]) {
+          throw new Error("the decision could not be applied (the remote or vault changed) — the file was re-queued for review");
+        }
+      },
+    }).open();
   }
 
   /** Vault-side WorkingTreeWriter speaking ABSOLUTE paths (resolver transaction input).

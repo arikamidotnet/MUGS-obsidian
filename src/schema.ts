@@ -123,6 +123,19 @@ export const folderMappingSchema = z.object({
   syncTrashFolder: z.boolean().default(true),
 });
 
+const reconciliationFileSchema = z.object({
+  ref: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),
+  blob: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),
+});
+
+export const reconciliationStateSchema = z.object({
+  version: z.literal(1),
+  fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  proven: z.record(z.string(), reconciliationFileSchema),
+  review: z.record(z.string(), reconciliationFileSchema.extend({ reason: z.string().optional() })),
+  decisions: z.record(z.string(), reconciliationFileSchema.extend({ action: z.enum(["delete", "recover"]) })),
+});
+
 export const lastSyncStateSchema = z.object({
   mappingId: z.string().min(1),
   lastPushAt: z.number().int().positive().optional(),
@@ -149,6 +162,7 @@ export const lastSyncStateSchema = z.object({
   pendingOps: z.array(pendingOperationSchema).optional(),
   /** Resolved identity clone dir recorded at the last pass (UI/test resolution). */
   cloneDir: z.string().optional(),
+  reconciliation: reconciliationStateSchema.optional(),
 });
 
 export const conflictSchema = z.object({

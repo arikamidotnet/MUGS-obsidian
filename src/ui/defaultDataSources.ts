@@ -46,7 +46,7 @@ async function isWorkTree(client: GitClient, dir: string): Promise<boolean> {
 /** Resolve a mapping's clone dir: the identity-layout dir recorded at the last
  *  sync pass (authoritative), falling back to the legacy provider/slug layout
  *  for mappings that have not synced since the upgrade. */
-function resolveCloneDir(
+export function resolveCloneDir(
   store: MugsStore,
   cloneRoot: string,
   m: Pick<FolderMapping, "id" | "providerId" | "repoRef">,

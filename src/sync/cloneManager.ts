@@ -19,7 +19,8 @@ import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedChange, type FileVersions } from "./conflict";
-import type { SyncPlanKind, PendingOperation, RepoIdentity } from "../types";
+import type { SyncPlanKind, PendingOperation, RepoIdentity, ReconciliationState } from "../types";
+import { emptyReconciliation, gitBlobId, parseReconciliationTree, reconciliationFingerprint } from "./reconciliation";
 import { checkRelPath } from "../git/safePath";
 import { identityCloneDir, identityKey, canonicalizeRemote, withIdentityLock } from "./repoIdentity";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
@@ -116,6 +117,9 @@ export interface LastSyncAccessor {
    *  (Map/Diff/conflicts) and tests resolve the clone without recomputing the
    *  RepoIdentity or hardcoding the layout. */
   recordCloneDir?(mappingId: string, dir: string): void;
+  reconciliation?(mappingId: string): ReconciliationState | undefined;
+  recordReconciliation?(mappingId: string, state: ReconciliationState): void;
+  clearCorrespondence?(mappingId: string): void;
 }
 
 /** Writes merged file content (and removes deleted files) into a clone's working tree. */
@@ -306,6 +310,167 @@ export class CloneManager {
 
   private get vaultMirror(): VaultMirror | undefined {
     return this.seams.vaultMirror;
+  }
+
+  private async reconciliationTree(mapping: FolderMapping, c: GitClient, ref: string): Promise<Map<string, string>> {
+    const result = await c.run(["ls-tree", "-r", "-z", "--full-tree", ref, "--"]);
+    if (result.code !== 0) throw new Error("cannot verify remote tree for reconciliation");
+    return new Map([...parseReconciliationTree(result.stdout)].filter(([path]) => this.inScope(mapping, path) && this.mirrorListable(path)));
+  }
+
+  /**
+   * Only exact published blobs can acquire ownership. Existing immutable evidence
+   * may be reused on a verified unchanged path, never on startup/uncertainty.
+   * Unknown remote-only paths remain visible without preventing known-file sync.
+   */
+  private async verifyReconciliation(
+    mapping: FolderMapping,
+    c: GitClient,
+    ref: string,
+    previous: ReconciliationState,
+    priorBlocked: BlockedFile[] = [],
+    unchanged = new Set<string>(),
+  ): Promise<{ state: ReconciliationState; blocked: BlockedFile[] }> {
+    const tree = await this.reconciliationTree(mapping, c, ref);
+    const names = new Set((await this.vaultMirror!.list(mapping.localFolder))
+      .map((rel) => vaultToRepoPath(mapping, rel))
+      .filter((path) => checkRelPath(path).ok && this.inScope(mapping, path) && this.mirrorListable(path)));
+    const state = emptyReconciliation(previous.fingerprint);
+    // An interrupted/refused decision remains actionable. Only verified effects
+    // consume it; a stale decision never grants permission on a new remote tip.
+    state.decisions = structuredClone(previous.decisions);
+    const blocked = [...priorBlocked];
+    const fail = (path: string, reason: string) => {
+      if (!blocked.some((b) => b.path === path)) blocked.push({ path, reason });
+    };
+    const pending = new Set((this.syncs.pendingOps?.(mapping.id) ?? []).map((op) => vaultToRepoPath(mapping, op.path)));
+    const held = this.heldPaths?.(mapping.id);
+    for (const [path, blob] of tree) {
+      const proof = previous.proven[path];
+      // Retain earlier proof for recovery/base purposes, but never upgrade it
+      // through unreadable, pending, held, or mismatching content.
+      if (proof) state.proven[path] = proof;
+      if (held?.has(path)) { fail(path, "held for review"); continue; }
+      if (pending.has(path)) continue;
+      if (!names.has(path)) {
+        const reason = proof && proof.blob !== blob
+          ? "remote changed after the local file was deleted"
+          : "remote-only file has not been verified in this vault";
+        state.review[path] = { ref, blob, reason };
+        fail(path, reason);
+        continue;
+      }
+      if (priorBlocked.some((b) => b.path === path)) continue;
+      let matched = unchanged.has(path) && proof?.blob === blob;
+      if (!matched) {
+        const rel = repoToVaultPath(mapping, path)!;
+        try {
+          const content = await this.vaultMirror!.read(mapping.localFolder, rel);
+          if (content.includes("\0")) { fail(path, "binary content excluded from text merge"); continue; }
+          matched = gitBlobId(content, blob.length) === blob;
+        } catch {
+          fail(path, "vault file could not be verified");
+          continue;
+        }
+      }
+      if (matched) {
+        state.proven[path] = { ref, blob };
+        if (state.decisions[path]?.action === "recover") delete state.decisions[path];
+      } else {
+        fail(path, "vault content differs from the published snapshot");
+      }
+    }
+    // Unpublished/held vault-only notes must not produce a complete-synced claim.
+    for (const path of names) {
+      if (!tree.has(path)) fail(path, held?.has(path) ? "held for review" : "vault file has not reached the remote");
+    }
+    for (const [path, decision] of Object.entries(state.decisions)) {
+      if (decision.action === "delete" && !tree.has(path) && !names.has(path)) delete state.decisions[path];
+      else fail(path, "reviewed decision remains pending; reopen reconciliation if the remote changed");
+    }
+    return { state, blocked };
+  }
+
+  /** Runs inside the normal repository lock and plugin single-flight operation.
+   * Decisions are revision-bound USER INTENT, not permission: when any precondition
+   * fails (remote moved since review, path left the mapping's scope, the vault file
+   * reappeared, an editor holds it, the blob can no longer be verified), the
+   * decision is DROPPED with an advisory and the path re-queues for review on the
+   * fresh tip — a stale decision never executes, and never wedges the mapping's
+   * pass with a thrown error the review surface cannot clear. */
+  private async applyReconciliationDecisions(
+    mapping: FolderMapping,
+    c: GitClient,
+    remoteSha: string,
+    state: ReconciliationState,
+  ): Promise<{ deletes: Set<string>; blocked: BlockedFile[] }> {
+    const deletes = new Set<string>();
+    const blocked: BlockedFile[] = [];
+    const drop = (path: string, reason: string): void => {
+      delete state.decisions[path];
+      blocked.push({ path, reason });
+    };
+    for (const [path, decision] of Object.entries(state.decisions)) {
+      if (!checkRelPath(path).ok || !this.inScope(mapping, path) || !this.mirrorListable(path)) {
+        drop(path, "reviewed path left the mapping's scope — reopen reconciliation");
+        continue;
+      }
+      if (decision.ref !== remoteSha) {
+        drop(path, "remote changed since review — reopen reconciliation on the new tip");
+        continue;
+      }
+      if (this.heldPaths?.(mapping.id)?.has(path)) {
+        drop(path, "reviewed file is held; release the hold before reconciliation");
+        continue;
+      }
+      const rel = repoToVaultPath(mapping, path);
+      if (rel === null) {
+        drop(path, "reviewed path is outside the mapping — reopen reconciliation");
+        continue;
+      }
+      const listed = await this.vaultMirror!.list(mapping.localFolder);
+      if (listed.includes(rel)) {
+        drop(path, "vault file appeared since review — reopen reconciliation");
+        continue;
+      }
+      if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultRootPath(mapping.localFolder, rel))) {
+        drop(path, "reviewed file is open in an editor — close it and reopen reconciliation");
+        continue;
+      }
+      const read = await c.showTyped(remoteSha, path);
+      if (read.kind === "absent") {
+        drop(path, "reviewed file is no longer on the remote — reopen reconciliation");
+        continue;
+      }
+      if (read.kind === "error" || read.content.includes("\0") ||
+          gitBlobId(read.content, decision.blob.length) !== decision.blob) {
+        drop(path, "reviewed remote content cannot be verified — reopen reconciliation");
+        continue;
+      }
+      if (decision.action === "delete") {
+        if (mapping.direction === "pull-only") {
+          drop(path, "pull-only mappings cannot delete remote files");
+          continue;
+        }
+        if (!this.trash) {
+          drop(path, "remote deletion requires a recovery store — none is configured");
+          continue;
+        }
+        // Record and verify recoverable bytes before any effect.
+        this.trash.trash(mapping.id, path, read.content);
+        deletes.add(path);
+      } else {
+        // Explicit user import, not automatic push-only remote application.
+        try {
+          await this.vaultMirror!.write(mapping.localFolder, rel, read.content);
+          if (await this.vaultMirror!.read(mapping.localFolder, rel) !== read.content) throw new Error("verify");
+        } catch {
+          drop(path, "recovered vault content could not be verified — reopen reconciliation");
+          continue;
+        }
+      }
+    }
+    return { deletes, blocked };
   }
 
   /**
@@ -513,6 +678,21 @@ export class CloneManager {
   ): Promise<SyncResult> {
     // Bind git ops to the clone dir; without a cwd they would run in process.cwd().
     const c = this.client.withAuth(auth).at(dir);
+    const fingerprint = reconciliationFingerprint(mapping, {
+      providerId: mapping.providerId, repoId: mapping.repoRef ?? repo.id, branch,
+      canonicalRemote: canonicalizeRemote(repo.httpUrlToRepo),
+    }, this.obsidianConfig);
+    const previous = this.syncs.reconciliation?.(mapping.id);
+    const identityChanged = previous !== undefined && previous.fingerprint !== fingerprint;
+    const reconciliation = this.vaultMirror && this.syncs.recordReconciliation
+      ? previous?.fingerprint === fingerprint ? structuredClone(previous) : emptyReconciliation(fingerprint)
+      : undefined;
+    if (reconciliation && !previous && !opts.dryRun) this.syncs.clearCorrespondence?.(mapping.id);
+    if (identityChanged) {
+      base = "";
+      opts = { ...opts, uncertain: true };
+      if (!opts.dryRun) this.syncs.clearCorrespondence?.(mapping.id);
+    }
 
     // Committer identity for every push this pass (fresh-machine safe).
     const committer = this.committerFor(mapping, auth, repo);
@@ -530,7 +710,22 @@ export class CloneManager {
     if (freshClone && !firstPush && branch !== "HEAD") {
       await c.run(["checkout", "-B", branch, `origin/${branch}`]);
     }
-    if (firstPush) return this.firstSyncPush(mapping, branch, c, dir, status, committer);
+    if (firstPush) {
+      const result = await this.firstSyncPush(mapping, branch, c, dir, status, committer);
+      if (reconciliation && result.newRemoteSha) {
+        const verified = await this.verifyReconciliation(mapping, c, result.newRemoteSha, reconciliation);
+        this.syncs.recordReconciliation?.(mapping.id, verified.state);
+        if (verified.blocked.length === 0) {
+          this.syncs.recordVaultSync?.(mapping.id);
+          this.syncs.recordCorrespondence?.(mapping.id, result.newRemoteSha);
+        } else {
+          this.syncs.clearCorrespondence?.(mapping.id);
+        }
+        result.blocked = verified.blocked;
+        if (verified.blocked.length > 0) result.kind = "retry-pending";
+      }
+      return result;
+    }
 
     // Push-only mappings still fetch — the remote tip is what a push must build
     // on to stay fast-forward — but the label should say why, not imply pulling.
@@ -603,6 +798,13 @@ export class CloneManager {
     // drop, incomplete ones re-apply (the editor may have closed since). Never
     // silently dropped; failures surface with attempts+lastError.
     const remainingPending = await this.recoverPendingOps(mapping);
+    let approvedDeletes = new Set<string>();
+    let decisionBlocked: BlockedFile[] = [];
+    if (reconciliation) {
+      const decisions = await this.applyReconciliationDecisions(mapping, c, remoteSha, reconciliation);
+      approvedDeletes = decisions.deletes;
+      decisionBlocked = decisions.blocked;
+    }
 
     // 3-way merge the local side in as "ours": base = the last-synced tree, theirs =
     // the remote tip, ours = the mapping's vault folder (via the mirror) or, without
@@ -611,6 +813,8 @@ export class CloneManager {
     const merged = await this.mergeSides(mapping, c, dir, baseSha, localSha, remoteRef, remoteSha, status, {
       uncertain: opts.uncertain || remainingPending.length > 0,
       signal: opts.signal,
+      reconciliation,
+      approvedDeletes,
     });
 
     if (merged.conflicts.length > 0) {
@@ -653,7 +857,7 @@ export class CloneManager {
       const verifiedIdle = decision.pull === "none" && alreadyPopulated && merged.applied.length === 0 && merged.autoResolvedPaths.length === 0;
       let deferred: PendingOperation[] = [];
       if (!verifiedIdle) {
-        deferred = await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status, opts.signal);
+        deferred = await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status, opts.signal, new Set(merged.blocked.map((b) => b.path)));
       }
       // S01: deferred vault operations (editor-open guard) become DURABLE pendingOps.
       // They ride in persisted state until applied+verified; correspondence never
@@ -724,7 +928,15 @@ export class CloneManager {
     // the pendingOps list forces replan/verify on the next pass.
     const pendingNow = this.syncs.pendingOps?.(mapping.id) ?? [];
     const blockedNow = pendingNow.filter((p) => p.state === "failed");
-    if (pendingNow.length === 0) {
+    let proofBlocked: BlockedFile[] = [];
+    if (reconciliation) {
+      // Dropped decisions ride as advisories alongside the merge's blocked files.
+      const verified = await this.verifyReconciliation(mapping, c, finalRemoteSha, reconciliation, [...merged.blocked, ...decisionBlocked], merged.unchanged);
+      this.syncs.recordReconciliation?.(mapping.id, verified.state);
+      proofBlocked = verified.blocked;
+      if (proofBlocked.length === 0 && pendingNow.length === 0) this.syncs.recordVaultSync?.(mapping.id);
+    }
+    if (pendingNow.length === 0 && merged.blocked.length === 0 && proofBlocked.length === 0) {
       this.syncs.recordCorrespondence?.(mapping.id, finalRemoteSha);
     }
     const deferredNow = pendingNow.filter((p) => p.state !== "failed").length;
@@ -737,14 +949,14 @@ export class CloneManager {
       newRemoteSha: finalRemoteSha,
       conflicts: [],
       renames: [],
-      kind: verifiedIdlePass ? "idle" : pushed ? "publish-local" : decision.pull !== "none" ? "apply-remote" : "idle",
+      kind: proofBlocked.length > 0 ? "retry-pending" : verifiedIdlePass ? "idle" : pushed ? "publish-local" : decision.pull !== "none" ? "apply-remote" : "idle",
       counts: {
         publish: pushed ? merged.applied.length : 0,
         apply: decision.pull !== "none" ? merged.applied.length : 0,
         deferred: deferredNow,
         conflicted: 0,
       },
-      blocked: merged.blocked,
+      blocked: [...merged.blocked, ...proofBlocked.filter((b) => !merged.blocked.some((m) => m.path === b.path))],
       ...(blockedNow.length > 0 ? { pendingFailures: blockedNow.length } : {}),
     };
   }
@@ -802,7 +1014,12 @@ export class CloneManager {
     let pushed = false;
     if (writePaths.length > 0) {
       await c.add(writePaths);
-      if ((await c.porcelain()).length > 0) {
+      // Commit eligibility is STAGED-ONLY (the S04 gate): the --no-checkout clone's
+      // worktree deliberately lacks remote-only files (additive init keeps them), so
+      // full porcelain also lists their EXPECTED unstaged deletions — and when the
+      // vault content already matches the remote tip, `git commit` would then fail
+      // with nothing staged. Only staged changes prove a commit exists to make.
+      if (await this.hasScopedStagedChanges(c, writePaths)) {
         const agent = this.pickAgent?.(mapping);
         const author = agent ? authorRefForAgent(agent) : undefined;
         await c.commit(
@@ -821,7 +1038,7 @@ export class CloneManager {
     // E03: populated is set ONLY on real correspondence — every in-scope vault file
     // actually reached the remote. Skipped (unreadable/held) uploads leave the vault
     // and remote divergent, so the flag stays unset and deletions stay disabled.
-    if (skippedUploads === 0) {
+    if (skippedUploads === 0 && !this.syncs.recordReconciliation) {
       this.syncs.recordVaultSync?.(mapping.id);
     } else {
       status?.(`first sync: ${skippedUploads} file(s) could not be read — deletions stay disabled for this mapping`);
@@ -858,8 +1075,8 @@ export class CloneManager {
     remoteRef: string,
     remoteSha: string,
     status?: (m: string) => void,
-    o?: { uncertain?: boolean; signal?: AbortSignal },
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]>; blocked: BlockedFile[] }> {
+    o?: { uncertain?: boolean; signal?: AbortSignal; reconciliation?: ReconciliationState; approvedDeletes?: Set<string> },
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]>; blocked: BlockedFile[]; unchanged?: Set<string> }> {
     // Steady-state shortcut (ALL directions, contract §8/E01): when the remote tip
     // equals the recorded baseline and a vault file's (mtime, size) pair matches the
     // snapshot recorded at the last completed pass (mtime predating it), ours ==
@@ -913,7 +1130,8 @@ export class CloneManager {
       remoteUnchanged &&
       this.vaultMirror &&
       vaultNamesEarly.size === 0 &&
-      !(this.syncs.vaultPopulated?.(mapping.id) ?? false)
+      !(this.syncs.vaultPopulated?.(mapping.id) ?? false) &&
+      Object.keys(o?.reconciliation?.proven ?? {}).length === 0
     ) {
       return { applied: [], conflicts: [], renames: [], autoResolvedPaths: [], fingerprints: {}, blocked: [] };
     }
@@ -953,7 +1171,7 @@ export class CloneManager {
     // genuinely deleted file would never leave the remote. When the vault folder
     // contains EVERY in-scope remote file, correspondence is proven and the flag can
     // be set; when it does not, keep deletions disabled and say why — never guess.
-    if (this.vaultMirror && mapping.direction !== "pull-only" && !(this.syncs.vaultPopulated?.(mapping.id) ?? false)) {
+    if (!o?.reconciliation && this.vaultMirror && mapping.direction !== "pull-only" && !(this.syncs.vaultPopulated?.(mapping.id) ?? false)) {
       const missing = allClonePaths.filter((p) => {
         const rel = repoToVaultPath(mapping, p);
         return rel === null || !vaultNames.has(rel);
@@ -969,7 +1187,9 @@ export class CloneManager {
     // a completed first-sync push, or the coverage reconciliation above). Before that
     // the file is simply one the vault has not seen yet, and treating it as deleted
     // would wipe remote content. Pull-only mappings never push deletions.
-    const deletable = mapping.direction !== "pull-only" && (this.syncs.vaultPopulated?.(mapping.id) ?? false);
+    const deletable = mapping.direction !== "pull-only" && (o?.reconciliation
+      ? Object.keys(o.reconciliation.proven).length > 0
+      : (this.syncs.vaultPopulated?.(mapping.id) ?? false));
     // Empty-vault guard: a populated mapping whose vault folder went empty (rename,
     // move, typo) must refuse the pass rather than mirror-delete the entire remote
     // subtree for every teammate. Names-based — an empty/unreadable folder has no
@@ -1009,10 +1229,16 @@ export class CloneManager {
       const batch = paths.slice(i, i + MERGE_BATCH);
       const entries: FileVersions[] = [];
       for (const path of batch) {
+        if (this.heldPaths?.(mapping.id)?.has(path)) {
+          blocked.push({ path, reason: "held for review" });
+          continue;
+        }
+        const evidence = o?.reconciliation?.proven[path];
         // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
         let base: string | undefined;
-        if (baseSha) {
-          const b = await readTyped(baseSha, path);
+        const pathBase = evidence?.ref ?? baseSha;
+        if (pathBase) {
+          const b = await readTyped(pathBase, path);
           if (b === null) continue; // blocked — surfaced per-file, never a deletion
           base = b;
         }
@@ -1038,7 +1264,7 @@ export class CloneManager {
               blocked.push({ path, reason: `vault file unreadable: ${String(err).slice(0, 160)}` });
               continue;
             }
-          } else if (deletable) {
+          } else if (mapping.direction !== "pull-only" && (o?.approvedDeletes?.has(path) || (o?.reconciliation ? evidence !== undefined : deletable))) {
             ours = undefined; // vault had it (populated) and no longer does -> deletion
           } else if (baseSha) {
             // not seen yet -> act as unchanged (the base content the vault has not
@@ -1051,13 +1277,21 @@ export class CloneManager {
         // When the remote tip IS the baseline tree, theirs == base by construction —
         // reuse instead of a second show per file (E01 idle cost: 600 → 0 shows).
         let theirs: string | undefined;
-        if (remoteSha === baseSha && baseSha) {
+        if (remoteSha === pathBase && pathBase) {
           theirs = base;
         } else {
           const t = await readTyped(remoteRef, path);
           if (t === null) continue;
           theirs = t;
         }
+        // A delete/modify race is not a clean deletion and must never resurrect
+        // or discard content implicitly. Review binds a decision to this blob.
+        if (this.vaultMirror && ours === undefined && evidence && theirs !== undefined &&
+            gitBlobId(theirs, evidence.blob.length) !== evidence.blob && !o?.approvedDeletes?.has(path)) {
+          blocked.push({ path, reason: "remote changed after the local file was deleted — reconcile explicitly" });
+          continue;
+        }
+        if (o?.approvedDeletes?.has(path)) base = theirs;
         // S06: binary content must never enter text concatenation — a NUL byte in
         // any side marks the file binary; blocked with a distinct reason.
         if ([base, ours, theirs].some((s) => s !== undefined && s.includes("\0"))) {
@@ -1133,6 +1367,7 @@ export class CloneManager {
       autoResolvedPaths,
       fingerprints,
       blocked,
+      unchanged: new Set([...staleRels].map((rel) => vaultToRepoPath(mapping, rel))),
     };
   }
 
@@ -1307,6 +1542,7 @@ export class CloneManager {
     remoteRef: string,
     status?: (m: string) => void,
     signal?: AbortSignal,
+    blockedPaths: Set<string> = new Set(),
   ): Promise<PendingOperation[]> {
     if (!this.vaultMirror) return [];
     const passOpId = Date.now().toString(36);
@@ -1328,7 +1564,21 @@ export class CloneManager {
     status?.(baseSha === "" ? `first sync: populating vault (${clonePaths.length} files)` : `updating vault (${plan.ops.length} changes)`);
 
     for (const op of plan.ops) {
-      if (signal?.aborted) break; // cancelled is never success — stop applying
+      if (signal?.aborted) throw new Error("sync cancelled");
+      const repoPath = vaultToRepoPath(mapping, op.path);
+      if (blockedPaths.has(repoPath) || this.heldPaths?.(mapping.id)?.has(repoPath)) {
+        if (op.kind === "write") {
+          deferred.push({
+            opId: `${mapping.id}:${passOpId}:vault-write:${op.path}`,
+            kind: "vault-write",
+            path: op.path,
+            state: "pending",
+            createdAt: Date.now(),
+            attempts: 0,
+          });
+        }
+        continue;
+      }
       if (op.kind === "delete") {
         // Record the vault file's content before removing it so a remote-driven
         // deletion is recoverable via `.mugs-trash` (Area 3).
@@ -1410,7 +1660,7 @@ export class CloneManager {
     // vault-absent in-scope file is a real deletion (see mergeSides' `deletable`).
     // With deferred work the claim is only partial: the caller persists pendingOps
     // and leaves correspondence at its previous proven point.
-    this.syncs.recordVaultSync?.(mapping.id);
+    if (!this.syncs.recordReconciliation && deferred.length === 0) this.syncs.recordVaultSync?.(mapping.id);
     return deferred;
   }
 

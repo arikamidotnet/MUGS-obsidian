@@ -76,6 +76,16 @@ vi.mock("obsidian", () => {
   return {
     Plugin: FakePlugin,
     Notice: FakeNotice,
+    // main.ts imports the reconciliation modal, which extends Modal. The modal is
+    // never opened in these scheduling tests, but the mock must export it.
+    Modal: class {
+      contentEl: any = { empty() {} };
+      constructor(_app?: any) {}
+      onOpen(): void {}
+      onClose(): void {}
+      open(): void { this.onOpen(); }
+      close(): void { this.onClose(); }
+    },
     EventRef: class {},
     PluginSettingTab: FakePluginSettingTab,
     Setting: class { setName(){return this;} setDesc(){return this;} addToggle(){return this;} addDropdown(){return this;} addText(){return this;} addTextArea(){return this;} addButton(){return this;} addField(){return this;} },

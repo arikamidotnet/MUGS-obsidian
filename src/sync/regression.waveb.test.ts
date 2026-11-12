@@ -21,6 +21,7 @@ import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from ".
 import { MugsStore, MemoryIO } from "../store";
 import type { VaultMirror } from "./cloneManager";
 import { cloneDir } from "./cloneManager";
+import { MemoryTrashStore } from "./trash";
 import type { FolderMapping, Credential } from "../types";
 import { installHermeticGitIdentity, hermeticExecSync, CountingRunner } from "./testkit";
 import { identityCloneDir } from "./repoIdentity";
@@ -117,6 +118,153 @@ afterEach(() => { rmSync(f.base, { recursive: true, force: true }); });
 const remoteTip = (): string => sh(`git -C "${f.remote}" rev-parse main`).trim();
 const remoteFile = (name: string): string => sh(`git -C "${f.remote}" show main:${name}`).toString();
 const PUSH_ONLY: FolderMapping[] = [{ id: "m", label: "M", remotePath: "", localFolder: "Synced", providerId: "c", direction: "push-only" }];
+
+describe("legacy path-level reconciliation", () => {
+  const legacy = () => {
+    unlinkSync(join(f.synced, "G.md")); // remote-only: never received by this vault
+    f.store.setLastSync({ mappingId: "m", lastRemoteSha: remoteTip(), status: "ok" });
+  };
+  const push = () => syncAllMappings(f.deps({ mappings: PUSH_ONLY }));
+
+  it("retains unknown remote files but propagates a proven rename across restart", async () => {
+    legacy();
+    const out = await push();
+    // Review items are ADVISORY: the pass completes ("ok"), the queue rides on the
+    // outcome as blocked data, and the unknown remote file is retained — not deleted.
+    expect(out[0].status).toBe("ok");
+    expect(out[0].kind).toBe("retry-pending");
+    expect(out[0].blocked?.map((b) => b.path)).toContain("G.md");
+    expect(f.store.getSettings().lastSync.m.reconciliation?.review["G.md"]).toBeDefined();
+    expect(f.store.getSettings().lastSync.m.reconciliation?.proven["F.md"]).toBeDefined();
+    expect(f.store.getSettings().lastSync.m.correspondenceSha).toBeUndefined();
+    await f.store.save();
+    const reloaded = new MugsStore(f.ioMem);
+    await reloaded.load();
+    writeFileSync(join(f.synced, "renamed.md"), "v1\n");
+    unlinkSync(join(f.synced, "F.md"));
+    await syncAllMappings({ ...f.deps({ mappings: PUSH_ONLY }), lastSync: storeWritableAccessor(reloaded) });
+    expect(sh(`git -C "${f.remote}" ls-tree -r --name-only main`).trim().split("\n")).toEqual(["G.md", "renamed.md"]);
+    expect(remoteFile("G.md")).toBe("g\n");
+    expect(existsSync(join(f.synced, "G.md"))).toBe(false);
+  });
+
+  it("does not grant global deletion permission after additive first-push", async () => {
+    unlinkSync(join(f.synced, "G.md"));
+    await syncAllMappings({ ...f.deps({ mappings: PUSH_ONLY }), firstSyncDirection: "push" });
+    expect(f.store.getSettings().lastSync.m.vaultPopulated).not.toBe(true);
+    expect(f.store.getSettings().lastSync.m.reconciliation?.review["G.md"]).toBeDefined();
+    writeFileSync(join(f.synced, "keep.md"), "keep\n");
+    unlinkSync(join(f.synced, "F.md"));
+    await push();
+    expect(sh(`git -C "${f.remote}" ls-tree -r --name-only main`)).not.toContain("F.md");
+    expect(remoteFile("G.md")).toBe("g\n");
+  });
+
+  it("does not acquire proof for an unreadable or held file", async () => {
+    legacy();
+    const deps = f.deps({ mappings: PUSH_ONLY });
+    await syncAllMappings({ ...deps, heldPaths: () => new Set(["F.md"]) });
+    expect(f.store.getSettings().lastSync.m.reconciliation?.proven["F.md"]).toBeUndefined();
+    const badMirror: VaultMirror = {
+      list: async () => deps.vaultMirror!.list("Synced"),
+      read: async () => { throw new Error("permission denied"); },
+      write: async () => {},
+      remove: async () => {},
+      stat: async () => undefined,
+    };
+    await syncAllMappings({ ...deps, vaultMirror: badMirror });
+    expect(f.store.getSettings().lastSync.m.reconciliation?.proven["F.md"]).toBeUndefined();
+    expect(f.store.getSettings().lastSync.m.correspondenceSha).toBeUndefined();
+  });
+
+  it("invalidates ownership when the mapping local root changes", async () => {
+    await push();
+    expect(f.store.getSettings().lastSync.m.reconciliation?.proven["F.md"]).toBeDefined();
+    unlinkSync(join(f.synced, "F.md"));
+    writeFileSync(join(f.synced, "keep.md"), "keep\n");
+    const renamedRoot = [{ ...PUSH_ONLY[0], localFolder: "Different" }];
+    // Fixture mirror deliberately returns the same bytes: identity alone MUST invalidate proof.
+    await syncAllMappings(f.deps({ mappings: renamedRoot }));
+    expect(remoteFile("F.md")).toBe("v1\n");
+  });
+
+  it("requires review when a proven local deletion races a remote edit", async () => {
+    await push();
+    const work = join(f.base, "remote-edit");
+    hermeticExecSync(`git clone -q "${f.remote}" "${work}"`);
+    writeFileSync(join(work, "F.md"), "edited remotely\n");
+    hermeticExecSync(`git -C "${work}" commit -q -a -m edit`);
+    sh(`git -C "${work}" push -q origin main`);
+    unlinkSync(join(f.synced, "F.md"));
+    const out = await push();
+    // The racing deletion is withheld for review (advisory), never a hard block.
+    expect(out[0].status).toBe("ok");
+    expect(out[0].kind).toBe("retry-pending");
+    expect(out[0].blocked?.map((b) => b.path)).toContain("F.md");
+    expect(remoteFile("F.md")).toBe("edited remotely\n");
+    expect(existsSync(join(f.synced, "F.md"))).toBe(false);
+    expect(f.store.getSettings().lastSync.m.reconciliation?.review["F.md"]?.reason).toContain("changed");
+  });
+
+  it("keeps the empty-folder guard even when only some paths are proven", async () => {
+    legacy();
+    await push();
+    unlinkSync(join(f.synced, "F.md"));
+    const out = await push();
+    expect(out[0].status).toBe("skipped");
+    expect(out[0].reason).toContain("empty");
+    expect(remoteFile("F.md")).toBe("v1\n");
+    expect(remoteFile("G.md")).toBe("g\n");
+  });
+
+  it("executes an explicit delete decision for a retained remote-only file", async () => {
+    legacy();
+    const deps = { ...f.deps({ mappings: PUSH_ONLY }), trash: new MemoryTrashStore() };
+    await syncAllMappings(deps);
+    const ls = f.store.getSettings().lastSync.m;
+    const entry = ls.reconciliation?.review["G.md"];
+    expect(entry).toBeDefined();
+    // The user confirms deletion of the retained file AT the reviewed revision.
+    f.store.setLastSync({
+      ...ls,
+      reconciliation: { ...ls.reconciliation!, decisions: { ...ls.reconciliation!.decisions, "G.md": { ref: entry!.ref, blob: entry!.blob, action: "delete" } } },
+    });
+    const out = await syncAllMappings(deps);
+    expect(out[0].status).toBe("ok");
+    expect(sh(`git -C "${f.remote}" ls-tree -r --name-only main`).trim().split("\n")).toEqual(["F.md"]);
+    const after = f.store.getSettings().lastSync.m.reconciliation;
+    expect(after?.review["G.md"]).toBeUndefined();
+    expect(after?.decisions["G.md"]).toBeUndefined();
+  });
+
+  it("drops a stale decision and re-queues the file instead of wedging the pass", async () => {
+    legacy();
+    const deps = { ...f.deps({ mappings: PUSH_ONLY }), trash: new MemoryTrashStore() };
+    await syncAllMappings(deps);
+    const ls = f.store.getSettings().lastSync.m;
+    const entry = ls.reconciliation?.review["G.md"];
+    expect(entry).toBeDefined();
+    f.store.setLastSync({
+      ...ls,
+      reconciliation: { ...ls.reconciliation!, decisions: { ...ls.reconciliation!.decisions, "G.md": { ref: entry!.ref, blob: entry!.blob, action: "delete" } } },
+    });
+    // Another device advances the remote AFTER the decision was recorded: the
+    // revision-bound decision must be dropped, never executed and never fatal.
+    const work = join(f.base, "peer");
+    hermeticExecSync(`git clone -q "${f.remote}" "${work}"`);
+    writeFileSync(join(work, "H.md"), "peer\n");
+    hermeticExecSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m peer`);
+    sh(`git -C "${work}" push -q origin main`);
+    const out = await syncAllMappings(deps);
+    expect(out[0].status).toBe("ok");
+    expect(remoteFile("G.md")).toBe("g\n");
+    expect(remoteFile("H.md")).toBe("peer\n");
+    const after = f.store.getSettings().lastSync.m.reconciliation;
+    expect(after?.decisions["G.md"]).toBeUndefined();
+    expect(after?.review["G.md"]?.ref).toBe(remoteTip());
+    expect(out[0].blocked?.some((b) => b.path === "G.md" && b.reason.includes("remote changed since review"))).toBe(true);
+  });
+});
 
 describe("S01: deferred work -> durable pendingOps; correspondence gating; restart safety", () => {
   it("defers editor-held write+delete into pendingOps, never advances correspondence, and a restart re-applies without stale pushes", async () => {

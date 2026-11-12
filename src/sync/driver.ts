@@ -251,7 +251,10 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
         record(outcome(mapping, "conflict", { pull: result.pull, kind: result.kind, counts: result.counts }));
         continue;
       }
-      record(outcome(mapping, "ok", { pull: result.pull, push: result.push, newRemoteSha: result.newRemoteSha, kind: result.kind, counts: result.counts, blocked: result.blocked, pendingFailures: result.pendingFailures }));
+      record(outcome(mapping, "ok", {
+        pull: result.pull, push: result.push, newRemoteSha: result.newRemoteSha, kind: result.kind,
+        counts: result.counts, blocked: result.blocked, pendingFailures: result.pendingFailures,
+      }));
     } catch (error) {
       skip(mapping, errorMessage(error));
     }
@@ -298,6 +301,9 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     recordPendingOps: (id, ops) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, pendingOps: ops })),
     recordCorrespondence: (id, sha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, correspondenceSha: sha })),
     recordCloneDir: (id, dir) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, cloneDir: dir })),
+    reconciliation: (id) => store.getSettings().lastSync[id]?.reconciliation,
+    recordReconciliation: (id, reconciliation) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, reconciliation })),
+    clearCorrespondence: (id) => persistLastSync(store, id, (cur) => ({ ...cur, correspondenceSha: undefined, vaultPopulated: false })),
   };
 }
 

@@ -19,15 +19,21 @@ import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir,
 // Ensure every manual git op and every SUT git op inherits a stable identity.
 installHermeticGitIdentity();
 
-const REMOTE_URL = "file://" + join(tmpdir(), "mugs-e2e-shared.git"); // clone SOURCE (as the driver's baseUrl)
-const REMOTE_PATH = join(tmpdir(), "mugs-e2e-shared.git");             // plain bare-repo path for seeding
-const CLONE_ROOT = join(tmpdir(), "mugs-e2e-clones");
+/** Process-unique fixture paths: fixed names collided when two checkouts ran the
+ *  suite concurrently (the main checkout + a release worktree) — one process's
+ *  fixture rmSync wiped the other's mid-test (ENOENT on files committed moments
+ *  earlier). Unique-per-process names keep concurrent runs hermetic. */
+const tmpPath = (name: string): string => join(tmpdir(), `mugs-e2e-p${process.pid}-${name}`);
+
+const REMOTE_URL = "file://" + tmpPath("shared.git"); // clone SOURCE (as the driver's baseUrl)
+const REMOTE_PATH = tmpPath("shared.git");             // plain bare-repo path for seeding
+const CLONE_ROOT = tmpPath("clones");
 let remoteWork: string;
 
 /** Create a bare repo at REMOTE_PATH with Notes/diary.md line 3 == `line`, committed on main. */
 function seedRemote(line: string): void {
   rmSync(REMOTE_PATH, { recursive: true, force: true });
-  remoteWork = join(tmpdir(), "mugs-e2e-src");
+  remoteWork = tmpPath("src");
   rmSync(remoteWork, { recursive: true, force: true });
   hermeticExecSync(`git init -q -b main "${remoteWork}"`);
   mkdirSync(join(remoteWork, "Notes"), { recursive: true });
@@ -107,7 +113,7 @@ describe("local provider — real git end-to-end", () => {
     });
 
     // Another device advances the remote with a different edit of line 3.
-    const scratch = join(tmpdir(), "mugs-e2e-scratch");
+    const scratch = tmpPath("scratch");
     rmSync(scratch, { recursive: true, force: true });
     hermeticExecSync(`git clone -q "${REMOTE_PATH}" "${scratch}"`);
     writeFileSync(join(scratch, "Notes", "diary.md"), "# Diary\n\nREMOTE EDIT by another device.\n");
@@ -142,7 +148,7 @@ describe("local provider — real git end-to-end", () => {
   it("pushes a clean divergence by re-pointing the branch at the remote tip (fast-forward)", async () => {
     // Isolated bare remote + clone root so this scenario cannot interfere with the
     // shared fixtures above (and vice versa).
-    const base = join(tmpdir(), "mugs-e2e-diverge");
+    const base = tmpPath("diverge");
     const remotePlain = join(base, "remote.git");
     const work = join(base, "work");
     const cloneRoot = join(base, "clones");
@@ -209,7 +215,7 @@ describe("local provider — real git end-to-end", () => {
   it("excludes .trash/ from push when syncTrashFolder is false, includes it when true", async () => {
     // Isolated bare remote + clone root per scenario so the two gates don't interfere.
     for (const syncTrashFolder of [false, true]) {
-      const base = join(tmpdir(), `mugs-e2e-trash-${syncTrashFolder}`);
+      const base = tmpPath(`trash-${syncTrashFolder}`);
       const remotePlain = join(base, "remote.git");
       const work = join(base, "work");
       const cloneRoot = join(base, "clones");
@@ -301,7 +307,7 @@ describe("vault mirror + first-sync direction — real git end-to-end", () => {
 
   /** Isolated fixture: bare remote (seeded by the caller) + empty clone root + vault dir. */
   function fixture(name: string): { base: string; remotePlain: string; cloneRoot: string; vaultRoot: string; syncedVault: string } {
-    const base = join(tmpdir(), `mugs-e2e-${name}`);
+    const base = tmpPath(name);
     rmSync(base, { recursive: true, force: true });
     const out = {
       base,
@@ -466,7 +472,7 @@ describe("vault mirror + first-sync direction — real git end-to-end", () => {
 describe("sync then diff — real git verification", () => {
   it("after a successful sync the Diff data source reports identical with a baseline ref; an edit produces changed", async () => {
     // Isolated bare remote + clone root.
-    const base = join(tmpdir(), "mugs-e2e-sync-diff");
+    const base = tmpPath("sync-diff");
     const remotePlain = join(base, "remote.git");
     const cloneRoot = join(base, "clones");
     const work = join(base, "work");
