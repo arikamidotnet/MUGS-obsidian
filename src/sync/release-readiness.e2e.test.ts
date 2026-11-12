@@ -17,10 +17,10 @@ import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
-import { cloneDir, type VaultMirror, type WorkingTreeWriter } from "./cloneManager";
+import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 import { resolveConflictFile } from "./conflict";
 import type { FolderMapping, Credential } from "../types";
-import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
+import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir } from "./testkit";
 
 installHermeticGitIdentity();
 
@@ -175,7 +175,8 @@ describe("release readiness — real git end-to-end", () => {
     expect(conflicts.map((c) => c.path)).toContain("Notes/diary.md");
     const next = resolveConflictFile(conflicts, "Notes/diary.md", "theirs")!;
     writeFileSync(join(f.syncedVault, "Notes", "diary.md"), next.resolvedContent);
-    const cp = cloneDir({ root: f.cloneRoot }, "cred-rc", "map-rc");
+    // S03: resolve the clone via the engine-recorded dir (identity layout), never a hardcoded path.
+    const cp = recordedCloneDir(f.store, "map-rc") ?? expectedIdentityCloneDir(f.cloneRoot, { providerId: "cred-rc", repoId: "map-rc", remoteUrl: f.remotePlain });
     writeFileSync(join(cp, "Notes", "diary.md"), next.resolvedContent);
     f.store.setConflicts("map-rc", next.conflicts);
 

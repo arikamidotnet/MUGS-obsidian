@@ -11,10 +11,10 @@ import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
-import { cloneDir, type VaultMirror } from "./cloneManager";
+import type { VaultMirror } from "./cloneManager";
 import { StoreDiffDataSource } from "../ui/defaultDataSources";
 import type { FolderMapping, Credential } from "../types";
-import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
+import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir } from "./testkit";
 
 // Ensure every manual git op and every SUT git op inherits a stable identity.
 installHermeticGitIdentity();
@@ -45,8 +45,11 @@ function localCred(): Credential {
 function mapping(over: Partial<FolderMapping> = {}): FolderMapping {
   return { id: "map-synced-notes", label: "Synced notes", remotePath: "", localFolder: "Synced", providerId: "cred-local-shared", direction: "push-pull", ...over };
 }
+/** S03 identity layout: the dir the engine clones into for the shared mapping
+ *  (repoId = repoRef ?? repo.id = mapping.id; branch = "main"). Cross-checked
+ *  against the engine-recorded cloneDir in the first-sync test. */
 function clonePath(): string {
-  return cloneDir({ root: CLONE_ROOT }, "cred-local-shared", "map-synced-notes");
+  return expectedIdentityCloneDir(CLONE_ROOT, { providerId: "cred-local-shared", repoId: "map-synced-notes", remoteUrl: REMOTE_PATH });
 }
 
 beforeAll(() => {
@@ -73,6 +76,8 @@ describe("local provider — real git end-to-end", () => {
       conflicts: storeConflictAccessor(store),
     });
 
+    // S03: the recorded cloneDir (UI resolution source) must match the identity layout.
+    expect(recordedCloneDir(store, "map-synced-notes")).toBe(clonePath());
     const diary = join(clonePath(), "Notes", "diary.md");
     console.log("clonePath =", clonePath());
     console.log("remote tree:", execSync(`find "${REMOTE_PATH}" -maxdepth 3 2>/dev/null`).toString());
@@ -180,7 +185,7 @@ describe("local provider — real git end-to-end", () => {
     rmSync(scratch, { recursive: true, force: true });
 
     // The MUGS clone commits its own non-overlapping new file -> histories diverge.
-    const cp = cloneDir({ root: cloneRoot }, "cred-diverge", mappingId);
+    const cp = expectedIdentityCloneDir(cloneRoot, { providerId: "cred-diverge", repoId: mappingId, remoteUrl: remotePlain });
     writeFileSync(join(cp, "Notes", "local-addition.md"), "local addition\n");
     hermeticExecSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
     hermeticExecSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m "local addition"`);
@@ -240,7 +245,7 @@ describe("local provider — real git end-to-end", () => {
       // Local edits in the clone: commit an ordinary file (creating unpushed work that
       // enables a push) and leave an uncommitted modification of a tracked .trash/ file,
       // which is exactly what the inScope gate filters when staging on push.
-      const cp = cloneDir({ root: cloneRoot }, "cred-trash", mappingId);
+      const cp = expectedIdentityCloneDir(cloneRoot, { providerId: "cred-trash", repoId: mappingId, remoteUrl: remotePlain });
       writeFileSync(join(cp, "notes", "bar.md"), "# bar\n");
       hermeticExecSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
       hermeticExecSync(`git -C "${cp}" add notes/bar.md && git -C "${cp}" commit -q -m "add bar"`);
@@ -506,7 +511,7 @@ describe("sync then diff — real git verification", () => {
     expect((d1.baseRef ?? "").length).toBeGreaterThan(0);
 
     // Make a real commit in the clone (simulates local work since last sync).
-    const cp = cloneDir({ root: cloneRoot }, "cred-sd", mappingId);
+    const cp = expectedIdentityCloneDir(cloneRoot, { providerId: "cred-sd", repoId: mappingId, remoteUrl: remotePlain });
     writeFileSync(join(cp, "Notes", "diary.md"), "# Diary\n\nbase\n\nEDIT\n");
     execSync(`git -C "${cp}" config user.name V && git -C "${cp}" config user.email v@l`);
     execSync(`git -C "${cp}" add -A && git -C "${cp}" commit -q -m edit`);

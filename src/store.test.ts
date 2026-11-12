@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, test } from "vitest";
 import { MugsStore, MemoryIO } from "./store";
 import { deriveKey, encryptBytes, generateSalt, derivePassphraseKey, encryptAesGcm, decryptAesGcm } from "./crypto";
 
@@ -704,5 +704,118 @@ describe("MugsStore conflict persistence", () => {
     const store2 = new MugsStore(io);
     await store2.load();
     expect(store2.getConflicts("m1").map((c) => c.path)).toEqual(["notes/day.md"]);
+  });
+});
+
+/**
+ * Regression (Wave B integration): upsertCredential metadata-only edits.
+ *
+ * A masked/cipher re-supply (label rename from the UI, which only sees masked
+ * tokens) must PRESERVE the runtime plaintext token map and any unreadable
+ * marker; only a REAL secret may supersede. Overwriting runtimeTokens with the
+ * stored ciphertext/mask would poison the live token map — sync would hand the
+ * mask/cipher to git as if it were the secret.
+ */
+describe("upsertCredential metadata-edit semantics (masked/cipher re-supply vs real secret)", () => {
+  const PASS = "correct horse battery staple";
+
+  // DEFECT PIN (it.fails): the display mask produced by redactToken() keeps the
+  // LAST 4 characters ("•••…dwY="), but isMasked (store.ts) only recognizes an
+  // ALL-bullet token (/^•+$/). A masked re-supply — the exact shape the UI sends
+  // for a metadata-only edit — is therefore classified as a REAL secret and
+  // poisons runtimeTokens: getToken then returns bullets, and sync would hand
+  // them to git. PRODUCTION FIX NEEDED (store wave): recognize the display-mask
+  // form in isMasked/upsertCredential (e.g. treat a token equal to
+  // redactToken(stored) as metadata-only). Convert to a normal test when fixed —
+  // an it.fails that starts passing fails the suite and forces this conversion.
+  test.fails("masked re-supply (metadata-only edit) preserves the runtime plaintext token", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-SECRET1234" });
+    await store.setEncryptionPassphrase(PASS);
+    await store.save();
+
+    // Unlocked session (the UI after unlock): a label rename re-supplies the MASK.
+    const store2 = new MugsStore(io);
+    await store2.load();
+    expect(await store2.unlock(PASS)).toBe(true);
+    const masked = store2.getDisplaySettings().credentials[0].token;
+    expect(masked).not.toContain("SECRET1234");
+    store2.upsertCredential({ id: "c1", label: "work-renamed", kind: "gitlab", token: masked });
+
+    // The runtime plaintext must survive the metadata-only edit — the mask/cipher
+    // must never enter the token map (sync would hand it to git as the secret).
+    expect(store2.getToken("c1")).toBe("glpat-SECRET1234");
+
+    // Persisting the metadata edit keeps the secret encrypted at rest (never the mask).
+    await store2.save();
+    const onDisk = (await io.read()) as { credentials: Array<{ id: string; label: string; token: string }> };
+    const c1 = onDisk.credentials.find((c) => c.id === "c1");
+    expect(c1?.label).toBe("work-renamed");
+    expect(c1?.token).toMatch(/^aesgcm-pw:/);
+
+    // A fresh session still recovers the original secret.
+    const store3 = new MugsStore(io);
+    await store3.load();
+    expect(await store3.unlock(PASS)).toBe(true);
+    expect(store3.getToken("c1")).toBe("glpat-SECRET1234");
+  });
+
+  it("cipher re-supply of an unreadable token keeps the unreadable marker (never resolves to a fake secret)", async () => {
+    // c2's stored token is a pw-cipher under a DIFFERENT passphrase: load marks it
+    // unreadable, and the correct PASS cannot unlock it.
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "good", kind: "gitlab", token: "glpat-GOOD" });
+    store.upsertCredential({ id: "c2", label: "bad", kind: "github", token: "glpat-BAD" });
+    await store.setEncryptionPassphrase(PASS);
+    await store.save();
+
+    const saltOther = generateSalt();
+    const otherKey = await derivePassphraseKey("different-pass-for-metadata", saltOther, 310000);
+    const badPw = await encryptAesGcm("glpat-BAD", otherKey);
+    const onDiskBad = (await io.read()) as any;
+    onDiskBad.credentials.find((c: any) => c.id === "c2").token = badPw;
+    await io.write(onDiskBad);
+
+    const store2 = new MugsStore(io);
+    await store2.load();
+    expect(await store2.unlock(PASS)).toBe(false); // c2 unreadable
+    expect(store2.getToken("c2")).toBeUndefined();
+
+    // Metadata-only edit of c2 by re-passing its stored cipher (locked session — allowed).
+    store2.upsertCredential({ id: "c2", label: "bad-renamed", kind: "github", token: badPw });
+
+    // The unreadable marker must NOT be cleared: the token stays "missing" for auth.
+    expect(store2.getToken("c2")).toBeUndefined();
+
+    // The durable cipher is untouched; the label edit did not poison it.
+    await store2.save();
+    const onDisk = (await io.read()) as any;
+    const c2 = onDisk.credentials.find((c: any) => c.id === "c2");
+    expect(c2?.token).toBe(badPw);
+    expect(c2?.label).toBe("bad-renamed");
+  });
+
+  it("a real secret still supersedes the runtime plaintext and the stored cipher", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-OLD-SECRET" });
+    await store.setEncryptionPassphrase(PASS);
+    await store.save();
+
+    // Unlocked rotation: supplying a REAL new secret must take effect immediately...
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-ROTATED-SECRET" });
+    expect(store.getToken("c1")).toBe("glpat-ROTATED-SECRET");
+
+    // ...and durably: the new secret is re-encrypted under the vault passphrase.
+    await store.save();
+    const store2 = new MugsStore(io);
+    await store2.load();
+    expect(await store2.unlock(PASS)).toBe(true);
+    expect(store2.getToken("c1")).toBe("glpat-ROTATED-SECRET");
   });
 });

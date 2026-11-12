@@ -12,3 +12,4 @@ export * from "./twoMapping";
 export * from "./restart";
 export * from "./fault";
 export * from "./counters";
+export * from "./cloneDir";

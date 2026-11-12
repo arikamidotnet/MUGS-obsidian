@@ -16,10 +16,10 @@ import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHel
 import { buildProvider } from "../providers/factory";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";
-import { cloneDir, type VaultMirror } from "./cloneManager";
+import type { VaultMirror } from "./cloneManager";
 import { StoreDiffDataSource } from "../ui/defaultDataSources";
 import type { FolderMapping, Credential, MugsSettings } from "../types";
-import { installHermeticGitIdentity, hermeticExecSync } from "./testkit";
+import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir } from "./testkit";
 
 // Hermetic git: never depend on machine global identity.
 installHermeticGitIdentity();
@@ -47,6 +47,12 @@ const cred: Credential = { id: "cred-local", label: "Local", kind: "local", toke
 function mapping(): FolderMapping {
   return { id: "map-notes", label: "Notes", remotePath: "", localFolder: "Synced", providerId: "cred-local", direction: "push-pull" };
 }
+
+/** S03 identity layout: the dir the engine MUST clone into for this mapping.
+ *  (repoId = repoRef ?? repo.id — the local provider synthesizes repo.id = mapping.id;
+ *  branch = mapping.branch ?? repo.defaultBranch = "main".) */
+const expectedClone = (): string =>
+  expectedIdentityCloneDir(CLONE_ROOT, { providerId: "cred-local", repoId: "map-notes", remoteUrl: REMOTE_PATH });
 
 /** Build settings the way runSync() reads them from the store. */
 function makeSettings(): MugsSettings {
@@ -106,13 +112,17 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       editorOpen: undefined as never,
       trash: undefined as never,
       heldPaths: storeHeldAccessor(store).heldPaths,
+      rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
       pickAgent: (m) => m.agentId ? store.getAgents().find((a) => a.id === m.agentId) : undefined,
     });
 
     expect(outcomes.length).toBe(1);
     expect(outcomes[0].status, `skip reason: ${outcomes[0].reason}`).toBe("ok");
-    // Clone dir should now contain the pulled files.
-    const diary = join(CLONE_ROOT, "cred-local", "map-notes", "Notes", "diary.md");
+    // S03: the engine RECORDS the resolved identity clone dir into lastSync state;
+    // tests read it instead of hardcoding a layout. Pin it against the recomputed dir.
+    const cp = recordedCloneDir(store, "map-notes");
+    expect(cp).toBe(expectedClone());
+    const diary = join(cp!, "Notes", "diary.md");
     expect(require("node:fs").existsSync(diary)).toBe(true);
   });
 
@@ -145,11 +155,13 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       editorOpen: undefined as never,
       trash: undefined as never,
       heldPaths: storeHeldAccessor(store).heldPaths,
+      rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
       pickAgent: (m) => m.agentId ? store.getAgents().find((a) => a.id === m.agentId) : undefined,
     });
 
     expect(outcomes[0].status, `skip reason: ${outcomes[0].reason}`).toBe("ok");
-    const diary = join(CLONE_ROOT, "cred-local", "map-notes", "Notes", "diary.md");
+    const cp = recordedCloneDir(store, "map-notes") ?? expectedClone();
+    const diary = join(cp, "Notes", "diary.md");
     const content = require("node:fs").readFileSync(diary, "utf8");
     expect(content).toContain("+ second line pushed to remote");
   });
@@ -157,7 +169,8 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
   it("pushes a NEW local change up to the bare repo (push-pull direction)", async () => {
     // Write + commit a new file in the clone dir's working tree. MUGS only pushes
     // committed unpushed work (localSha !== base), so we must commit before syncing.
-    const targetDir = join(CLONE_ROOT, "cred-local", "map-notes", "Notes");
+    // The clone already exists from the earlier passes (identity layout).
+    const targetDir = join(expectedClone(), "Notes");
     mkdirSync(targetDir, { recursive: true });
     writeFileSync(join(targetDir, "local-note.md"), "# local note\ncreated from vault\n");
     hermeticExecSync(`git -C "${targetDir}" config user.name V && git -C "${targetDir}" config user.email v@l`);
@@ -177,6 +190,7 @@ describe("runSync harness — real git push+pull (no GitLab)", () => {
       editorOpen: undefined as never,
       trash: undefined as never,
       heldPaths: storeHeldAccessor(store).heldPaths,
+      rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
       pickAgent: (m) => m.agentId ? store.getAgents().find((a) => a.id === m.agentId) : undefined,
     });
 
