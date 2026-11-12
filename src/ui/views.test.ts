@@ -239,6 +239,15 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const header = v.contentEl.querySelector(".mugs-diff-file-header") as any;
     fire(header, "click", { stopPropagation() {} });
     expect((v.contentEl.querySelector(".mugs-diff-file-body") as any).style.display).toBe("none");
+    expect(header.attrs["aria-expanded"]).toBe("false");
+    expect(header.attrs.tabindex).toBe("0");
+    fire(header, "keydown", { key: "Enter", preventDefault() {}, stopPropagation() {} });
+    expect(header.attrs["aria-expanded"]).toBe("true");
+    expect((v.contentEl.querySelector(".mugs-diff-file-body") as any).style.display).toBe("");
+    const hunkHeader = v.contentEl.querySelector(".mugs-diff-hunk-header") as any;
+    fire(hunkHeader, "keydown", { key: " ", preventDefault() {}, stopPropagation() {} });
+    expect(hunkHeader.attrs["aria-expanded"]).toBe("false");
+    expect((v.contentEl.querySelector(".mugs-diff-hunk-body") as any).style.display).toBe("none");
     fire(v.contentEl.querySelectorAll(".mugs-diff-file-choice")[1] as any, "click");
     expect(collectText(focused())).toContain("new-b.md");
     expect(collectText(focused())).not.toContain("new-a.md");

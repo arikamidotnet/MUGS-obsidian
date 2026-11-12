@@ -216,6 +216,10 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
   }
 
   const header = block.createDiv({ cls: "mugs-diff-file-header" });
+  header.setAttribute("role", "button");
+  header.setAttribute("tabindex", "0");
+  header.setAttribute("aria-expanded", "true");
+  header.setAttribute("aria-label", `Toggle changes for ${file.name}`);
   header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
   const summary = header.createSpan({ cls: "mugs-diff-summary" });
   summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
@@ -240,11 +244,18 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
   body.style.display = "";
 
   // Click the file header to collapse/expand all hunks.
-  header.addEventListener("click", (e) => {
+  const toggleFile = (e: Event) => {
     e.stopPropagation();
     fileOpen = !fileOpen;
+    header.setAttribute("aria-expanded", String(fileOpen));
     chevron.textContent = fileOpen ? "▾" : "▸";
     body.style.display = fileOpen ? "" : "none";
+  };
+  header.addEventListener("click", toggleFile);
+  header.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    toggleFile(e);
   });
 
   // Render hunks into the collapsible body.
@@ -268,6 +279,10 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   }
 
   const header = block.createDiv({ cls: "mugs-diff-hunk-header" });
+  header.setAttribute("role", "button");
+  header.setAttribute("tabindex", "0");
+  header.setAttribute("aria-expanded", "true");
+  header.setAttribute("aria-label", `Toggle changes starting at line ${hunk.newStart}`);
   if (authorColor) header.style.borderLeftColor = authorColor;
 
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
@@ -286,12 +301,18 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   const setOpen = (e?: Event) => {
     e?.stopPropagation(); // don't trigger file-level collapse
     open = !open;
+    header.setAttribute("aria-expanded", String(open));
     chevron.textContent = open ? "▾" : "▸";
     header.classList.toggle("mugs-diff-hunk-open", open);
     body.style.display = open ? "" : "none";
   };
 
   header.addEventListener("click", setOpen);
+  header.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    setOpen(e);
+  });
 
   // Render lines with proper old/new line numbers.
   let oldNo = hunk.oldStart;

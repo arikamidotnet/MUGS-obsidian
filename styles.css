@@ -1,3 +1,4 @@
+.mugs-diff-view { container-type: inline-size; }
 .mugs-diff-browser {
   display: grid;
   grid-template-columns: minmax(150px, 28%) minmax(0, 1fr);
@@ -26,6 +27,15 @@
 @media (max-width: 600px) {
   .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
   .mugs-diff-file-list { max-height: 180px; }
+}
+@container (max-width: 600px) {
+  .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
+  .mugs-diff-file-list { max-height: 180px; }
+}
+.mugs-diff-file-header:focus-visible,
+.mugs-diff-hunk-header:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 /*
  * MUGS — Multi-User Git Sync
