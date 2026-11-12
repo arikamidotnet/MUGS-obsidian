@@ -880,6 +880,20 @@ export class CloneManager {
         if (remoteUnchanged && !o?.uncertain && isSnapshotStale(fp, prevSnap[rel], lastDone)) staleRels.add(rel);
       }
     }
+    // E01 proven no-op: an EMPTY vault whose deletions are disabled (never populated)
+    // against an UNCHANGED remote is idle BY CONSTRUCTION — every clone path would
+    // resolve to ours = base == theirs (act-as-unchanged), so the per-file shows are
+    // pure waste. (When deletions ARE enabled the empty-vault guard below still
+    // refuses the pass — that protection runs first.)
+    const vaultNamesEarly = this.vaultMirror ? new Set(await this.vaultMirror.list(mapping.localFolder)) : new Set<string>();
+    if (
+      remoteUnchanged &&
+      this.vaultMirror &&
+      vaultNamesEarly.size === 0 &&
+      !(this.syncs.vaultPopulated?.(mapping.id) ?? false)
+    ) {
+      return { applied: [], conflicts: [], renames: [], autoResolvedPaths: [], fingerprints: {}, blocked: [] };
+    }
     const isStale = (repoPath: string): boolean => {
       const rel = repoToVaultPath(mapping, repoPath);
       return rel !== null && staleRels.has(rel);

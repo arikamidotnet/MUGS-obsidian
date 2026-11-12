@@ -97,16 +97,13 @@ function runIdlePass(f: ReturnType<typeof makeIdleFixture>) {
 }
 
 /**
- * Setup: one full init pass (push-pull) to populate the vault, then one pass in the
- * target direction to settle the baseline. The next pass is the measured idle pass.
+ * Setup: init + populate pass(es), then one SETTLING pass so a post-population
+ * content snapshot exists. The measured pass then has the "trustworthy unchanged
+ * vault evidence" the contract requires for a verified-idle shortcut.
  */
 async function settleBaseline(f: ReturnType<typeof makeIdleFixture>) {
-  await syncAllMappings(f.deps()); // ensure at least one completed pass with the target direction
-  // For push-only the first push-only pass after a populated vault is the idle measurement.
-  // We do a push-pull init first, then a target-direction pass to record baseline.
-  if (f.direction !== "push-pull") {
-    await syncAllMappings(f.deps());
-  }
+  await syncAllMappings(f.deps()); // init pass (populate / first sync)
+  await syncAllMappings(f.deps()); // settle pass (records a valid snapshot)
 }
 
 describe("idle regression — verified zero side-effects on clean pass", () => {
@@ -116,7 +113,7 @@ describe("idle regression — verified zero side-effects on clean pass", () => {
       try {
         await settleBaseline(f);
         const out = await runIdlePass(f);
-        expect(out[0].status).toBe("ok");
+        expect(out[0].status, `skip reason: ${out[0].reason}`).toBe("ok");
 
         // Tier (a) — assertions that must PASS today.
         expect(f.io.writes).toBe(0);
@@ -136,34 +133,33 @@ describe("idle regression — verified zero side-effects on clean pass", () => {
 });
 
 /**
- * Tier (b) defect pins. These document the current measured cost of an idle pass.
- * The engine wave will reduce git/show counts; these become strict bounds later.
- * Keep the suite green by using `test.fails`.
+ * Tier (b) — CONVERTED to strict bounds (sync-core Wave B, contract §8/E01).
+ * The engine now: (1) extends the steady-state stat shortcut to ALL directions,
+ * (2) reuses base content for ours/theirs when the trees coincide (no per-file
+ * `git show` on a verified-idle pass), and (3) skips mirrorPull when the pass is
+ * verified idle. Measured idle cost (300 files): push-pull/pull-only ~10 git /
+ * 0 shows; push-only 7 git / 0 shows (unchanged). The old `shows < 0` push-only
+ * pin was unsatisfiable and is now `shows === 0` + `git <= 7` per the contract.
  */
-describe("idle regression — defect pins for git/show cost (to be tightened by engine)", () => {
-  // Push-pull and pull-only both traverse the full tree for merge/read.
-  // Push-only benefits from the steady-state snapshot shortcut (no vault content read).
-  const measured = {
-    "push-pull": { git: 609, shows: 600 },
-    "pull-only": { git: 609, shows: 600 },
+describe("idle regression — strict cost bounds (engine wave converted the defect pins)", () => {
+  const bounds = {
+    "push-pull": { git: 20, shows: 0 },
+    "pull-only": { git: 20, shows: 0 },
     "push-only": { git: 7, shows: 0 },
   } as const;
 
   for (const direction of ["push-pull", "pull-only", "push-only"] as const) {
-    // Pin the current high cost. These will be converted to normal expectations after the fix.
-    test.fails(`${direction}: git invocations and git show count are bounded (current ~${measured[direction].git} / ~${measured[direction].shows})`, async () => {
+    test(`${direction}: verified-idle pass stays within strict bounds (git <= ${bounds[direction].git}, shows === ${bounds[direction].shows})`, async () => {
       const f = makeIdleFixture(direction);
       try {
         await settleBaseline(f);
         await runIdlePass(f);
         const git = totalGitInvocations(f.runner);
         const shows = gitShowCount(f.runner);
-        // The defect pin asserts the cost is NOT the current high number.
-        // Using strict < measured value as the target bound (to be tightened in later waves).
-        // For now the test is expected to fail because the implementation exceeds the future bound.
-        // We record the measured value in the test name and message for traceability.
-        expect(git).toBeLessThan(measured[direction].git);
-        expect(shows).toBeLessThan(measured[direction].shows);
+        // Recorded for traceability when tightening further.
+        console.log(`[idle] ${direction}: git=${git} shows=${shows}`);
+        expect(git).toBeLessThanOrEqual(bounds[direction].git);
+        expect(shows).toBe(bounds[direction].shows);
       } finally {
         rmSync(f.base, { recursive: true, force: true });
       }
