@@ -18,11 +18,11 @@ import { authorRefForAgent } from "./attribution";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
-import { applyMerge, type AppliedChange } from "./conflict";
+import { applyMerge, type AppliedChange, type FileVersions } from "./conflict";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
-import { planMirrorPush, planMirrorPull, vaultToRepoPath, repoToVaultPath, type MirrorFile, type MirrorOp } from "./mirror";
+import { planMirrorPull, vaultToRepoPath, repoToVaultPath } from "./mirror";
 import type { TrashStore } from "./trash";
 import { EditorOpenGuard } from "./editorOpen";
 import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
@@ -435,7 +435,7 @@ export class CloneManager {
     // Pull side: land the clone's now-current content back into the vault folder
     // (skipped for push-only mappings — they must never take remote content).
     if (mapping.direction !== "push-only") {
-      await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, merged.vaultByRepo, status);
+      await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status);
     }
 
     // Push side: stage, commit and push the in-scope merged changes. Without a
@@ -509,21 +509,36 @@ export class CloneManager {
       // the tip first (mixed reset keeps the — empty — working tree).
       await c.reset("HEAD");
     }
-    const vaultFiles = await this.readVaultFiles(mapping);
-    const plan = planMirrorPush({ mapping, vaultFiles, clonePaths: [], includeDeletions: false });
-    if (plan.refused) {
+    // NAMES-ONLY vault scan: the pre-streaming version preloaded every vault file's
+    // content into memory to plan the push — a multi-thousand-file first sync OOMed
+    // the process before writing a byte. Content is read file-by-file at write time.
+    const vaultNames = this.vaultMirror ? await this.vaultMirror.list(mapping.localFolder) : [];
+    if (vaultNames.length === 0) {
       throw new Error(
         `first-sync push refused: vault folder "${mapping.localFolder}" has no files — switch first-sync direction to pull, or add files to the folder first`,
       );
     }
-    status?.(`first sync: uploading vault (${plan.ops.length} files)`);
-    await this.applyToClone(dir, plan.ops, mapping.id);
-
     const held = this.heldPaths?.(mapping.id);
-    const writePaths = plan.ops
-      .filter((o) => o.kind === "write")
-      .map((o) => o.path)
-      .filter((path) => this.inScope(mapping, path) && !(held?.has(path) ?? false));
+    const uploads = vaultNames
+      .map((rel) => ({ rel, repoPath: vaultToRepoPath(mapping, rel) }))
+      .filter(({ repoPath }) => this.inScope(mapping, repoPath) && this.mirrorListable(repoPath))
+      .filter(({ repoPath }) => !(held?.has(repoPath) ?? false));
+    status?.(`first sync: uploading vault (${uploads.length} files)`);
+    // Additive: remote-only files are kept — no deletions during a push-first init.
+    for (const { rel, repoPath } of uploads) {
+      let content: string;
+      try {
+        content = await this.vaultMirror!.read(mapping.localFolder, rel);
+      } catch (err) {
+        // One unreadable file must not abort the whole init — skip it.
+        console.warn("MUGS: skipping unreadable vault file during first-sync push:", rel, err);
+        continue;
+      }
+      const absPath = `${dir}/${repoPath}`;
+      await this.workingTree?.writeFile(absPath, content);
+    }
+
+    const writePaths = uploads.map(({ repoPath }) => repoPath);
     let pushed = false;
     if (writePaths.length > 0) {
       await c.add(writePaths);
@@ -579,7 +594,7 @@ export class CloneManager {
     remoteRef: string,
     remoteSha: string,
     status?: (m: string) => void,
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string>; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]> }> {
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]> }> {
     // Steady-state shortcut (push-only mappings): when the remote tip equals the
     // recorded baseline and a vault file's (mtime, size) pair matches the snapshot
     // recorded at the last completed pass, ours == theirs == base — the per-file
@@ -615,12 +630,11 @@ export class CloneManager {
     };
     const allClonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
     const clonePaths = allClonePaths.filter((p) => !isStale(p));
-    const vaultFiles = await this.readVaultFiles(mapping, (rel) => staleRels.has(rel));
-    const vaultByRepo = new Map<string, string>();
-    for (const f of vaultFiles) {
-      const repoPath = vaultToRepoPath(mapping, f.path);
-      if (this.inScope(mapping, repoPath)) vaultByRepo.set(repoPath, f.content);
-    }
+    // NAMES-ONLY vault scan: the pre-streaming version preloaded EVERY vault file's
+    // content here, then held base+ours+theirs for the whole tree simultaneously —
+    // a 900-file folder ran the process out of heap during a full pass. Content is
+    // now read per bounded batch (see below) and released after each batch applies.
+    const vaultNames = this.vaultMirror ? new Set(await this.vaultMirror.list(mapping.localFolder)) : new Set<string>();
     // Without a mirror the vault side is absent, so the changed-path diffs are the
     // merge universe (legacy clone↔remote semantics: ours = the clone's HEAD).
     const diffPaths = this.vaultMirror
@@ -631,9 +645,15 @@ export class CloneManager {
             ...(await c.changedPaths(`${baseSha}...${remoteRef}`)),
           ].filter((p) => this.inScope(mapping, p) && this.mirrorListable(p))
         : [];
-    const allPaths = new Set<string>([...clonePaths, ...vaultByRepo.keys(), ...diffPaths]);
-
-    status?.(`merging (${allPaths.size} files)`);
+    const allPaths = new Set<string>([...clonePaths, ...diffPaths]);
+    if (this.vaultMirror) {
+      // Vault-only paths (brand-new local files the clone has never seen) join the
+      // merge universe too — names are cheap, content is read per batch.
+      for (const rel of vaultNames) {
+        const repoPath = vaultToRepoPath(mapping, rel);
+        if (this.inScope(mapping, repoPath) && this.mirrorListable(repoPath) && !staleRels.has(rel)) allPaths.add(repoPath);
+      }
+    }
 
     // Legacy-state reconciliation (fail-safe, one-time per mapping): without the
     // vaultPopulated flag a vault-absent file is NEVER treated as a deletion, so a
@@ -641,7 +661,6 @@ export class CloneManager {
     // contains EVERY in-scope remote file, correspondence is proven and the flag can
     // be set; when it does not, keep deletions disabled and say why — never guess.
     if (this.vaultMirror && mapping.direction !== "pull-only" && !(this.syncs.vaultPopulated?.(mapping.id) ?? false)) {
-      const vaultNames = new Set(await this.vaultMirror.list(mapping.localFolder));
       const missing = allClonePaths.filter((p) => {
         const rel = repoToVaultPath(mapping, p);
         return rel === null || !vaultNames.has(rel);
@@ -658,138 +677,173 @@ export class CloneManager {
     // the file is simply one the vault has not seen yet, and treating it as deleted
     // would wipe remote content. Pull-only mappings never push deletions.
     const deletable = mapping.direction !== "pull-only" && (this.syncs.vaultPopulated?.(mapping.id) ?? false);
-    // Empty-vault guard — the refusal planMirrorPush documents, wired into the
-    // regular path: a populated mapping whose vault folder went empty (rename,
-    // move, typo) must refuse the pass rather than mirror-delete the entire
-    // remote subtree for every teammate.
-    if (this.vaultMirror && deletable && vaultFiles.length === 0 && clonePaths.length > 0) {
+    // Empty-vault guard: a populated mapping whose vault folder went empty (rename,
+    // move, typo) must refuse the pass rather than mirror-delete the entire remote
+    // subtree for every teammate. Names-based — an empty/unreadable folder has no
+    // in-scope entries to merge, and mirroring would mean mass deletion.
+    if (this.vaultMirror && deletable && vaultNames.size === 0 && clonePaths.length > 0) {
       throw new Error(
         `vault folder "${mapping.localFolder}" is empty but the remote still has ${clonePaths.length} in-scope file(s) — refusing to sync (was the folder renamed, moved, or misconfigured?). Restore the folder or remove the mapping.`,
       );
     }
-    const entries = Array.from(allPaths).map(async (path) => ({
-      path,
-      // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
-      base: baseSha ? await c.show(baseSha, path) : undefined,
-      ours: vaultByRepo.has(path)
-        ? vaultByRepo.get(path)
-        : this.vaultMirror
-          ? deletable
-            ? undefined // vault had it (populated) and no longer does -> deletion
-            : baseSha
-              ? await c.show(baseSha, path) // not seen yet -> act as unchanged; mirror-pull will fetch it
-              : undefined
-          : await c.show("HEAD", path),
-      theirs: await c.show(remoteRef, path),
-    }));
-    const resolved = await Promise.all(entries);
 
-    // Recognize cross-device moves by content identity so a rename surfaces as a move
-    // rather than a delete + add pair. Only changed paths are compared; unchanged files
-    // appear on both sides and never match the removed/added sets.
-    const renames = detectRenames(
-      Object.fromEntries(resolved.filter((r) => r.base !== undefined).map((r) => [r.path, r.base as string])),
-      Object.fromEntries(resolved.filter((r) => r.theirs !== undefined).map((r) => [r.path, r.theirs as string])),
-    );
+    status?.(`merging (${allPaths.size} files)`);
 
-    const { applied, conflicts } = applyMerge(resolved);
-
-    // Recency inputs (Area 2): attach each side's last-modified time so the policy's
-    // recency-wins rule can actually pick a winner. Before this the timestamps were
-    // never populated anywhere in the sync path, so every genuine conflict fell
-    // through to defaultResolution — recencyWins was effectively display-only.
-    // Vault side: the file's mtime (mirror seam). Remote side: the last commit that
-    // touched the path — commit metadata only, so blobless partial clones never
-    // lazy-fetch a blob for this. Failures leave a timestamp undefined, which just
-    // falls back to defaultResolution.
-    if (conflicts.length > 0 && this.policy?.recencyWins) {
-      for (const cf of conflicts) {
-        if (!cf.oursAbsent) {
-          const vaultRel = repoToVaultPath(mapping, cf.path);
-          if (vaultRel !== null) {
+    // Bounded-batch streaming merge: read -> merge -> (auto-)resolve -> apply, one
+    // batch at a time. Content for at most MERGE_BATCH paths is alive at once, so
+    // memory scales with the batch size instead of the tree size. Per-batch
+    // orderApplyOps keeps writes-before-deletes/parents-before-children inside the
+    // batch (cross-batch path swaps were already near-impossible in the old
+    // whole-tree apply and remain guarded by the applier's own ordering).
+    const MERGE_BATCH = 32;
+    const paths = [...allPaths];
+    const appliedPaths: string[] = [];
+    const autoResolvedPaths: string[] = [];
+    const surfacedConflicts: FileConflict[] = [];
+    const renames: Rename[] = [];
+    for (let i = 0; i < paths.length; i += MERGE_BATCH) {
+      const batch = paths.slice(i, i + MERGE_BATCH);
+      const entries: FileVersions[] = [];
+      for (const path of batch) {
+        // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
+        const base = baseSha ? await c.show(baseSha, path) : undefined;
+        let ours: string | undefined;
+        if (!this.vaultMirror) {
+          ours = await c.show("HEAD", path);
+        } else {
+          const rel = repoToVaultPath(mapping, path);
+          if (rel !== null && vaultNames.has(rel)) {
+            // A LISTED file whose read FAILS skips only that file for this pass —
+            // it must not read as a deletion (which would push one).
             try {
-              cf.oursSavedAt = await this.vaultMirror?.mtime?.(mapping.localFolder, vaultRel);
-            } catch {
-              // stat unavailable -> leave undefined
+              ours = await this.vaultMirror!.read(mapping.localFolder, rel);
+            } catch (err) {
+              console.warn("MUGS: skipping unreadable vault file this pass:", rel, err);
+              continue;
             }
+          } else if (deletable) {
+            ours = undefined; // vault had it (populated) and no longer does -> deletion
+          } else if (baseSha) {
+            ours = await c.show(baseSha, path); // not seen yet -> act as unchanged; mirror-pull will fetch it
+          } else {
+            ours = undefined;
           }
         }
-        try {
-          const secs = await c.lastModifiedAt(remoteRef, cf.path);
-          if (secs !== undefined) cf.theirsModifiedAt = secs * 1000;
-        } catch {
-          // log unavailable -> leave undefined
+        const theirs = await c.show(remoteRef, path);
+        entries.push({ path, base, ours, theirs });
+      }
+      const resolved = await Promise.all(entries);
+
+      // Recognize cross-device moves by content identity so a rename surfaces as a
+      // move rather than a delete + add pair (per batch — a move whose two halves
+      // land in different batches surfaces as delete + add, never as content loss).
+      renames.push(
+        ...detectRenames(
+          Object.fromEntries(resolved.filter((r) => r.base !== undefined).map((r) => [r.path, r.base as string])),
+          Object.fromEntries(resolved.filter((r) => r.theirs !== undefined).map((r) => [r.path, r.theirs as string])),
+        ),
+      );
+
+      const { applied, conflicts } = applyMerge(resolved);
+
+      // Recency inputs (Area 2): attach each side's last-modified time so the policy's
+      // recency-wins rule can actually pick a winner. Vault side: the file's mtime
+      // (mirror seam). Remote side: the last commit that touched the path — commit
+      // metadata only, so blobless partial clones never lazy-fetch a blob for this.
+      if (conflicts.length > 0 && this.policy?.recencyWins) {
+        for (const cf of conflicts) {
+          if (!cf.oursAbsent) {
+            const vaultRel = repoToVaultPath(mapping, cf.path);
+            if (vaultRel !== null) {
+              try {
+                cf.oursSavedAt = await this.vaultMirror?.mtime?.(mapping.localFolder, vaultRel);
+              } catch {
+                // stat unavailable -> leave undefined
+              }
+            }
+          }
+          try {
+            const secs = await c.lastModifiedAt(remoteRef, cf.path);
+            if (secs !== undefined) cf.theirsModifiedAt = secs * 1000;
+          } catch {
+            // log unavailable -> leave undefined
+          }
         }
       }
-    }
 
-    // Automatic-first resolution: when a policy is injected and autoMerge is on, resolve
-    // genuine conflicts automatically (recency-wins / defaultResolution) and write the
-    // resolved content instead of surfacing them. Only unresolvable conflicts are returned
-    // for manual review. With no policy injected this is a no-op — behavior is unchanged.
-    let surfacedConflicts = conflicts;
-    // Best-effort recoverable content for deletes: the clone's current (theirs) content,
-    // so a deletion is recorded in `.mugs-trash` before the working-tree removal.
-    const priorByPath = new Map(resolved.map((e) => [e.path, e.theirs]));
-    const toApply: Array<ApplyOp & { content?: string; priorContent?: string }> = applied.map((a) => {
-      const op: ApplyOp & { content?: string; priorContent?: string } = toWriteOp(a);
-      if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
-      return op;
-    });
-    // Auto-resolved conflict paths, staged on the push side alongside merged.applied —
-    // a resolution that never gets committed would resurface as the same conflict on
-    // every later sync (and mirror mode stages nothing implicitly).
-    const autoResolvedPaths: string[] = [];
-    if (this.policy?.autoMerge) {
-      surfacedConflicts = [];
-      for (const cf of conflicts) {
-        if (canAutoResolve(cf, this.policy)) {
-          const content = autoResolvedContent(cf, resolveConflictAuto(cf, this.policy)!);
-          // Always write the resolved content into the clone working tree. Even when
-          // it equals the vault's copy (an "ours" win) the clone does not hold it yet,
-          // and `git add` stages from the working tree — the previous no-op skip left
-          // ours-wins uncommitted in the clone forever.
-          toApply.push({ path: cf.path, kind: "write", content });
-          autoResolvedPaths.push(cf.path);
-        } else {
-          surfacedConflicts.push(cf);
+      // Automatic-first resolution: when a policy is injected and autoMerge is on, resolve
+      // genuine conflicts automatically (recency-wins / defaultResolution) and write the
+      // resolved content instead of surfacing them. Only unresolvable conflicts are returned
+      // for manual review. With no policy injected this is a no-op — behavior is unchanged.
+      let batchSurfaced = conflicts;
+      // Best-effort recoverable content for deletes: the clone's current (theirs) content,
+      // so a deletion is recorded in `.mugs-trash` before the working-tree removal.
+      const priorByPath = new Map(resolved.map((e) => [e.path, e.theirs]));
+      const toApply: Array<ApplyOp & { content?: string; priorContent?: string }> = applied.map((a) => {
+        const op: ApplyOp & { content?: string; priorContent?: string } = toWriteOp(a);
+        if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
+        return op;
+      });
+      if (this.policy?.autoMerge) {
+        batchSurfaced = [];
+        for (const cf of conflicts) {
+          if (canAutoResolve(cf, this.policy)) {
+            const content = autoResolvedContent(cf, resolveConflictAuto(cf, this.policy)!);
+            // Always write the resolved content into the clone working tree. Even when
+            // it equals the vault's copy (an "ours" win) the clone does not hold it yet,
+            // and `git add` stages from the working tree — the previous no-op skip left
+            // ours-wins uncommitted in the clone forever.
+            toApply.push({ path: cf.path, kind: "write", content });
+            autoResolvedPaths.push(cf.path);
+          } else {
+            batchSurfaced.push(cf);
+          }
         }
       }
-    }
 
-    // Safe applier ordering: writes before deletes, parents before children.
-    await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
-    return { applied, conflicts: surfacedConflicts, renames, vaultByRepo, autoResolvedPaths, fingerprints };
+      // Safe applier ordering: writes before deletes, parents before children.
+      await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
+      for (const a of applied) appliedPaths.push(a.path);
+      surfacedConflicts.push(...batchSurfaced);
+      // Batch contents are unreachable from here — memory stays bounded.
+    }
+    return {
+      applied: appliedPaths.map((path) => ({ path } as AppliedChange)),
+      conflicts: surfacedConflicts,
+      renames,
+      autoResolvedPaths,
+      fingerprints,
+    };
   }
 
   /** Pull the clone's current in-scope content into the vault folder: writes for
    *  every in-scope clone file (skipping no-ops the vault already has and files
    *  open with unsaved edits), deletions only for paths git says the remote side
    *  removed since the last sync — never for vault files the remote simply has
-   *  never seen. */
+   *  never seen. STREAMING: plan ops are name-only; clone content is read one
+   *  file at a time in the apply loop, so memory stays flat on huge trees. */
   private async mirrorPull(
     mapping: FolderMapping,
     dir: string,
     c: GitClient,
     baseSha: string,
     remoteRef: string,
-    vaultByRepo: Map<string, string>,
     status?: (m: string) => void,
   ): Promise<void> {
     if (!this.vaultMirror) return;
-    const cloneFiles: MirrorFile[] = [];
-    for (const p of (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p))) {
-      // Prefer the working-tree content (it carries uncommitted merged results);
-      // fall back to the committed tip for files not yet materialized on disk —
-      // e.g. fetched-since-last-checkout files (a mixed reset never writes them).
-      const content = (await this.readCloneFile(dir, p)) ?? (await c.show(remoteRef, p));
-      if (content !== undefined) cloneFiles.push({ path: p, content });
-    }
+    // Names only — contents are read per op below.
+    const clonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
     const deletedRepoPaths = baseSha
       ? (await c.deletedPaths(`${baseSha}..${remoteRef}`)).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p))
       : [];
-    const plan = planMirrorPull({ mapping, cloneFiles, deletedRepoPaths });
-    status?.(baseSha === "" ? `first sync: populating vault (${cloneFiles.length} files)` : `updating vault (${plan.ops.length} changes)`);
+    // Reuse the pure pull planner for ordering + scoping; placeholder contents are
+    // replaced with the real (lazily read) clone content in the apply loop below.
+    const plan = planMirrorPull({
+      mapping,
+      cloneFiles: clonePaths.map((p) => ({ path: p, content: "" })),
+      deletedRepoPaths,
+    });
+    status?.(baseSha === "" ? `first sync: populating vault (${clonePaths.length} files)` : `updating vault (${plan.ops.length} changes)`);
 
     for (const op of plan.ops) {
       if (op.kind === "delete") {
@@ -805,53 +859,29 @@ export class CloneManager {
         await this.vaultMirror.remove(mapping.localFolder, op.path);
         continue;
       }
+      // Prefer the working-tree content (it carries uncommitted merged results);
+      // fall back to the committed tip for files not yet materialized on disk —
+      // e.g. fetched-since-last-checkout files (a mixed reset never writes them).
+      const content = (await this.readCloneFile(dir, op.path)) ?? (await c.show(remoteRef, op.path));
+      if (content === undefined) continue; // gone from both — nothing to write
       // Skip a no-op write (vault content already current) and never clobber a
       // file that is open with unsaved changes (the editor-open guard, Area 5).
-      const repoPath = vaultToRepoPath(mapping, op.path);
-      if (vaultByRepo.get(repoPath) === (op.content ?? "")) continue;
+      let current: string | undefined;
+      try {
+        current = await this.vaultMirror.read(mapping.localFolder, op.path);
+      } catch {
+        current = undefined; // absent -> definitely needs the write
+      }
+      if (current === content) continue;
       const vaultPath = vaultRootPath(mapping.localFolder, op.path);
       if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultPath)) continue;
-      await this.vaultMirror.write(mapping.localFolder, op.path, op.content ?? "");
+      await this.vaultMirror.write(mapping.localFolder, op.path, content);
     }
     // The vault folder now mirrors the clone's in-scope content — from here on, a
     // vault-absent in-scope file is a real deletion (see mergeSides' `deletable`).
     this.syncs.recordVaultSync?.(mapping.id);
   }
 
-  /** Apply mirror ops (vault→clone direction) into a clone's working tree. Write
-   *  parents are created by the writer seam; deletions record recoverable content
-   *  in `.mugs-trash` first. Ops must already be apply-ordered. */
-  private async applyToClone(dir: string, ops: MirrorOp[], mappingId: string): Promise<void> {
-    for (const op of ops) {
-      const absPath = `${dir}/${op.path}`;
-      if (op.kind === "delete") {
-        this.trash?.trash(mappingId, op.path, await this.readCloneFile(dir, op.path));
-        await this.workingTree?.deleteFile?.(absPath);
-        continue;
-      }
-      await this.workingTree?.writeFile(absPath, op.content ?? "");
-    }
-  }
-
-  /** List + read the mapping's vault files (folder-relative). Empty without a
-   *  mirror. `skipRel` filters files the caller already knows are unchanged
-   *  (the steady-state shortcut). One unreadable/locked vault file skips only
-   *  that file for this pass — it must not abort the whole mapping (which would
-   *  block push AND pull until it clears). */
-  private async readVaultFiles(mapping: FolderMapping, skipRel?: (rel: string) => boolean): Promise<MirrorFile[]> {
-    if (!this.vaultMirror) return [];
-    const rels = await this.vaultMirror.list(mapping.localFolder);
-    const files: MirrorFile[] = [];
-    for (const rel of rels) {
-      if (skipRel?.(rel)) continue;
-      try {
-        files.push({ path: rel, content: await this.vaultMirror.read(mapping.localFolder, rel) });
-      } catch (err) {
-        console.warn("MUGS: skipping unreadable vault file this pass:", rel, err);
-      }
-    }
-    return files;
-  }
 
   /** Read a clone working-tree file (undefined when absent or unreadable). */
   private async readCloneFile(dir: string, repoPath: string): Promise<string | undefined> {

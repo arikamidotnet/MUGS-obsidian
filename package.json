@@ -9,7 +9,7 @@
     "manifest": "node scripts/manifest.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bench": "vitest bench",
+    "bench": "vitest bench --run",
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "keywords": [

@@ -8,6 +8,12 @@
  * skip reason, conflict count — so a silent per-mapping failure in the plugin can
  * be reproduced and pinpointed outside Obsidian.
  *
+ * RC MODE: runs EVERY mapping (not just never-synced ones), feeds the sync engine
+ * the new snapshot seams, and finishes with a state verification pass (baselines
+ * resolve in the clone, no junk directories, no stored conflicts). Records are
+ * kept in memory and printed — data.json is NEVER written here; the running
+ * plugin remains the owner of persisted state.
+ *
  * Run: env MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts
  */
 import { describe, it } from "vitest";
@@ -79,6 +85,14 @@ const vaultMirror: VaultMirror = {
   mtime: async (folder, rel) => {
     try { return statSync(join(VAULT, rootOf(folder), rel)).mtimeMs; } catch { return undefined; }
   },
+  stat: async (folder, rel) => {
+    try {
+      const st = statSync(join(VAULT, rootOf(folder), rel));
+      return { mtime: st.mtimeMs, size: st.size };
+    } catch {
+      return undefined;
+    }
+  },
 };
 
 const workingTree: WorkingTreeWriter = {
@@ -96,25 +110,45 @@ const workingTree: WorkingTreeWriter = {
 
 describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-WRK)", () => {
   it(
-    "runs the real sync for the never-synced mappings and prints each outcome",
+    "runs the real sync for EVERY mapping (RC mode) and verifies the resulting state",
     async () => {
       if (!existsSync(DATA)) throw new Error(`no vault data at ${DATA}`);
       const settings: MugsSettings = JSON.parse(readFileSync(DATA, "utf8"));
 
-      // Only the mappings with no baseline (the ones the plugin keeps skipping).
-      const targets: FolderMapping[] = settings.mappings.filter((m) => !settings.lastSync[m.id]?.lastRemoteSha);
-      console.log(`\n[live-diag] ${targets.length} no-baseline mappings:`,
-        targets.map((m) => m.label).join(", "));
+      // RC mode: every mapping, every pass phase — fetch, merge, push, mirror.
+      const targets: FolderMapping[] = settings.mappings;
+      console.log(`\n[live-diag] ${targets.length} mappings:`, targets.map((m) => `${m.label}(${m.direction})`).join(", "));
 
-      // Read-only view of the persisted state; records are printed, NOT written back
-      // (the plugin owns data.json and self-heals the baseline once the remote advances).
+      // In-memory view of the persisted state; records update the in-memory copy
+      // (so later phases in one session see them) but are NEVER written back to
+      // data.json — the running plugin owns that file.
+      const record = (id: string, patch: Record<string, unknown>): void => {
+        const cur = settings.lastSync[id] ?? { mappingId: id, status: "pending" as const };
+        settings.lastSync[id] = { ...cur, mappingId: id, ...patch } as (typeof settings.lastSync)[string];
+      };
       const lastSync: LastSyncAccessor = {
         lastRemoteSha: (id) => settings.lastSync[id]?.lastRemoteSha,
-        recordPull: (id, sha) => console.log(`[record] pull  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`),
-        recordPush: (id, sha) => console.log(`[record] push  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`),
+        recordPull: (id, sha) => {
+          console.log(`[record] pull  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`);
+          record(id, { lastRemoteSha: sha, lastPullAt: Date.now(), status: "ok" });
+        },
+        recordPush: (id, sha) => {
+          console.log(`[record] push  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`);
+          record(id, { lastRemoteSha: sha, lastPushAt: Date.now(), status: "ok" });
+        },
         recordConflict: (id) => console.log(`[record] conflict ${id.slice(0, 8)}`),
         vaultPopulated: (id) => settings.lastSync[id]?.vaultPopulated,
-        recordVaultSync: (id) => console.log(`[record] vault-populated ${id.slice(0, 8)}`),
+        recordVaultSync: (id) => {
+          console.log(`[record] vault-populated ${id.slice(0, 8)}`);
+          record(id, { vaultPopulated: true });
+        },
+        lastCompletedAt: (id) => {
+          const s = settings.lastSync[id];
+          const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
+          return at > 0 ? at : undefined;
+        },
+        contentSnapshot: (id) => settings.lastSync[id]?.contentSnapshot,
+        recordContentSnapshot: (id, snap) => record(id, { contentSnapshot: snap }),
       };
       const conflicts: ConflictStore = {
         getConflicts: (id) => settings.conflicts[id] ?? [],
@@ -148,6 +182,42 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
       if (bad.length > 0) {
         console.log("\n[live-diag] FAILURES (full reasons above) — investigate before go-live.");
       }
+
+      // --- RC state verification --------------------------------------------
+      // 1. Every mapping's recorded baseline must resolve to a real commit in its
+      //    clone (the Diff view's exact check).
+      // 2. No junk directories inside the vault (the old adapter-path bug grew
+      //    <vault>/home/... — its return would mean a regression).
+      // 3. No stored unresolved conflicts after clean passes.
+      const { execFileSync } = await import("node:child_process");
+      const junk = readdirSync(VAULT).filter((e) => e === "home");
+      console.log(`[verify] junk dirs (must be empty): ${JSON.stringify(junk)}`);
+      let problems = junk.length > 0 ? 1 : 0;
+      for (const m of targets) {
+        const ls = settings.lastSync[m.id];
+        const base = ls?.lastRemoteSha;
+        if (!base) {
+          console.log(`[verify] ${m.label}: NO BASELINE — first sync never completed`);
+          problems++;
+          continue;
+        }
+        const slug = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const dir = `${CLONE_ROOT}/${slug(m.providerId)}/${slug(m.repoRef ?? m.id)}`;
+        try {
+          execFileSync("git", ["cat-file", "-e", `${base}^{commit}`], { cwd: dir });
+          console.log(`[verify] ${m.label}: baseline ${base.slice(0, 8)} resolves in clone - status=${ls.status}`);
+        } catch {
+          console.log(`[verify] ${m.label}: baseline ${base.slice(0, 8)} MISSING from clone — Diff would fall back`);
+          problems++;
+        }
+        const stored = settings.conflicts[m.id] ?? [];
+        if (stored.some((c) => !c.resolved)) {
+          console.log(`[verify] ${m.label}: UNRESOLVED CONFLICTS stored (${stored.length})`);
+          problems++;
+        }
+      }
+      if (problems > 0) throw new Error(`[live-diag] state verification FAILED (${problems} problem(s))`);
+      console.log("\n[live-diag] state verification PASSED — baselines resolve, no junk dirs, no stored conflicts.");
     },
     600_000,
   );
