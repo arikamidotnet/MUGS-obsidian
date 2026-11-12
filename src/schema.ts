@@ -83,9 +83,26 @@ export const conflictSchema = z.object({
   resolvedContent: z.string().optional(),
 });
 
+/** Key-derivation parameters for passphrase encryption. The passphrase itself
+ *  is NEVER persisted — data.json only ever carries these public parameters. */
+export const kdfSchema = z.object({
+  algorithm: z.enum(["PBKDF2-SHA-256"]).default("PBKDF2-SHA-256"),
+  /** Random per-vault salt, base64. Makes rainbow/precomputation attacks vault-specific. */
+  salt: z.string().min(1),
+  iterations: z.number().int().positive(),
+});
+export type KdfParams = z.infer<typeof kdfSchema>;
+
 export const securitySchema = z.object({
   encryptCredentials: z.boolean().default(false),
+  /** LEGACY: a stored hint from which the old encryption key was derived.
+   *  Kept so old data.json files still load; dropped on migration to the
+   *  passphrase KDF (`kdf`) because a persisted key input protects nothing. */
   encryptionKeyHint: z.string().optional(),
+  /** Passphrase-KDF parameters. Presence marks the vault as using the
+   *  passphrase scheme; absent + encryptCredentials means the legacy hint
+   *  scheme (migrated on first unlock). */
+  kdf: kdfSchema.optional(),
 });
 
 export const obsidianEntrySchema = z.object({
@@ -145,6 +162,8 @@ export const mugsSettingsSchema = z.object({
 
 /** Derived types — keep in sync with src/types.ts by construction. */
 export type Settings = z.infer<typeof mugsSettingsSchema>;
+export type SecurityType = z.infer<typeof securitySchema>;
+export type KdfType = z.infer<typeof kdfSchema>;
 export type CredentialType = z.infer<typeof credentialSchema>;
 export type MappingType = z.infer<typeof folderMappingSchema>;
 export type LastSyncType = z.infer<typeof lastSyncStateSchema>;
