@@ -16,8 +16,20 @@ import {
   isBlockedFolder,
   normalizeVaultPath,
   type Settings,
+  type KdfParams,
 } from "./schema";
-import { deriveKey, encryptBytes, decryptBytes } from "./crypto";
+import {
+  DEFAULT_KDF_ALGORITHM,
+  DEFAULT_KDF_ITERATIONS,
+  PASSPHRASE_PREFIX,
+  deriveKey,
+  derivePassphraseKey,
+  encryptBytes,
+  decryptBytes,
+  encryptAesGcm,
+  decryptAesGcm,
+  generateSalt,
+} from "./crypto";
 import type {
   MugsSettings,
   FolderMapping,
@@ -48,16 +60,26 @@ export class MemoryIO implements SettingsIO {
   }
 }
 
+/** The persisted security block. `kdf` is written by this module; the hand-written
+ *  interface in types.ts is updated by the lead's integration pass, so it is
+ *  accessed through this widened type until then. */
+type SecuritySettings = MugsSettings["security"] & { kdf?: KdfParams };
+
 export class MugsStore {
   private settings: MugsSettings;
   /** Runtime tokens, keyed by credential id. Never persisted in plaintext unless encryption is off. */
   private runtimeTokens = new Map<string, string>();
-  /** Credential ids whose stored token could not be decrypted (e.g. the key hint
-   *  changed): kept in storage for recovery, but never used for auth. */
+  /** Credential ids whose stored token could not be decrypted (locked, wrong
+   *  passphrase or corrupted): kept in storage for recovery, but never used for auth. */
   private unreadableTokens = new Set<string>();
   /** Set when data.json could not be parsed: saves are refused (see save) so the
    *  corrupt file is never silently overwritten with fresh defaults. */
   private loadErrorMessage?: string;
+  /** Session key derived from the passphrase. NEVER persisted — lives only in
+   *  memory until unlock()/setEncryptionPassphrase() provides the passphrase. */
+  private passphraseKey?: CryptoKey;
+  /** True once the current passphrase-derived key is available in memory. */
+  private unlockedFlag = false;
 
   constructor(private io: SettingsIO = new MemoryIO()) {
     // Clone the shared default so each store has its own mutable settings
@@ -88,12 +110,38 @@ export class MugsStore {
     }
     // Restore runtime tokens from disk. When encryption is on the stored token
     // is ciphertext and must be decrypted before it can be used for auth. A failed
-    // decrypt (e.g. the key hint changed) degrades that credential to "missing
-    // token" instead of throwing the whole load away; the stored ciphertext is
-    // kept so the right hint can still recover it.
+    // decrypt (locked, wrong passphrase, corrupted) degrades that credential to
+    // "missing token" instead of throwing the whole load away; the stored
+    // ciphertext is kept so the right passphrase can still recover it.
     this.runtimeTokens.clear();
-    if (!this.settings.security.encryptCredentials) return this.getSettings();
-    // Derive the key once — PBKDF2 is deliberately expensive (see crypto.ts).
+    this.passphraseKey = undefined;
+    this.unlockedFlag = false;
+    const sec = this.security();
+    if (!sec.encryptCredentials) return this.getSettings();
+    if (sec.kdf) {
+      // Passphrase scheme: tokens stay unreadable (locked) until unlock() supplies
+      // the passphrase. Load NEVER throws and NEVER needs the passphrase.
+      let legacyKey: CryptoKey | undefined;
+      const legacy = async (): Promise<CryptoKey> => (legacyKey ??= await deriveKey(keyHint(this.settings)));
+      for (const c of this.settings.credentials) {
+        if (!c.token || isMasked(c.token)) continue;
+        if (c.token.startsWith(PASSPHRASE_PREFIX)) {
+          // Expected while locked — not an error, so no console noise.
+          this.unreadableTokens.add(c.id);
+          continue;
+        }
+        try {
+          this.runtimeTokens.set(c.id, await decryptStoredToken(c.token, undefined, legacy));
+          this.unreadableTokens.delete(c.id);
+        } catch (err) {
+          console.error("MUGS: could not decrypt the stored token for", c.label, err);
+          this.unreadableTokens.add(c.id);
+        }
+      }
+      return this.getSettings();
+    }
+    // Legacy hint scheme (no kdf): unchanged pre-migration behavior. Derive the
+    // key once — PBKDF2 is deliberately expensive (see crypto.ts).
     const key = await deriveKey(keyHint(this.settings));
     for (const c of this.settings.credentials) {
       if (!c.token || isMasked(c.token)) continue;
@@ -105,6 +153,143 @@ export class MugsStore {
       }
     }
     return this.getSettings();
+  }
+
+  /** Widened view of the security block (includes the passphrase-KDF params). */
+  private security(): SecuritySettings {
+    return this.settings.security as SecuritySettings;
+  }
+
+  /** True when tokens on disk are passphrase-encrypted and no passphrase has
+   *  been supplied yet this session. While locked, every credential resolves
+   *  to the visible "missing token" state instead of its secret. */
+  isLocked(): boolean {
+    const sec = this.security();
+    return !!sec.encryptCredentials && !!sec.kdf && !this.unlockedFlag;
+  }
+
+  /**
+   * Unlock credential decryption for this session with the vault passphrase.
+   * - Legacy vaults (old `encryptionKeyHint` scheme, no `kdf`): the supplied
+   *   passphrase BECOMES the new passphrase — every readable token is
+   *   re-encrypted under the passphrase scheme, the KDF params are created and
+   *   the hint field is dropped. Persist with `save()` (Apply) to keep it.
+   * - Passphrase vaults: the correct passphrase decrypts every locked token
+   *   (true returned). A wrong passphrase leaves those credentials in the
+   *   visible "missing token" state (false returned) — nothing throws, and a
+   *   later unlock with the right passphrase recovers them.
+   * Never throws; never persists the passphrase.
+   */
+  async unlock(passphrase: string): Promise<boolean> {
+    const sec = this.security();
+    if (!sec.encryptCredentials) return true; // encryption off — nothing is locked
+    if (!sec.kdf) return this.migrateToPassphrase(passphrase);
+    if (!passphrase) return false;
+    const key = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+    let legacyKey: CryptoKey | undefined;
+    const legacy = async (): Promise<CryptoKey> => (legacyKey ??= await deriveKey(keyHint(this.settings)));
+    let failures = 0;
+    for (const c of this.settings.credentials) {
+      if (!c.token || isMasked(c.token)) continue;
+      if (this.runtimeTokens.has(c.id)) continue; // already readable this session
+      try {
+        const pt = await decryptStoredToken(c.token, key, legacy);
+        this.runtimeTokens.set(c.id, pt);
+        this.unreadableTokens.delete(c.id);
+      } catch (err) {
+        console.error("MUGS: stored token for", c.label, "could not be decrypted with this passphrase");
+        this.unreadableTokens.add(c.id);
+        failures++;
+      }
+    }
+    if (failures === 0) {
+      this.passphraseKey = key;
+      this.unlockedFlag = true;
+    }
+    return failures === 0;
+  }
+
+  /**
+   * First-time enable / change of the vault passphrase: re-encrypts every
+   * readable token under a fresh per-vault salt and stores only the KDF
+   * params (never the passphrase). The passphrase argument is forgotten as
+   * soon as the key is derived. Persist with `save()` (Apply) to keep it.
+   *
+   * Throws only when misused: empty passphrase, or changing the passphrase
+   * while the store is still locked with credentials present (unlock first —
+   * otherwise still-locked tokens could not be carried over to the new key).
+   */
+  async setEncryptionPassphrase(passphrase: string): Promise<void> {
+    if (!passphrase) throw new Error("MUGS: the encryption passphrase must not be empty.");
+    const sec = this.security();
+    if (sec.kdf && this.isLocked() && this.settings.credentials.length > 0) {
+      throw new Error("MUGS: unlock with the current passphrase before changing it.");
+    }
+    const salt = generateSalt();
+    const iterations = DEFAULT_KDF_ITERATIONS;
+    const key = await derivePassphraseKey(passphrase, salt, iterations);
+    for (const c of this.settings.credentials) {
+      // Undecryptable stored tokens are left untouched (their old ciphertext
+      // may still be recoverable from a backup); nothing is lost by skipping.
+      if (this.unreadableTokens.has(c.id)) continue;
+      const real = this.runtimeTokens.get(c.id) ?? c.token;
+      if (!real || isMasked(real)) continue;
+      // Already-ciphertext tokens without a newer runtime plaintext are left as-is;
+      // PLAINTEXT stored tokens are (re-)encrypted even when unchanged — enabling
+      // encryption from plaintext mode must always encrypt.
+      if (real === c.token && isStoredCipher(c.token)) continue;
+      c.token = await encryptAesGcm(real, key);
+    }
+    const next: SecuritySettings = {
+      ...sec,
+      encryptCredentials: true,
+      kdf: { algorithm: DEFAULT_KDF_ALGORITHM, salt, iterations },
+    };
+    delete next.encryptionKeyHint; // migration: the hint scheme is replaced, not kept alongside
+    this.settings.security = next;
+    this.passphraseKey = key;
+    this.unlockedFlag = true;
+  }
+
+  /**
+   * One-time migration off the legacy `encryptionKeyHint` scheme: decrypt every
+   * stored token with the hint key (or XOR / plaintext paths), re-encrypt under
+   * the supplied passphrase with a fresh per-vault salt, drop the hint field
+   * and store the KDF params. The supplied passphrase becomes the vault
+   * passphrase. Called by `unlock` on the first unlock of a legacy vault.
+   */
+  private async migrateToPassphrase(passphrase: string): Promise<boolean> {
+    if (!passphrase) return false;
+    const sec = this.security();
+    const legacyKey = await deriveKey(keyHint(this.settings));
+    const salt = generateSalt();
+    const iterations = DEFAULT_KDF_ITERATIONS;
+    const key = await derivePassphraseKey(passphrase, salt, iterations);
+    let failures = 0;
+    for (const c of this.settings.credentials) {
+      if (!c.token || isMasked(c.token)) continue;
+      try {
+        const pt = await decryptToken(c.token, legacyKey);
+        c.token = await encryptAesGcm(pt, key);
+        this.runtimeTokens.set(c.id, pt);
+        this.unreadableTokens.delete(c.id);
+      } catch (err) {
+        // Kept as the old ciphertext; retried on the next unlock.
+        this.unreadableTokens.add(c.id);
+        failures++;
+        console.error("MUGS: could not migrate the stored token for", c.label, err);
+      }
+    }
+    const next: SecuritySettings = {
+      ...sec,
+      encryptCredentials: true,
+      kdf: { algorithm: DEFAULT_KDF_ALGORITHM, salt, iterations },
+    };
+    delete next.encryptionKeyHint;
+    this.settings.security = next;
+    this.passphraseKey = key;
+    this.unlockedFlag = true;
+    return failures === 0;
   }
 
   getSettings(): MugsSettings {
@@ -234,7 +419,32 @@ export class MugsStore {
       return;
     }
     const toWrite = structuredClone(this.settings);
-    if (toWrite.security.encryptCredentials) {
+    const sec = toWrite.security as SecuritySettings;
+    if (sec.encryptCredentials && sec.kdf) {
+      if (this.unlockedFlag && this.passphraseKey) {
+        // Unlocked: (re-)encrypt every readable token under the passphrase key.
+        // Undecryptable stored tokens are left untouched (the right passphrase
+        // on a later unlock can still recover them).
+        for (const c of toWrite.credentials) {
+          if (this.unreadableTokens.has(c.id)) continue;
+          const real = this.runtimeTokens.get(c.id) ?? c.token;
+          if (!real || isMasked(real)) continue;
+          if (real === c.token && isStoredCipher(c.token)) continue;
+          c.token = await encryptAesGcm(real, this.passphraseKey);
+        }
+      } else {
+        // Locked: no passphrase key in memory, so nothing new can be encrypted.
+        // Existing ciphertext/masks pass through unchanged; a plaintext token
+        // (e.g. a credential added while locked) is replaced with an all-bullet
+        // mask (isMasked-recognizable on the next load) instead of being leaked.
+        for (const c of toWrite.credentials) {
+          if (!isStoredCipher(c.token) && !isMasked(c.token)) {
+            c.token = LOCKED_PERSIST_MASK;
+          }
+        }
+      }
+    } else if (sec.encryptCredentials) {
+      // Legacy hint scheme (no kdf yet) — unchanged pre-migration behavior.
       // Derive once and reuse across credentials. Undecryptable stored tokens are
       // left untouched (the right key hint can still recover them).
       const key = await deriveKey(keyHint(toWrite));
@@ -248,10 +458,15 @@ export class MugsStore {
   }
 
   /** Resolve the live token for a credential id (runtime secret). Undecryptable
-   *  stored tokens resolve to undefined so sync reports "missing token" clearly. */
+   *  or locked stored tokens resolve to undefined so sync reports "missing token"
+   *  clearly; stored ciphertext/masks are never handed out as if they were secrets. */
   getToken(id: string): string | undefined {
     if (this.unreadableTokens.has(id)) return undefined;
-    return this.runtimeTokens.get(id) ?? this.settings.credentials.find((c) => c.id === id)?.token;
+    const runtime = this.runtimeTokens.get(id);
+    if (runtime !== undefined) return runtime;
+    const stored = this.settings.credentials.find((c) => c.id === id)?.token;
+    if (stored === undefined || isMasked(stored) || isStoredCipher(stored)) return undefined;
+    return stored;
   }
 }
 
@@ -272,10 +487,49 @@ export function assertMappingAllowed(
   }
 }
 
+/** All-bullet placeholder persisted for a credential whose plaintext token
+ *  could not be encrypted (added while locked). Recognized by isMasked on the
+ *  next load, so it is never handed out as if it were a real secret. */
+const LOCKED_PERSIST_MASK = "••••••••";
+
 /** True when a stored token looks masked rather than a real secret. */
 function isMasked(token: string): boolean {
   if (!token) return true;
   return /^•+$/.test(token);
+}
+
+/** True when a stored token is serialized ciphertext from any known scheme
+ *  (passphrase AES-GCM, legacy hint AES-GCM, or legacy XOR) rather than a
+ *  plaintext secret. */
+function isStoredCipher(token: string): boolean {
+  return (
+    token.startsWith(PASSPHRASE_PREFIX) ||
+    token.startsWith("aesgcm:") ||
+    token.startsWith("enc:")
+  );
+}
+
+/**
+ * Decrypt a stored token, dispatching on its format:
+ *  - `aesgcm-pw:` → passphrase-scheme AES-256-GCM (needs the passphrase key).
+ *  - `aesgcm:`    → legacy hint-derived AES-256-GCM (needs the hint key).
+ *  - `enc:`       → legacy XOR obfuscation (keyless).
+ *  - otherwise    → already plaintext / masked; return as-is.
+ * `passphraseKey` decrypts only the passphrase scheme; `legacyKey()` is derived
+ * lazily so plaintext/`enc:` tokens never pay for a PBKDF2 run.
+ */
+async function decryptStoredToken(
+  token: string,
+  passphraseKey: CryptoKey | undefined,
+  legacyKey: () => Promise<CryptoKey>,
+): Promise<string> {
+  if (token.startsWith(PASSPHRASE_PREFIX)) {
+    if (!passphraseKey) throw new Error("store is locked — no passphrase key in memory");
+    return decryptAesGcm(token, passphraseKey);
+  }
+  if (token.startsWith("enc:")) return legacyXorDecrypt(token);
+  if (token.startsWith("aesgcm:")) return decryptBytes(token, await legacyKey());
+  return token;
 }
 
 /** Derive key material from the user-provided hint (default when unset). */

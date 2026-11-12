@@ -199,6 +199,9 @@ function makePlugin() {
     setSecurity: (s: any) => {
       settings.security = { ...settings.security, ...s };
     },
+    isLocked: () => false,
+    unlock: async (_passphrase: string) => true,
+    setEncryptionPassphrase: async (_passphrase: string) => {},
     setSync: (s: any) => {
       settings.sync = { ...settings.sync, ...s };
     },
@@ -369,6 +372,53 @@ describe("deferred persistence", () => {
     tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
     await flush();
     expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+  });
+});
+
+describe("security section — passphrase controls", () => {
+  /** Setting rows render their name/desc into the card, but the obsidian stub's
+   *  addButton builds detached buttons, so only names + copy are assertable here.
+   *  The unlock/set behavior itself is covered by store.test.ts. */
+  const sectionText = async (over: (plugin: any) => void = () => {}): Promise<string> => {
+    const plugin = makePlugin();
+    over(plugin);
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    const sections = Array.from(tab.containerEl.querySelectorAll(".mugs-section") as unknown as any[]).filter((el) =>
+      collectText(el).includes("Security & Credentials"),
+    );
+    return collectText(sections[0]);
+  };
+
+  it("replaces the hint placeholder with set-passphrase controls and honest copy", async () => {
+    const text = await sectionText((plugin) => plugin.store.setSecurity({ encryptCredentials: true }));
+    expect(text).toContain("Encryption passphrase");
+    expect(text).toContain("not stored");
+    expect(text).toContain("cannot be recovered");
+    expect(text).not.toContain("Encryption key hint");
+  });
+
+  it("renders change-passphrase controls once a kdf block exists", async () => {
+    const text = await sectionText((plugin) =>
+      plugin.store.setSecurity({
+        encryptCredentials: true,
+        kdf: { algorithm: "PBKDF2-SHA-256", salt: "abc", iterations: 310000 },
+      }),
+    );
+    expect(text).toContain("Change encryption passphrase");
+  });
+
+  it("renders the locked state and unlock row while tokens are unreadable", async () => {
+    const text = await sectionText((plugin) => {
+      plugin.store.setSecurity({
+        encryptCredentials: true,
+        kdf: { algorithm: "PBKDF2-SHA-256", salt: "abc", iterations: 310000 },
+      });
+      plugin.store.isLocked = () => true;
+    });
+    expect(text).toContain("Credentials locked");
+    expect(text).toContain("missing token");
   });
 });
 

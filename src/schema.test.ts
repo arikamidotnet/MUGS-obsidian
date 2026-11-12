@@ -76,6 +76,35 @@ describe("data-plane schema (contract)", () => {
     const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "d", localFolder: "notes", providerId: "c1", repoRef: "42" }] });
     expect(s.mappings[0].repoRef).toBe("42");
   });
+
+  it("accepts and preserves a security.kdf block (passphrase scheme)", () => {
+    const s = parseSettings({
+      version: 1,
+      security: { encryptCredentials: true, kdf: { salt: "abc123", iterations: 310000 } },
+    });
+    expect(s.security.kdf).toEqual({ algorithm: "PBKDF2-SHA-256", salt: "abc123", iterations: 310000 });
+  });
+
+  it("treats kdf as optional (legacy vaults without it still parse)", () => {
+    const s = parseSettings({ version: 1, security: { encryptCredentials: true, encryptionKeyHint: "hint" } });
+    expect(s.security.kdf).toBeUndefined();
+    expect(s.security.encryptionKeyHint).toBe("hint");
+  });
+
+  it("rejects a kdf block with a non-positive iteration count", () => {
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { salt: "abc", iterations: 0 } } }),
+    ).toThrow();
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { salt: "abc", iterations: -5 } } }),
+    ).toThrow();
+  });
+
+  it("rejects a kdf block without a salt", () => {
+    expect(() =>
+      parseSettings({ version: 1, security: { encryptCredentials: true, kdf: { iterations: 1000 } } }),
+    ).toThrow();
+  });
 });
 
 describe("credential redaction invariant", () => {
