@@ -8,7 +8,8 @@
  */
 import { PluginSettingTab, Setting, Notice, type SettingDefinitionItem } from "obsidian";
 import type MugsPlugin from "./main";
-import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping, SyncStatus } from "./types";
+import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping, SyncStatus, MugsSettings } from "./types";
+import type { KdfParams } from "./schema";
 import type { RepoSummary } from "./providers/types";
 import { buildProvider, defaultBaseUrl } from "./providers/factory";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
@@ -196,12 +197,16 @@ export class MugsSettingTab extends PluginSettingTab {
 
     // --- Security -----------------------------------------------------------
     this.section(containerEl, "Security & Credentials", (card) => {
+      // The hand-written MugsSettings.security in types.ts does not carry `kdf` yet
+      // (schema.ts is the source of truth) — widen here for the render path.
+      const sec = this.plugin.store.getSettings().security as MugsSettings["security"] & { kdf?: KdfParams };
+
       new Setting(card)
         .setName("Encrypt credentials at rest")
-        .setDesc("When on, stored tokens are encrypted in data.json instead of saved as-is.")
+        .setDesc("When on, stored tokens are encrypted in data.json instead of saved as-is. Set a passphrase below — encryption without a passphrase does not protect anything.")
         .addToggle((t) =>
           t
-            .setValue(this.plugin.store.getSettings().security.encryptCredentials)
+            .setValue(sec.encryptCredentials)
             .onChange(async (v) => {
               this.plugin.store.setSecurity({ encryptCredentials: v });
               await this.markUnsaved();
@@ -211,17 +216,72 @@ export class MugsSettingTab extends PluginSettingTab {
             }),
         );
 
-      new Setting(card)
-        .setName("Encryption key hint")
-        .setDesc("Placeholder for a future KDF-derived key (Phase 2).")
-        .addText((txt) =>
-          txt
-            .setValue(this.plugin.store.getSettings().security.encryptionKeyHint ?? "")
-            .onChange(async (v) => {
-              this.plugin.store.setSecurity({ encryptionKeyHint: v });
-              await this.markUnsaved();
+      card.createEl("p", {
+        cls: "mugs-desc",
+        text:
+          "Tokens are encrypted with a passphrase that MUGS never stores: data.json keeps only the ciphertext, a random per-vault salt and the key-derivation parameters. The passphrase cannot be recovered — if you forget it, encrypted tokens stop working and must be re-entered. You are asked for it once per Obsidian session.",
+      });
+
+      if (this.plugin.store.isLocked()) {
+        // Locked: passphrase-encrypted tokens are unreadable until unlocked.
+        let passphrase = "";
+        new Setting(card)
+          .setName("Credentials locked")
+          .setDesc(
+            "Enter your passphrase to decrypt tokens for this session. A wrong passphrase leaves credentials showing 'missing token' — nothing is lost; unlock again with the correct one.",
+          )
+          .addText((txt) => {
+            txt.setPlaceholder("Passphrase");
+            txt.inputEl.type = "password";
+            txt.onChange((v) => { passphrase = v; });
+          })
+          .addButton((b) =>
+            b.setButtonText("Unlock").setCta().onClick(async () => {
+              if (!passphrase) { new Notice("MUGS: enter your passphrase to unlock."); return; }
+              const ok = await this.plugin.store.unlock(passphrase);
+              passphrase = "";
+              new Notice(
+                ok
+                  ? "MUGS: credentials unlocked for this session."
+                  : "MUGS: that passphrase did not match — tokens stay locked.",
+                6000,
+              );
+              this._renderAll();
             }),
-        );
+          );
+      } else {
+        const hasKdf = !!sec.kdf;
+        let passphrase = "";
+        new Setting(card)
+          .setName(hasKdf ? "Change encryption passphrase" : "Encryption passphrase")
+          .setDesc(
+            hasKdf
+              ? "Re-encrypts every stored token under a new passphrase. The passphrase is not stored and cannot be recovered."
+              : "Sets the passphrase that encrypts your tokens in data.json. The passphrase is not stored and cannot be recovered — if you forget it, encrypted tokens cannot be decrypted.",
+          )
+          .addText((txt) => {
+            txt.setPlaceholder(hasKdf ? "New passphrase" : "Passphrase");
+            txt.inputEl.type = "password";
+            txt.onChange((v) => { passphrase = v; });
+          })
+          .addButton((b) =>
+            b.setButtonText(hasKdf ? "Change passphrase" : "Set passphrase").setCta().onClick(async () => {
+              if (!passphrase) { new Notice("MUGS: enter a passphrase first."); return; }
+              try {
+                await this.plugin.store.setEncryptionPassphrase(passphrase);
+                passphrase = "";
+                await this.markUnsaved();
+                new Notice(
+                  "MUGS: tokens re-encrypted — Apply settings to persist. The passphrase is not stored and cannot be recovered.",
+                  8000,
+                );
+                this._renderAll();
+              } catch (e) {
+                new Notice(`MUGS: could not set the passphrase — ${errorMessage(e)}`, 8000);
+              }
+            }),
+          );
+      }
     });
 
     // --- Automatic conflict resolution (Area 3/4) -------------------------
