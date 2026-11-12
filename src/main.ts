@@ -36,6 +36,7 @@ import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
 import { toAdapterPath } from "./sync/adapterPath";
 import { createConflictResolver } from "./runtime/conflictResolver";
+import { buildStatusReport } from "./runtime/statusReport";
 import type { PendingOperation, FileConflict } from "./types";
 import type { ConflictDataSource, ConflictQuery, ConflictResolutionQuery, ConflictResolutionResult } from "./ui/dataSources";
 import { MCP_SERVER_NAME } from "./mcp/server";
@@ -420,21 +421,39 @@ export default class MugsPlugin extends Plugin {
         }
       }
 
-      // Terminal status-bar state from the outcome aggregate.
+      // Terminal status-bar state from the DISTINCT report (contract §7):
+      // offline/auth/conflict each surface their own message; counts only.
       // IMPORTANT (E04): never claim "synced" if the save refused or failed.
-      const conflicts = outcomes.filter((o) => o.status === "conflict").length;
-      const skips = outcomes.filter((o) => o.status === "skipped").length;
-      const oks = outcomes.filter((o) => o.status === "ok").length;
-      if (conflicts > 0) this.updateStatusBar("conflict");
-      else if (skips > 0) this.updateStatusBar("skipped");
-      else if (oks > 0 && saveResult.ok) {
-        this.lastSyncedAt = Date.now();
-        this.updateStatusBar("synced");
-      } else if (oks > 0 && !saveResult.ok) {
-        this.updateStatusBar("error");
-      } else {
-        this.updateStatusBar("idle");
-        if (!quiet) new Notice("MUGS: no mappings configured — add one in Settings to start syncing.", 5000);
+      const report = buildStatusReport({
+        outcomes,
+        saveResult,
+        thrown: syncThrown,
+      });
+      switch (report.kind) {
+        case "conflict":
+          this.updateStatusBar("conflict");
+          break;
+        case "auth":
+        case "offline":
+        case "skipped":
+          this.updateStatusBar("skipped");
+          break;
+        case "error":
+          this.updateStatusBar("error");
+          break;
+        case "synced":
+          this.lastSyncedAt = Date.now();
+          this.updateStatusBar("synced");
+          break;
+        default: {
+          this.updateStatusBar("idle");
+          if (!quiet) new Notice("MUGS: no mappings configured — add one in Settings to start syncing.", 5000);
+        }
+      }
+      // One aggregate count-only notice per pass replaces per-mapping spam while
+      // keeping distinct reasons visible (quiet runs especially).
+      if (quiet && (report.kind === "offline" || report.kind === "auth" || report.kind === "error")) {
+        new Notice(report.message, 10_000);
       }
     }
 
