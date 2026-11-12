@@ -21,6 +21,13 @@ on:
         default: 'false'
         type: boolean
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -43,7 +50,9 @@ jobs:
       - run: npm run build
 
       - name: Verify version consistency
-        run: node scripts/check-release.js "${{ github.event.inputs.version }}"
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: node scripts/check-release.js "$RELEASE_VERSION"
 
       - name: Stage release artifacts
         run: |
@@ -78,10 +87,14 @@ jobs:
       - name: Create GitHub Release with provenance
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          VERSION="${{ github.event.inputs.version }}"
-          SHA="${{ github.sha }}"
+          VERSION="$RELEASE_VERSION"
+          SHA="$RELEASE_SHA"
+          (cd dist && sha256sum --check checksums.txt)
           NOTES_FILE="$(mktemp)"
 
           cat > "$NOTES_FILE" <<EOF
@@ -95,11 +108,23 @@ jobs:
 
           This release was created by the gated release workflow.
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
+
+          Highlights:
+          - Per-file Diff browsing with explicit comparison modes, line counts, and file-level Git authors.
+          - Direction-safe sync, editor-aware deferred operations, scoped commits, and recoverable conflicts.
+          - Serialized settings persistence and safer credential migration and metadata edits.
+
+          Diff compares committed snapshots; unsynced vault edits are not included.
+          Binary text reconciliation is blocked rather than risking content corruption.
+          Back up vault content, plugin data, and clones before upgrading. Rollback requires
+          compatible settings/state as well as the previous plugin assets; do not delete dirty clones.
           EOF
 
-          gh release create "v${VERSION}" \
-            --title "v${VERSION}" \
+          gh release create "${VERSION}" \
+            --target "$SHA" \
+            --title "${VERSION} — reliable sync and per-file Diff" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \
-            dist/styles.css
+            dist/styles.css \
+            dist/checksums.txt

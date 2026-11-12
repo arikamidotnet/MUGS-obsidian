@@ -1,8 +1,8 @@
 # MUGS — Multi-User Git Sync for Obsidian
 
-**Conservative description as of the current implementation.**
-Some details (especially attribution granularity, conflict UX polish, and identity behavior)
-will be refined after engine hardening. Sections marked **[post-hardening]** are expected to change.
+Desktop-only Git sync with folder mappings, explicit sync directions, recoverable
+conflicts, and per-file committed-snapshot comparisons. Requires system Git and
+Obsidian 1.8.0 or newer.
 
 Fine-grained, folder-mapped git sync across **all** git backends (GitLab-first),
 with per-user credentials stored *inside* the vault and multi-user collaboration
@@ -19,12 +19,14 @@ purely git-native.
   GitLab gets first-class v4 API support, and GitHub/Gitea/Forgejo/Bitbucket/local adapters ship today.
 - **Fine-grained folder sync.** Each mapping ties a remote path to a vault folder, so different
   users can share one repo while syncing only the folders relevant to them.
-- **Credentials live in the vault**, not the OS keychain. Tokens are never shown in full and can be
-  encrypted at rest (`data.json`). Mappings that target `.obsidian/` are rejected outright.
+- **Credentials live in the vault**, not the OS keychain. Tokens can be encrypted
+  at rest (`data.json`). `.obsidian/` syncing requires explicit opt-in and scope
+  policy; credential-bearing plugin data must stay excluded.
 - **Declarative data plane (ADL).** The entire persisted settings object is defined by a single Zod
   schema (`src/schema.ts`) — the single source of truth. TS types are derived from it.
-- **jj-inspired conflict/rebase workflow.** Local changes rebase onto the fetched remote history;
-  conflicts surface per-file; file-level merge + durable, resolvable conflict state exists.
+- **Recoverable conflicts.** Clean three-way changes merge automatically; genuinely
+  conflicting files remain visible for explicit resolution rather than silently
+  choosing a timestamp winner or concatenating structured documents.
 
 ## Layout
 
@@ -55,29 +57,44 @@ bench/              performance benchmarks (npm run bench)
 
 ## Features & status
 
-Feature work is delivered in phases (see below). Implemented so far (conservative):
+Implemented features:
 - **Folder-mapped sync.** Each mapping ties a remote path to a vault folder; the sync contract classifies last-sync vs local vs remote and decides ff/rebase/none. (`src/sync/`)
 - **Fine-grained paths.** gitignore-style include/exclude rules decide which files a mapping touches. (`src/sync/exclusion.ts`)
 - **Git-native engine.** A thin `GitClient` over the system `git` binary drives clone/fetch/ff/rebase/push per mapping; clones live under `<vault>/.mugs-clones`. (`src/git/`, `src/sync/cloneManager.ts`)
 - **Multi-user visibility.** Merge a backend's member roster with local git activity into a membership summary — access and activity, not enforcement. (`src/membership/`)
 - **Map view** (`mugs-map`). A folder->repo graph color-coded by sync status and direction, showing owning users. (`src/ui/mapView.ts`)
-- **Diff view** (`mugs-diff`). Compare a mapping against a chosen ref. Shows changes since the mapping's last-synced baseline. Author attribution is derived from git history where available. [post-hardening: attribution detail and baseline reporting are subject to refinement.]
-- **Conflict resolution.** On divergence, files may auto-merge via pure 3-way merge under the Automatic Conflict Resolution policy; unresolvable conflicts surface in the dedicated **Conflicts panel** (right sidebar) with Take ours / theirs / both. Choices are written into the clone. (`src/sync/conflict.ts`, `src/sync/policy.ts`, `src/ui/diffPanel.ts`)
+- **Per-file Diff view** (`mugs-diff`). Select a mapping and comparison mode, then
+  browse changed files with addition/deletion counts, line numbers, collapsible
+  changes, and file-level Git author names where available.
+- **Conflict resolution.** Clean changes may auto-merge; genuine conflicts remain
+  in the **Conflicts panel** for an explicit ours / theirs / both choice. Editor
+  guards and durable state keep deferred or failed work visible.
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon and the *Run sync* command; each mapping reports ok / push+pull / conflict / skip as a Notice. (`src/providers/factory.ts`, `src/main.ts`)
 - **Settings controls.** Add or delete credentials (provider picker + token) and folder mappings (provider/branch/direction) directly from Settings, with `.obsidian/` targets rejected outright. (`src/settingsTab.ts`)
 
-Also shipped: **first-sync direction** ("pull" populates the vault from the remote by default; "push" uploads the vault additively without downloading full history), **shared per-repo blobless clones**, **event-driven sync** on vault changes, a **live clickable status bar** (conflicts → Conflicts panel, otherwise Diff view), **opt-in token encryption at rest with a passphrase**, and a **live-diagnostic harness** (`MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts`).
+Also shipped: first-sync policy, repository-and-branch clone isolation,
+event-driven sync, a clickable status bar, opt-in passphrase encryption,
+serialized settings saves, and cancellation on plugin unload.
 
 Remaining work (not claiming completeness): mobile support (desktop-only for now), review-queue producer wiring, per-hunk blame granularity.
 
 ## Sync flow and directions (current behavior)
 
-- Every folder mapping has an explicit direction for its *first* sync (when no baseline exists yet).
-- `pull` (default): the remote populates the vault folder.
-- `push`: the vault folder is uploaded to the remote without downloading full history.
-- Subsequent syncs use the classifier to decide fast-forward, rebase, or no-op based on last-sync baseline vs local vs remote.
-- Pull and push are recorded per mapping; the baseline (lastRemoteSha / lastLocalSha) drives future comparisons.
-- Identity for git commits: the thin client uses the environment's git user identity for author/committer fields on commits it creates. An optional agent mechanism can add an "On-behalf-of" trailer. The plugin does not force a global git identity in CI or at runtime; identity configuration is an operator / environment concern. [post-hardening]
+- Mapping direction applies to every pass: **push-only** never applies remote
+  content to the vault; **pull-only** never publishes local content; **push/pull**
+  reconciles both sides.
+- First-sync policy controls initialization within those direction permissions.
+  Back up existing content and review the mapping before its first run.
+- Discovery and planning precede execution. Proven idle passes avoid unnecessary
+  reconciliation; startup and uncertain change evidence require verification.
+- Fetched remote tips, clone HEAD, proven correspondence, and pending operations
+  are separate state. Deferred editor writes must not count as completed sync.
+- Generated commits receive explicit author and committer identities from the
+  configured provider/agent where available, with a deterministic fallback.
+  A teammate's global Git configuration is not required.
+- Dirty or unpushed legacy clones block migration for review; they are not reset.
+- Binary content is excluded from text reconciliation and reported as blocked.
+  Do not assume attachment synchronization is supported by the text merge path.
 
 ## Credentials and encryption model (current limits)
 
@@ -90,9 +107,16 @@ Remaining work (not claiming completeness): mobile support (desktop-only for now
 
 ## Diff semantics (current)
 
-- The Diff view (`mugs-diff`) compares a mapping's vault folder against a user-supplied ref (default HEAD) and against the mapping's last-synced baseline.
-- Output is a unified diff. Where git history provides author information for changed hunks, attribution is shown.
-- **Overclaim removed**: do not assume complete per-hunk blame or a persistent "last-sync report" artifact. The baseline is the last completed pull/push recorded for that mapping. [post-hardening]
+- **Since completed sync:** compare proven correspondence with committed HEAD.
+  If only a fetched remote tip is available, the UI labels that fallback.
+- **Previous commit:** compare the previous committed snapshot with HEAD.
+- **Custom older ref:** compare the selected older committed snapshot with HEAD.
+- Select a changed file to inspect its changes. Queries stay within the mapping's
+  repository subtree.
+- **Unsynced vault edits are not included.** Identical committed snapshots do not
+  prove the live vault has no pending edits.
+- Author names are file-level Git history evidence, not per-line blame, verified
+  human identities, or the identity of someone currently editing a note.
 - Conflicts (if any) are rendered above the diff and can be resolved from the panel.
 
 ## Operator recovery notes (current)
@@ -100,9 +124,23 @@ Remaining work (not claiming completeness): mobile support (desktop-only for now
 - When a mapping shows "needs merge" / conflict status, open the Conflicts panel (via status bar click or dedicated view) and choose per file: ours / theirs / both.
 - Resolved choices are written into the working tree of the clone and will be carried on the next push.
 - Deleted files during sync may be recoverable via the trash store (`.mugs-trash`) if the trash feature is active for the mapping.
-- If a clone is in a bad state, clearing the per-repo clone directory under `.mugs-clones` and re-running sync will re-clone (destructive of local clone state only).
+- If a clone is in a bad state, pause sync and preserve its index, worktree,
+  refs, and untracked files before investigating. Do not delete a clone that
+  might contain unpushed work.
 - Always keep a backup of the vault and the shared remote before large syncs or conflict resolution.
-- The live diagnostic harness can be used to replay exact sync behavior for debugging against a real remote.
+- Live diagnostics are excluded from routine tests. Never run a second sync
+  process against a vault owned by the running plugin.
+
+### Upgrade and rollback
+
+Pause sync and back up the vault, `.obsidian/plugins/mugs-obsidian/` (including
+private `data.json`), and `.mugs-clones` before upgrading. Install the three release
+assets, reload the plugin, and verify mapping outcomes before resuming work.
+Keep backup permissions private: plugin state may contain credentials.
+
+Rollback requires the matching previous plugin assets **and compatible saved
+settings/state**. Preserve legitimate newer edits and pending work rather than
+blindly restoring an old vault tree. Never force-push as an automatic recovery.
 
 ## Installing into Obsidian
 
@@ -121,7 +159,7 @@ from the public repo).
 - **Phase 3:** multi-user membership view data layer (roster + local activity -> summary), visibility only. `✅`
 - **Phase 4:** Map & Diff Obsidian views — folder->repo graph and Diff with baseline comparison, with store/git-backed data seams; sync driver wired to the ribbon + *Run sync* command; add/delete credentials and mappings in Settings. `✅`
 - **Phase 5:** file-level 3-way merge + durable, resolvable conflicts. `✅`
-- **Later:** mobile support (desktop-only — the engine uses node:fs + the system git binary), review-queue producer wiring, device-flow auth, per-hunk blame. [post-hardening]
+- **Later:** mobile support (desktop-only — the engine uses node:fs + the system git binary), review-queue producer wiring, device-flow auth, per-hunk blame.
 
 ## Security notes
 

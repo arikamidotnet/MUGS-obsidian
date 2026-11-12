@@ -47,6 +47,9 @@ const manMinApp = manifest.minAppVersion;
 if (!pkgVersion || typeof pkgVersion !== "string") {
   fail("package.json is missing a valid 'version' string");
 }
+if (!/^\d+\.\d+\.\d+$/.test(pkgVersion)) {
+  fail("Release version must be an unprefixed numeric major.minor.patch version");
+}
 if (!manVersion || typeof manVersion !== "string") {
   fail("manifest.json is missing a valid 'version' string");
 }
