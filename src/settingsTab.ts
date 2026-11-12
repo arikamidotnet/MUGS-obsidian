@@ -16,6 +16,7 @@ import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
 import { matchFolderPairs, matchFolderPairsFuzzy, type FolderMatch } from "./sync/folderMatch";
+import { SettingsDraft, type SettingsDraftTarget } from "./runtime/settingsDraft";
 
 // The shipped obsidian typings (pinned "latest" at an older snapshot) omit
 // addSelect/addField from Setting even though both are real runtime APIs.
@@ -77,16 +78,32 @@ export class MugsSettingTab extends PluginSettingTab {
     this._renderAll();
   }
 
-  /** True when settings changed in-memory but not yet persisted to disk via Apply.
-   *  Live preview works regardless: store setters mutate the in-memory store
-   *  immediately, so the scheduler/sync runner already see edits; only the on-disk
-   *  write is deferred until the user applies them (see applySettings). */
+  /** U04 draft/Apply model: edits accumulate in a DRAFT — the live store (and
+   *  therefore the scheduler/sync engine) sees NOTHING until Apply succeeds.
+   *  Created lazily on first render; Cancel discards; Apply validates the whole
+   *  draft, commits through the store's setter API and persists ONCE. */
+  private draft: SettingsDraft | null = null;
+
+  /** True when the draft holds changes not yet applied (drives the banner). */
   private unsavedChanges = false;
 
   /** Reused single instance of the top-of-pane unsaved-changes banner. Kept as a
    *  persistent element rather than rebuilt each render so toggling it never
    *  rebuilds text inputs and steals focus/caret position. */
   private unsavedBannerEl: HTMLElement | null = null;
+
+  /** The settings snapshot edits render from and mutate: the DRAFT (never the live store). */
+  private view(): MugsSettings {
+    if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
+    return this.draft.view();
+  }
+
+  /** Apply an edit to the draft and flag the unsaved banner. */
+  private edit(mutate: (d: SettingsDraft) => void): void {
+    if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
+    mutate(this.draft);
+    this.markUnsaved();
+  }
 
   /** Create the single unsaved-changes banner if it does not yet exist. */
   private ensureUnsavedBanner(): void {
@@ -96,10 +113,12 @@ export class MugsSettingTab extends PluginSettingTab {
     el.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved changes — not yet applied." });
     const applyBtn = el.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
     applyBtn.addEventListener("click", () => void this.applySettings());
+    const cancelBtn = el.createEl("button", { cls: "mugs-unsaved-cancel", text: "Cancel" });
+    cancelBtn.addEventListener("click", () => this.cancelSettings());
     this.unsavedBannerEl = el;
   }
 
-  /** Flag that a setting changed so it is not persisted until the user applies.
+  /** Flag that a draft edit exists so it is not activated until the user applies.
    *  Toggles only the banner's visibility (no full re-render) so text inputs keep
    *  focus and caret position. */
   private markUnsaved(): void {
@@ -108,25 +127,54 @@ export class MugsSettingTab extends PluginSettingTab {
     if (this.unsavedBannerEl) this.unsavedBannerEl.style.display = "";
   }
 
-  /** Persist the current in-memory settings to disk, clearing the unsaved flag
-   *  only once the save actually succeeded (a failed save used to be reported as
-   *  applied — config could vanish on restart after an explicit success message). */
+  /** U04 Apply: validate the COMPLETE draft, then commit + persist ONCE.
+   *  Validation problems are listed and NOTHING is activated. A refused/failed
+   *  save rolls the store back to the pre-apply state (active settings intact)
+   *  and the banner stays so the user can retry or cancel. */
   private async applySettings(): Promise<void> {
-    try {
-      await this.plugin.store.save();
-      this.unsavedChanges = false;
-      if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
-      new Notice("MUGS: settings saved.");
-    } catch (e) {
-      new Notice(`MUGS: could not save settings — ${errorMessage(e)}. Changes remain active for this session; try Apply again.`, 8000);
+    if (!this.draft) return;
+    const target: SettingsDraftTarget = {
+      getSettings: () => this.plugin.store.getSettings(),
+      upsertCredential: (c) => this.plugin.store.upsertCredential(c),
+      removeCredential: (id) => this.plugin.store.removeCredential(id),
+      upsertMapping: (m) => this.plugin.store.upsertMapping(m),
+      removeMapping: (id) => this.plugin.store.removeMapping(id),
+      setSecurity: (p) => this.plugin.store.setSecurity(p),
+      setSync: (p) => this.plugin.store.setSync(p),
+      setObsidianConfig: (c) => this.plugin.store.setObsidianConfig(c),
+      save: async () => (await this.plugin.store.save()) ?? { ok: true },
+    };
+    const outcome = await this.draft.commit(target);
+    if (outcome.kind === "invalid") {
+      new Notice(`MUGS: settings not applied — fix these first:\n· ${outcome.problems.slice(0, 5).join("\n· ")}${outcome.problems.length > 5 ? `\n… and ${outcome.problems.length - 5} more` : ""}`, 10000);
+      return;
     }
+    if (outcome.kind === "save-failed") {
+      // Active settings were rolled back — say so; the banner stays for a retry.
+      new Notice(`MUGS: could not save settings (${outcome.result.reason}) — your edits are kept in this pane but the previous settings remain active. Try Apply again or Cancel.`, 10000);
+      return;
+    }
+    this.draft = null;
+    this.unsavedChanges = false;
+    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
+    new Notice("MUGS: settings saved and now active.");
+    this._renderAll();
+  }
+
+  /** U04 Cancel: discard the draft entirely — active settings never changed. */
+  private cancelSettings(): void {
+    this.draft = null;
+    this.unsavedChanges = false;
+    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
+    new Notice("MUGS: changes discarded — active settings unchanged.");
+    this._renderAll();
   }
 
   hide(): void {
-    // Deferred persistence: leaving the tab with unsaved changes is the moment a
+    // Draft model: leaving the tab with an unapplied draft is the moment a
     // teammate loses work — say so instead of letting the changes silently expire.
     if (this.unsavedChanges) {
-      new Notice("MUGS: settings changed but not applied — reopen MUGS settings and click Apply to persist them.", 6000);
+      new Notice("MUGS: settings changed but not applied — reopen MUGS settings and click Apply (or Cancel) to finish.", 6000);
     }
   }
 
@@ -147,7 +195,9 @@ export class MugsSettingTab extends PluginSettingTab {
         text: "Store per-user tokens inside this vault. Tokens are never shown in full and can be encrypted at rest.",
       });
 
-      const creds = this.plugin.store.getDisplaySettings().credentials;
+      // Draft view: tokens are masked HERE at render time only (the draft carries
+      // the real values so Apply can commit them; nothing raw is ever shown).
+      const creds = this.view().credentials;
       if (creds.length === 0) {
         card.createEl("p", { cls: "mugs-muted", text: "No credentials yet." });
       } else {
@@ -160,8 +210,7 @@ export class MugsSettingTab extends PluginSettingTab {
             .setDesc(descParts.join(" · "))
             .addButton((b) =>
               b.setButtonText("Delete").onClick(() => {
-                this.plugin.store.removeCredential(c.id);
-                this.markUnsaved();
+                this.edit((d) => d.removeCredential(c.id));
                 this._renderAll();
               }),
             );
@@ -186,8 +235,8 @@ export class MugsSettingTab extends PluginSettingTab {
 
       card.createEl("div", { cls: "mugs-divider" });
 
-      // Mapped folders — existing mapping cards with status dots + controls.
-      const mappings = this.plugin.store.getDisplaySettings().mappings;
+      // Mapped folders — existing mapping cards with status dots + controls (draft view).
+      const mappings = this.view().mappings;
       if (mappings.length === 0) {
         card.createEl("p", { cls: "mugs-muted", text: "No mappings yet." });
       } else {
@@ -199,7 +248,7 @@ export class MugsSettingTab extends PluginSettingTab {
     this.section(containerEl, "Security & Credentials", (card) => {
       // The hand-written MugsSettings.security in types.ts does not carry `kdf` yet
       // (schema.ts is the source of truth) — widen here for the render path.
-      const sec = this.plugin.store.getSettings().security as MugsSettings["security"] & { kdf?: KdfParams };
+      const sec = this.view().security as MugsSettings["security"] & { kdf?: KdfParams };
 
       new Setting(card)
         .setName("Encrypt credentials at rest")
@@ -208,10 +257,24 @@ export class MugsSettingTab extends PluginSettingTab {
           t
             .setValue(sec.encryptCredentials)
             .onChange(async (v) => {
-              this.plugin.store.setSecurity({ encryptCredentials: v });
-              await this.markUnsaved();
+              if (!v && sec.encryptCredentials) {
+                // Disabling encryption is a STORE transaction (decrypt-all): run it
+                // now and surface per-credential failures — never save a half-
+                // disabled state (contract §10). If it fails, encryption stays on.
+                const disable = (this.plugin.store as unknown as { disableEncryption?: () => Promise<{ ok: boolean; failures: string[] }> }).disableEncryption;
+                if (typeof disable === "function") {
+                  const res = await disable.call(this.plugin.store);
+                  if (!res.ok) {
+                    const labels = res.failures.map((id) => this.view().credentials.find((c) => c.id === id)?.label ?? id);
+                    new Notice(`MUGS: could not disable encryption — these credentials could not be decrypted this session: ${labels.join(", ")}. Unlock first, then try again; nothing was changed.`, 10000);
+                    this._renderAll();
+                    return;
+                  }
+                }
+              }
+              this.edit((d) => d.setSecurity({ encryptCredentials: v }));
               // The claim must not fire before the save: data.json still holds the
-              // previous state until Apply (deferred persistence).
+              // previous state until Apply.
               new Notice(`MUGS credentials will be ${v ? "encrypted" : "stored as-is"} once you Apply settings.`);
             }),
         );
@@ -228,7 +291,7 @@ export class MugsSettingTab extends PluginSettingTab {
         new Setting(card)
           .setName("Credentials locked")
           .setDesc(
-            "Enter your passphrase to decrypt tokens for this session. A wrong passphrase leaves credentials showing 'missing token' — nothing is lost; unlock again with the correct one.",
+            "Enter your passphrase to decrypt tokens for this session. A wrong passphrase leaves credentials showing 'missing token' — nothing is lost or overwritten; unlock again with the correct one. If the pane already shows unlocked, submitting the passphrase here just VERIFIES it.",
           )
           .addText((txt) => {
             txt.setPlaceholder("Passphrase");
@@ -243,7 +306,7 @@ export class MugsSettingTab extends PluginSettingTab {
               new Notice(
                 ok
                   ? "MUGS: credentials unlocked for this session."
-                  : "MUGS: that passphrase did not match — tokens stay locked.",
+                  : "MUGS: that passphrase did not match — tokens stay locked, nothing was changed.",
                 6000,
               );
               this._renderAll();
@@ -291,24 +354,22 @@ export class MugsSettingTab extends PluginSettingTab {
         text: "When both sides edited the same lines, decide how MUGS merges them automatically.",
       });
 
-      const sync = this.plugin.store.getSettings().sync;
+      const sync = this.view().sync;
       new Setting(card)
         .setName("Auto-merge when no conflict")
-        .setDesc("Combine edits from both sides into one file whenever they don't touch the same lines.")
+        .setDesc("Combine edits from both sides into one file whenever they don't touch the same lines. Genuine conflicts always need a human — no tie-break is applied silently.")
         .addToggle((t) => {
           t.setValue(sync.autoMerge).onChange(async (v) => {
-            this.plugin.store.setSync({ autoMerge: v });
-            await this.markUnsaved();
+            this.edit((d) => d.setSync({ autoMerge: v }));
           });
         });
 
       new Setting(card)
         .setName("Tie-break for unresolved hunks")
-        .setDesc('When both sides edited the same lines, combine ("both") or pick a side ("ours"/"theirs").')
+        .setDesc('SUGGESTED action for a human resolver when both sides edited the same lines — never applied silently.')
         .addDropdown((d) => {
           d.setValue(sync.defaultResolution).onChange(async (v) => {
-            this.plugin.store.setSync({ defaultResolution: v as "both" | "theirs" | "ours" });
-            await this.markUnsaved();
+            this.edit((d) => d.setSync({ defaultResolution: v as "both" | "theirs" | "ours" }));
           });
           for (const [value, text] of [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]) {
             d.addOption(value, text);
@@ -317,11 +378,10 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Resolve by recency")
-        .setDesc("When a file is edited on both sides at different times, keep the most recent version.")
+        .setDesc("SUGGESTED one-click action when a file was edited on both sides at different times — applied only when you click it.")
         .addToggle((t) => {
           t.setValue(sync.recencyWins).onChange(async (v) => {
-            this.plugin.store.setSync({ recencyWins: v });
-            await this.markUnsaved();
+            this.edit((d) => d.setSync({ recencyWins: v }));
           });
     });
     });
@@ -333,13 +393,12 @@ export class MugsSettingTab extends PluginSettingTab {
         text: "How often MUGS polls for remote changes while idle, and a global pause for bulk edits.",
       });
 
-      const sync = this.plugin.store.getSettings().sync;
+      const sync = this.view().sync;
       new Setting(card)
         .setName("Polling interval")
         .addDropdown((d) => {
           d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
-            this.plugin.store.setSync({ intervalSeconds: resolveIntervalSeconds(v) });
-            await this.markUnsaved();
+            this.edit((d2) => d2.setSync({ intervalSeconds: resolveIntervalSeconds(v) }));
           });
           for (const [value, text] of INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>) {
             d.addOption(value, text);
@@ -348,12 +407,11 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Pause vault sync")
-        .setDesc("While paused, MUGS stops all automatic push/pull and event triggers. Use it to make bulk edits safely; resuming runs one catch-up pass.")
+        .setDesc("While paused, MUGS stops all automatic push/pull and event triggers. Use it to make bulk edits safely; resuming runs one catch-up pass. Takes effect on Apply.")
         .addToggle((t) => {
           t.setValue(sync.paused).onChange(async (v) => {
-            this.plugin.store.setSync({ paused: v });
-            await this.markUnsaved();
-            new Notice(`MUGS sync ${v ? "paused" : "resumed"}.`);
+            this.edit((d2) => d2.setSync({ paused: v }));
+            new Notice(`MUGS sync will be ${v ? "paused" : "resumed"} once you Apply settings.`);
           });
     });
 
@@ -364,15 +422,14 @@ export class MugsSettingTab extends PluginSettingTab {
         )
         .addDropdown((d) => {
           d.setValue(sync.firstSyncDirection).onChange(async (v) => {
-            this.plugin.store.setSync({ firstSyncDirection: v as "pull" | "push" });
-            await this.markUnsaved();
+            this.edit((d2) => d2.setSync({ firstSyncDirection: v as "pull" | "push" }));
           });
           d.addOption("pull", "Pull — remote populates the vault (default)");
           d.addOption("push", "Push — vault uploads to the remote");
         });
 
-      // Whole-vault mappings expose a per-mapping .trash/ toggle.
-      const mappings = this.plugin.store.getSettings().mappings;
+      // Whole-vault mappings expose a per-mapping .trash/ toggle (draft view).
+      const mappings = this.view().mappings;
       for (const m of mappings) {
         if (m.remotePath === "" && m.localFolder === ".") {
           new Setting(card)
@@ -380,8 +437,7 @@ export class MugsSettingTab extends PluginSettingTab {
             .setDesc("Shared across all users via the single git path, like Obsidian's trash. Turn off to keep deletions local to this device.")
             .addToggle((t) =>
               t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
-                this.plugin.store.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false });
-                await this.markUnsaved();
+                this.edit((d2) => d2.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false }));
               }),
             );
         }
@@ -395,15 +451,14 @@ export class MugsSettingTab extends PluginSettingTab {
         text: "Share selected Obsidian settings files with your team through the same sync system.",
       });
 
-      const obs = this.plugin.store.getSettings().sync.obsidianConfig;
+      const obs = this.view().sync.obsidianConfig;
       new Setting(card)
         .setName("Enable Obsidian config sync")
         .setDesc("When on, selected .obsidian/ files are synced alongside your vault folders.")
         .addToggle((t) => {
           t.setValue(obs.enabled).onChange(async (v) => {
-            this.plugin.store.setObsidianConfigEnabled(v);
-            await this.markUnsaved();
-            new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"}.`);
+            this.edit((d) => d.setObsidianConfigEnabled(v));
+            new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"} once you Apply settings.`);
             this._renderAll();
           });
         });
@@ -490,18 +545,18 @@ export class MugsSettingTab extends PluginSettingTab {
    *  include/exclude managers. The whole-vault .trash/ toggle lives in the
    *  Sync Frequency & Maintenance section instead. */
   private renderMappings(card: HTMLElement, mappings: FolderMapping[]): void {
+    const activeLastSync = this.plugin.store.getSettings().lastSync; // status dots read ACTIVE state, not the draft
     for (const m of mappings) {
       const block = card.createDiv({ cls: "mugs-mapping" });
 
       // Header row: status dot + label + delete button. Rendered manually so the
       // sync-status dot sits beside the name (native Setting has no leading icon slot).
       const header = block.createDiv({ cls: "mugs-mapping-header" });
-      const dot = header.createEl("span", { cls: `mugs-dot ${this.statusDotClass(this.plugin.store.getSettings().lastSync[m.id]?.status)}` });
+      const dot = header.createEl("span", { cls: `mugs-dot ${this.statusDotClass(activeLastSync[m.id]?.status)}` });
       header.createEl("span", { cls: "mugs-mapping-name", text: m.label });
       new Setting(header).addButton((b) =>
         b.setButtonText("Delete").onClick(() => {
-          this.plugin.store.removeMapping(m.id);
-          this.markUnsaved();
+          this.edit((d) => d.removeMapping(m.id));
           this._renderAll();
         }),
       );
@@ -513,8 +568,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addDropdown((d) => {
           d.setValue(m.direction).onChange(async (v) => {
             const direction = v as SyncDirection;
-            this.plugin.store.upsertMapping({ ...m, direction });
-            await this.markUnsaved();
+            this.edit((d2) => d2.upsertMapping({ ...m, direction }));
           });
           for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
             d.addOption(value, text);
@@ -576,15 +630,14 @@ export class MugsSettingTab extends PluginSettingTab {
     return wrap;
   }
 
-  /** Persist an editable include/exclude scope change on an existing mapping. */
+  /** Persist an editable include/exclude scope change on an existing mapping (draft). */
   private saveMappingScope(
     id: string,
     patch: { includes?: string[]; excludes?: string[] },
   ): void {
-    const current = this.plugin.store.getSettings().mappings.find((x) => x.id === id);
+    const current = this.view().mappings.find((x) => x.id === id);
     if (!current) return;
-    this.plugin.store.upsertMapping({ ...current, ...patch });
-    this.markUnsaved();
+    this.edit((d) => d.upsertMapping({ ...current, ...patch }));
   }
 
   /**
@@ -597,8 +650,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
     const effective = Array.from(effectiveObsidianEntries(obs).values()).map((e) => structuredClone(e));
     const persist = (entries: ObsidianEntryPolicy[]): void => {
-      this.plugin.store.setObsidianConfig({ enabled: obs.enabled, entries });
-      this.markUnsaved();
+      this.edit((d) => d.setObsidianConfig({ enabled: obs.enabled, entries }));
     };
 
     for (const group of categorizeObsidianEntries(effective)) {
@@ -721,7 +773,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           if (!label) { new Notice("MUGS: enter a label for the credential."); return; }
           if (!token && kind !== "local") { new Notice("MUGS: enter a token."); return; }
           try {
-            this.plugin.store.upsertCredential({
+            this.edit((d) => d.upsertCredential({
               id: newId(),
               label,
               kind,
@@ -729,9 +781,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               token,
               baseUrl: baseUrl || undefined,
               repos: repos.length ? repos : undefined,
-            });
-            await this.markUnsaved();
-            new Notice(`MUGS: credential "${label}" added — Apply settings to persist.`);
+            }));
+            new Notice(`MUGS: credential "${label}" added to the draft — Apply settings to activate and persist.`);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
@@ -746,7 +797,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
    *  clone); the whole-repo toggle adds a legacy whole-repo mapping whose id is the repo id.
    */
   private async addMappingForm(card: HTMLElement): Promise<void> {
-    const creds = this.plugin.store.getSettings().credentials;
+    // Draft creds: a credential just added (not yet applied) is selectable here —
+    // the whole point of the draft model is composing a first setup, then Apply once.
+    const creds = this.view().credentials;
     let providerId = creds[0]?.id ?? "";
     let direction: SyncDirection = "push-pull";
     let branch = "";
@@ -763,11 +816,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     let matches: FolderMatch[] = [];       // exact name matches (top-level only)
     let fuzzyMatches: Array<{ remotePath: string; localFolder: string; label: string; score: number }> = [];
 
-    // Local folders already claimed by an existing mapping. Matched folders whose
-    // localFolder is in this set are shown as disabled rows with a "Mapped" badge so
-    // users see what's taken and why, rather than silently losing the choice.
+    // Local folders already claimed by an existing mapping (draft view — a mapping
+    // added earlier in THIS draft session already claims its folder). Matched folders
+    // whose localFolder is in this set are shown as disabled rows with a "Mapped" badge
+    // so users see what's taken and why, rather than silently losing the choice.
     const usedLocalFolders = new Set(
-      this.plugin.store.getSettings().mappings.map((x) => x.localFolder),
+      this.view().mappings.map((x) => x.localFolder),
     );
     const isRest = (): boolean => {
       const cred = creds.find((c) => c.id === providerId);
@@ -816,7 +870,10 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         }
         const cred = creds.find((c) => c.id === providerId);
         if (!cred) { repoSel.disabled = true; return; }
-        const token = this.plugin.store.getToken(providerId) ?? "";
+        // Runtime token first; fall back to the DRAFT credential (just-added, not yet applied).
+        const token = this.plugin.store.getToken(providerId)
+          ?? this.view().credentials.find((c) => c.id === providerId)?.token
+          ?? "";
         if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; return; }
         const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
         reposCache = await provider.listRepos();
@@ -901,6 +958,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         wholeInput.type = "checkbox";
         wholeInput.checked = wholeRepo;
         wholeInput.addEventListener("change", (e: Event) => { wholeRepo = (e.target as HTMLInputElement).checked; renderMatches(); });
+        // FIX: the checkbox was created but never appended — it rendered as an
+        // invisible ghost row you could not check. Insert it before the label.
+        wholeRow.appendChild(wholeInput);
         wholeRow.createEl("span", { text: "Sync the entire repository to the vault root" });
         const trashRow = matchesEl.createDiv({ cls: "mugs-match-trash" });
         trashRow.style.marginLeft = "24px";
@@ -994,29 +1054,43 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             const scope = { includes: parseGlobList(includesText), excludes: parseGlobList(excludesText) };
             // Whole-repo mapping: id === repo.id so the driver matches it (legacy behaviour).
             if (wholeRepo) {
-              this.plugin.store.upsertMapping({
+              this.edit((d) => d.upsertMapping({
                 id: repoRef, label: repoKey, remotePath: "", localFolder: ".", providerId,
                 branch: branch || undefined, direction, ...scope,
                 syncTrashFolder: syncTrash ? undefined : false,
-              });
-              new Notice(`MUGS: whole-repo mapping for "${repoKey}" added — Apply settings to persist.`);
+              }));
+              new Notice(`MUGS: whole-repo mapping for "${repoKey}" added to the draft — Apply settings to activate.`);
             } else if (selectedFolders.size === 0) {
               new Notice("MUGS: check at least one folder to link."); return;
             } else {
-              // Each checked folder becomes its own scoped card sharing the repo's clone via repoRef.
+              // Each checked folder becomes its own scoped card sharing the repo's
+              // clone via repoRef. FIX: lookups check EXACT matches AND fuzzy
+              // suggestions — a fuzzy pick used to be added to selectedFolders and
+              // then silently dropped here because it was only found in `matches`.
               let count = 0;
               for (const remotePath of selectedFolders) {
-                const match = matches.find((m) => m.remotePath === remotePath);
+                const match = matches.find((m) => m.remotePath === remotePath)
+                  ?? fuzzyMatches.find((m) => m.remotePath === remotePath);
                 if (!match) continue;
-                this.plugin.store.upsertMapping({
+                this.edit((d) => d.upsertMapping({
                   id: newId(), label: match.label, remotePath, localFolder: match.localFolder,
                   providerId, branch: branch || undefined, direction, repoRef, ...scope,
-                });
+                }));
                 count += 1;
               }
-              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} added — Apply settings to persist.`);
+              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} added to the draft — Apply settings to activate.`);
             }
-            await this.markUnsaved();
+            // U04: surface the direction/first-sync consequences BEFORE activation
+            // (the next successful Apply will make them real).
+            const consequence = direction === "pull-only"
+              ? "pull-only: remote files will overwrite/add into your vault folders; local edits there are NOT uploaded."
+              : direction === "push-only"
+                ? "push-only: your vault files are uploaded; remote changes are NOT pulled into the vault."
+                : "push+pull: local edits upload and remote changes download (conflicts surface in the MUGS Conflicts panel).";
+            const first = this.view().sync.firstSyncDirection === "push"
+              ? "first sync will UPLOAD your vault folder to the remote (overwrites the remote path's content)."
+              : "first sync will DOWNLOAD the remote path into your vault folder (vault files there are replaced).";
+            new Notice(`MUGS — what happens after Apply:\n· ${consequence}\n· On a mapping's first sync, ${first}`, 12000);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);

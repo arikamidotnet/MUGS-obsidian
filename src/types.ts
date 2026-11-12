@@ -315,6 +315,7 @@ export interface LastSyncState {
    *  (restored file, external edit) can no longer hide a content change. */
   contentSnapshot?: Record<string, [number, number]>;
   status: SyncStatus;
+
   /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
    *  application completed AND state persisted. Distinct from lastRemoteSha
    *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
@@ -326,3 +327,27 @@ export interface LastSyncState {
    *  correspondence advance and forces replan/verify before any new reconciliation. */
   pendingOps?: PendingOperation[];
 }
+
+/** Outcome of a manual conflict resolution transaction. */
+export type ResolveOutcome =
+  | { ok: true; applied: boolean }
+  | { ok: false; error: string; retryable: boolean };
+
+/** Choice passed to a resolver. Copied here for shared surface; actual impl in conflict.ts. */
+export type ResolveChoice = "ours" | "theirs" | "both";
+
+/** Contract-defined resolver signature (app-runtime owns the transaction). */
+export type ConflictResolver = (c: FileConflict, choice: ResolveChoice) => Promise<ResolveOutcome>;
+
+/**
+ * Diff endpoint selectors (diff-ui consumes; git-runtime provides truth).
+ * baseline uses correspondenceSha (last completed sync).
+ */
+export type DiffEndpoint =
+  | { kind: "baseline"; sha: string }          // = correspondenceSha, labeled "last completed sync"
+  | { kind: "head" }                            // committed snapshot
+  | { kind: "remote-ref"; ref: string }         // labeled "fetched remote tip (not last sync)"
+  | { kind: "explicit"; ref: string };
+
+/** Result of a store.save() call. {ok:false} must be treated as failure by callers. */
+export type SaveResult = { ok: true } | { ok: false; reason: "load-error" };

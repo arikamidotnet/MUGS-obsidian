@@ -116,12 +116,14 @@ export const lastSyncStateSchema = z.object({
   contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
   /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
-   *  application completed AND state persisted. */
+   *  application completed AND state persisted. Distinct from lastRemoteSha
+   *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
   correspondenceSha: z.string().optional(),
   /** Hash of (direction, remotePath, localFolder, branch, includes, excludes, syncTrashFolder).
    *  Any change invalidates contentSnapshot shortcuts and replans from scratch. */
   configFingerprint: z.string().optional(),
-  /** Durable operations not yet fully applied+verified. */
+  /** Durable operations not yet fully applied+verified. Non-empty list BLOCKS
+   *  correspondence advance and forces replan/verify before any new reconciliation. */
   pendingOps: z.array(pendingOperationSchema).optional(),
 });
 
@@ -227,6 +229,10 @@ export type SyncPolicyType = z.infer<typeof syncPolicySchema>;
 export type ObsidianConfigType = z.infer<typeof obsidianConfigSchema>;
 export type AgentType = z.infer<typeof agentSchema>;
 export type StagedChangeType = z.infer<typeof stagedChangeSchema>;
+
+/** Wave B contract additive derived types (verbatim signatures from contract). */
+export type PendingOpKindSchemaType = z.infer<typeof pendingOpKindSchema>;
+export type PendingOperationSchemaType = z.infer<typeof pendingOperationSchema>;
 
 /**
  * Parse arbitrary persisted JSON into a validated MugsSettings, applying
