@@ -34,11 +34,18 @@ export interface DiffQuery {
   ref?: string;
 }
 
+/** Precise outcome behind a Diff result — the view renders a different message per case.
+ *  `git-error` exists because a failed diff must never be reported as "no changes". */
+export type DiffOutcome = "no-mapping" | "no-clone" | "no-baseline" | "git-error" | "identical" | "changed";
+
 export interface DiffResult {
   diffText: string;
   authorsByFile: AuthorsByFile;
   /** Resolved baseline ref or SHA used for the comparison, when known. */
   baseRef?: string;
+  outcome: DiffOutcome;
+  /** Human-readable detail for failure outcomes (e.g. git's stderr). */
+  detail?: string;
 }
 
 /** Supplies the data the Diff view renders. */

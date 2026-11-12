@@ -186,6 +186,15 @@ describe("GitClient — first-init topology helpers", () => {
     expect(last(r).args).toEqual(["log", "-1", "--format=%ct", "origin/main", "--", "notes/todo.md"]);
   });
 
+  it("commitExists proves the commit object is present, unlike rev-parse --verify", async () => {
+    const ok = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
+    expect(await client(ok).commitExists("abc123")).toBe(true);
+    expect(last(ok).args).toEqual(["cat-file", "-e", "abc123^{commit}"]);
+    // A re-clone can lose the recorded baseline object entirely — this must read false.
+    const missing = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "" }));
+    expect(await client(missing).commitExists("deadbeef")).toBe(false);
+  });
+
   it("lastModifiedAt yields undefined for a path the ref never saw", async () => {
     // git log prints nothing for a path absent from history — exit code still 0.
     const empty = new FakeRunner(() => ({ code: 0, stdout: "\n", stderr: "" }));

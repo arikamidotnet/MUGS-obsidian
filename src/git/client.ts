@@ -297,6 +297,16 @@ export class GitClient {
     return Number.isNaN(secs) ? undefined : secs;
   }
 
+  /** True when a commit object exists LOCALLY in this clone. `rev-parse --verify` is
+   *  not enough: for a full 40-char SHA it happily echoes the string back even when
+   *  the object is absent (a re-clone that lost the baseline commit), which made the
+   *  Diff view compare against a phantom baseline. `cat-file -e <sha>^{commit}` proves
+   *  the commit is actually present. */
+  async commitExists(sha: string): Promise<boolean> {
+    const r = await this.run(["cat-file", "-e", `${sha}^{commit}`]);
+    return r.code === 0;
+  }
+
   /** Lowest common ancestor SHA of two refs (`git merge-base`). */
   async mergeBase(a: string, b: string): Promise<string> {
     const r = await this.run(["merge-base", a, b]);

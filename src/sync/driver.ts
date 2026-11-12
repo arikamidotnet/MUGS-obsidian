@@ -247,6 +247,10 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
       const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
       return at > 0 ? at : undefined;
     },
+    // Per-file fingerprints recorded at the last completed pass — the shortcut's
+    // change detector pairs an old mtime with an EXACT stat match against this.
+    contentSnapshot: (id) => store.getSettings().lastSync[id]?.contentSnapshot,
+    recordContentSnapshot: (id, snap) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, contentSnapshot: snap })),
   };
 }
 

@@ -451,12 +451,14 @@ describe("syncAllMappings — sync outcomes", () => {
     // pass does no content work at all.
     const LAST_DONE = Date.now();
     const reads: string[] = [];
+    const FP: [number, number] = [LAST_DONE - 1000, 7];
     const vaultMirror = {
       list: async () => ["todo.md"],
       read: async (_folder: string, rel: string) => { reads.push(rel); return "a\nb\nc\n"; },
       write: async () => {},
       remove: async () => {},
       mtime: async () => LAST_DONE - 1000, // untouched since the last pass
+      stat: async () => ({ mtime: FP[0], size: FP[1] }),
     };
     const { runner, calls } = makeRunner({
       head: "R1", remote: "R1", ancestor: true, cloned: true, // remote tip == baseline
@@ -475,6 +477,10 @@ describe("syncAllMappings — sync outcomes", () => {
         recordPush: () => undefined,
         recordConflict: () => undefined,
         lastCompletedAt: () => LAST_DONE,
+        // The snapshot recorded at the last completed pass matches the file's
+        // current stat — this pairing (not mtime alone) is what permits the skip.
+        contentSnapshot: () => ({ "todo.md": FP }),
+        recordContentSnapshot: () => undefined,
       },
       vaultMirror,
     });
@@ -483,6 +489,51 @@ describe("syncAllMappings — sync outcomes", () => {
     // clone tracks the file (ls-files listed it) and the mirror has it.
     expect(calls.some((cl) => cl.includes("show"))).toBe(false);
     expect(reads).toEqual([]);
+  });
+
+  it("re-reads a file whose old mtime no longer matches the recorded snapshot (restored file)", async () => {
+    // The mtime-only shortcut skipped files restored from a backup (old mtime, new
+    // content). With the snapshot rule, a stat mismatch forces the full safe path.
+    const LAST_DONE = Date.now();
+    const reads: string[] = [];
+    const vaultMirror = {
+      list: async () => ["todo.md"],
+      read: async (_folder: string, rel: string) => { reads.push(rel); return "a\nRESTORED\nc\n"; },
+      write: async () => {},
+      remove: async () => {},
+      mtime: async () => LAST_DONE - 1000, // OLD mtime...
+      stat: async () => ({ mtime: LAST_DONE - 1000, size: 12 }), // ...but the size no longer matches the snapshot
+    };
+    const { runner, calls } = makeRunner({
+      head: "R1", remote: "R1", ancestor: true, cloned: true,
+      lsFiles: ["todo.md"],
+      showMap: {
+        R1: { "todo.md": "a\nb\nc\n" },
+        HEAD: { "todo.md": "a\nb\nc\n" },
+        "origin/main": { "todo.md": "a\nb\nc\n" },
+      },
+    });
+    await syncAllMappings({
+      mappings: [mapping({ direction: "push-only" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: {
+        lastRemoteSha: () => "R1",
+        recordPull: () => undefined,
+        recordPush: () => undefined,
+        recordConflict: () => undefined,
+        lastCompletedAt: () => LAST_DONE,
+        // Snapshot says size 7; the file stats size 12 — must NOT be skipped.
+        contentSnapshot: () => ({ "todo.md": [LAST_DONE - 1000, 7] }),
+        recordContentSnapshot: () => undefined,
+      },
+      vaultMirror,
+    });
+    expect(reads).toEqual(["todo.md"]); // the restored file was actually read
+    expect(calls.some((cl) => cl.includes("show"))).toBe(true);
   });
 
   it("auto-merges a clean divergence into the working tree and pushes", async () => {
@@ -882,6 +933,16 @@ describe("storeWritableAccessor — resumable base SHA + op id (Area D)", () => 
     const s = await reloaded.load();
     expect(s.lastSync["m1"]).toMatchObject({ mappingId: "m1", baseSha: "R1", opId: 2, lastRemoteSha: "R2" });
     expect(resumeKey(s.lastSync["m1"] ?? {})).toBe("R1\u00002");
+  });
+
+  it("persists a per-file content snapshot for the steady-state shortcut", async () => {
+    const store = new MugsStore(new MemoryIO());
+    await store.load();
+    const acc = storeWritableAccessor(store);
+    acc.recordContentSnapshot?.("m1", { "notes/a.md": [111, 7] });
+    expect(acc.contentSnapshot?.("m1")).toEqual({ "notes/a.md": [111, 7] });
+    // Persisted into the same lastSync record (survives save/reload via the schema).
+    expect(store.getSettings().lastSync["m1"]?.contentSnapshot).toEqual({ "notes/a.md": [111, 7] });
   });
 
   it("increments the op id on push while preserving the base SHA", async () => {

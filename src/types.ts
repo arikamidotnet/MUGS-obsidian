@@ -259,5 +259,10 @@ export interface LastSyncState {
    *  folder — the signal that a vault-absent in-scope file is a real user deletion
    *  (rather than a file the vault has simply never seen). */
   vaultPopulated?: boolean;
+  /** Per-file (mtimeMs, size) fingerprints recorded at the last completed push-only
+   *  pass. The steady-state shortcut skips a file only when its current stat pair
+   *  matches this snapshot AND its mtime predates the pass — an old mtime alone
+   *  (restored file, external edit) can no longer hide a content change. */
+  contentSnapshot?: Record<string, [number, number]>;
   status: SyncStatus;
 }

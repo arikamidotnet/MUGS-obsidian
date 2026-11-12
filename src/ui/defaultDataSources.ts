@@ -17,6 +17,7 @@ import { GitClient, type AuthorActivity } from "../git/client";
 import { ChildProcessRunner } from "../git/runner";
 import type { GitRunner } from "../git/types";
 import { cloneDir, type CloneLayout, type LastSyncAccessor, type WorkingTreeWriter } from "../sync/cloneManager";
+import { repoToVaultPath } from "../sync/mirror";
 import { authorsByFileFromLog, type AuthorsByFile } from "./diffModel";
 import type {
   MapDataSource,
@@ -56,6 +57,12 @@ function pickOwner(authors: AuthorActivity[]): string | undefined {
   return best?.name;
 }
 
+/** Join vault root + mapping folder + folder-relative path into a vault-absolute path. */
+function joinVaultAbs(root: string, localFolder: string, rel: string): string {
+  const folder = localFolder === "." ? "" : localFolder.replace(/\/+$/, "");
+  return [root, folder, rel].filter((s) => s.length > 0).join("/");
+}
+
 /** Build a LastSyncAccessor over the store's persisted last-sync map. */
 function storeLastSyncAccessor(store: MugsStore): LastSyncAccessor {
   return {
@@ -84,7 +91,10 @@ export class StoreMapDataSource implements MapDataSource {
         // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
         // m.id-only form missed every folder-scoped mapping's shared clone.
         const dir = cloneDir({ root: this.cloneRoot }, m.providerId, m.repoRef ?? m.id);
-        const client = new GitClient(this.runner);
+        // Bind EVERY git call to the clone — an unbound client ran rev-parse/log in the
+        // plugin process's cwd (the wrong repository), so owner attribution silently
+        // failed for every mapping.
+        const client = new GitClient(this.runner).at(dir);
         if (await isWorkTree(client, dir)) {
           owner = pickOwner(await client.recentAuthors("HEAD", 100));
         }
@@ -116,32 +126,38 @@ export class StoreDiffDataSource implements DiffDataSource {
   async getDiff(query: DiffQuery): Promise<DiffResult> {
     const settings = this.store.getSettings();
     const mapping = settings.mappings.find((m) => m.id === query.mappingId);
-    if (!mapping) return { diffText: "", authorsByFile: {} };
+    if (!mapping) return { diffText: "", authorsByFile: {}, outcome: "no-mapping" };
 
     // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
     // m.id-only form made the Diff view permanently "no comparison available"
     // for every folder-scoped mapping.
     const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
-    const client = new GitClient(this.runner);
+    // Bind EVERY git call to the clone: rev-parse/diff/log on an unbound client ran
+    // in the plugin process's cwd — the WRONG repository — so perfectly synced
+    // mappings showed "no comparison available" (baseline unresolvable there).
+    const client = new GitClient(this.runner).at(dir);
     try {
-      if (!(await isWorkTree(client, dir))) return { diffText: "", authorsByFile: {} };
+      if (!(await isWorkTree(client, dir))) return { diffText: "", authorsByFile: {}, outcome: "no-clone" };
 
       const to = query.ref ?? "HEAD";
       const base = await this.resolveBase(client, mapping);
-      if (!base) return { diffText: "", authorsByFile: {} }; // nothing to compare against yet
+      if (!base) return { diffText: "", authorsByFile: {}, outcome: "no-baseline" }; // nothing to compare against yet
 
-      let diffText = "";
+      let diffText: string;
       try {
         diffText = await client.diff(base, to);
-      } catch {
-        diffText = "";
+      } catch (err) {
+        // A failed diff is NOT an empty diff: report the git error instead of the
+        // misleading "no changes" message (a bad ref / missing object / large-file
+        // failure all surfaced as a clean tree before this).
+        return { diffText: "", authorsByFile: {}, baseRef: base, outcome: "git-error", detail: err instanceof Error ? err.message : String(err) };
       }
       const range = `${base}...${to}`;
       const log = await client.run(["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, range]);
       const authorsByFile: AuthorsByFile = log.code === 0 ? authorsByFileFromLog(log.stdout) : {};
-      return { diffText, authorsByFile, baseRef: base };
-    } catch {
-      return { diffText: "", authorsByFile: {} };
+      return { diffText, authorsByFile, baseRef: base, outcome: diffText.trim() ? "changed" : "identical" };
+    } catch (err) {
+      return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -150,11 +166,10 @@ export class StoreDiffDataSource implements DiffDataSource {
    *  SHA still exists (handles re-clones, GC, shallow histories, etc.). */
   private async resolveBase(client: GitClient, mapping: FolderMapping): Promise<string | undefined> {
     const explicit = storeLastSyncAccessor(this.store).lastRemoteSha(mapping.id);
-    if (explicit) {
-      const r = await client.run(["rev-parse", "--verify", "--quiet", explicit]);
-      if (r.code === 0) return explicit;
-      // recorded baseline no longer present in this clone — fall back
-    }
+    // Prove the baseline commit exists (cat-file), not just that the string parses:
+    // rev-parse --verify happily echoes an unparsed 40-char SHA, and a re-clone can
+    // lose the recorded baseline object entirely.
+    if (explicit && (await client.commitExists(explicit))) return explicit;
     const candidates = mapping.branch ? [`origin/${mapping.branch}`, "origin/HEAD"] : ["origin/HEAD"];
     for (const ref of candidates) {
       const r = await client.run(["rev-parse", "--verify", "--quiet", ref]);
@@ -171,11 +186,27 @@ export class StoreDiffDataSource implements DiffDataSource {
  * across sessions until resolved. Once every file is resolved the mapping's last-sync
  * status clears back to "up-to-date".
  */
+/** Optional seams so a manual resolution lands in the VAULT as well as the clone.
+ *  Without a vault write the next sync read "ours" from the stale vault copy and the
+ *  same conflict resurfaced (or the resolution was overwritten) on every pass. */
+export interface ConflictWriteSeams {
+  /** Writes/deletes resolved content into the vault folder (absolute paths). */
+  vault?: WorkingTreeWriter;
+  /** Vault-root absolute path prefix (e.g. /home/me/Vault) used to map repo paths
+   *  to vault files. Required when `vault` is set. */
+  vaultRoot?: string;
+  /** Optional editor-open gate: return false to refuse the vault write (the file is
+   *  open with unsaved changes). The whole resolution is then rejected — a partial
+   *  resolution (clone written, vault stale) would resurface as the same conflict. */
+  writeSafe?: (absVaultPath: string) => boolean;
+}
+
 export class StoreConflictDataSource implements ConflictDataSource {
   constructor(
     private readonly store: MugsStore,
     private readonly cloneRoot: string,
     private readonly workingTree?: WorkingTreeWriter,
+    private readonly seams: ConflictWriteSeams = {},
   ) {}
 
   async getConflicts(query: ConflictQuery): Promise<FileConflict[]> {
@@ -188,15 +219,30 @@ export class StoreConflictDataSource implements ConflictDataSource {
     const mapping = this.store.getSettings().mappings.find((m) => m.id === query.mappingId);
     if (!mapping) return { remaining: 0 };
     const before = this.store.getConflicts(mapping.id);
+    const hit = before.find((c) => c.path === query.path);
     const next = resolveConflictFile(before, query.path, query.choice);
     // Unknown path — nothing to do (still report the pre-existing count).
     if (!next) return { remaining: before.length };
-    // Write the chosen content into the working tree so a later commit carries it.
-    // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old m.id-only
-    // form wrote resolutions into a junk directory, so they never stuck.
-    if (this.workingTree) {
-      const absPath = `${cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id)}/${query.path}`;
-      await this.workingTree.writeFile(absPath, next.resolvedContent);
+    // BOTH writes happen before the record is dropped — the old code cleared the
+    // record after writing only the clone, so the vault kept the conflicting copy and
+    // the same conflict resurfaced (or the resolution was overwritten) on the next sync.
+    const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
+    const cloneAbs = `${dir}/${query.path}`;
+    const vaultRel = repoToVaultPath(mapping, query.path);
+    const vaultAbs =
+      this.seams.vaultRoot && vaultRel !== null ? joinVaultAbs(this.seams.vaultRoot, mapping.localFolder, vaultRel) : undefined;
+    if (vaultAbs && this.seams.writeSafe && !this.seams.writeSafe(vaultAbs)) {
+      throw new Error(`${query.path} is open with unsaved changes — close it and resolve again`);
+    }
+    // A deletion win removes the file from BOTH sides instead of writing content.
+    const deletion =
+      (query.choice === "ours" && hit?.oursAbsent === true) || (query.choice === "theirs" && hit?.theirsAbsent === true);
+    if (deletion) {
+      await this.workingTree?.deleteFile?.(cloneAbs);
+      if (vaultAbs) await this.seams.vault?.deleteFile?.(vaultAbs);
+    } else {
+      await this.workingTree?.writeFile(cloneAbs, next.resolvedContent);
+      if (vaultAbs) await this.seams.vault?.writeFile(vaultAbs, next.resolvedContent);
     }
     this.store.setConflicts(mapping.id, next.conflicts);
     // Clear the mapping's conflict status once every file is resolved.

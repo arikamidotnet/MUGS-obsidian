@@ -167,29 +167,35 @@ export class DiffView extends ItemView {
     const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId });
     renderConflicts(conflicts, output, (c, choice) => void this.resolveFile(c, choice));
 
-    const { diffText, authorsByFile, baseRef } = await getMugsContext().diff.getDiff({ mappingId, ref });
-    if (!diffText.trim()) {
-      // Two distinct empty cases:
-      // 1) No usable baseline at all → tell the user to sync first.
-      // 2) Baseline resolved but no diff (trees identical) → explicit, friendly message.
-      if (baseRef) {
-        output.createEl("p", {
-          text: `No changes since last sync (baseline: ${baseRef}).`,
-          cls: "mugs-muted",
-        });
-      } else {
-        output.createEl("p", {
-          text: "No comparison available for this mapping yet — sync it first so a baseline exists.",
-          cls: "mugs-muted",
-        });
-      }
+    const { diffText, authorsByFile, baseRef, outcome, detail } = await getMugsContext().diff.getDiff({ mappingId, ref });
+    if (outcome === "git-error") {
+      // A failed diff must never read as "no changes" — surface the git error.
+      output.createEl("p", {
+        text: `MUGS could not build the comparison${baseRef ? ` (baseline ${shortSha(baseRef)})` : ""}: ${detail ?? "unknown git error"}`,
+        cls: "mugs-muted",
+      });
+      return;
+    }
+    if (outcome === "identical") {
+      output.createEl("p", {
+        text: `No changes since last sync (baseline: ${shortSha(baseRef)}).`,
+        cls: "mugs-muted",
+      });
+      return;
+    }
+    if (outcome !== "changed") {
+      const why =
+        outcome === "no-clone" ? "the repository has not been cloned yet — run a sync first"
+        : outcome === "no-baseline" ? "no baseline exists yet — run a sync first"
+        : "this mapping no longer exists"; // no-mapping
+      output.createEl("p", { text: `No comparison available — ${why}.`, cls: "mugs-muted" });
       return;
     }
     const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);
     renderDiff(parsed, output);
   }
 
-  /** Resolve one file's conflict, persist it (working-tree write + store), then re-render. */
+/** Resolve one file's conflict, persist it (working-tree write + store), then re-render. */
   private async resolveFile(c: FileConflict, choice: ResolveChoice): Promise<void> {
     try {
       const res = await getMugsContext().conflicts.resolveConflict({ mappingId: this.selectedMappingId, path: c.path, choice });
@@ -204,4 +210,10 @@ export class DiffView extends ItemView {
       new Notice(`MUGS — could not resolve ${c.path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/** Short display form of a baseline ref/SHA (full SHAs truncated to 8 chars). */
+function shortSha(ref: string | undefined): string {
+  if (!ref) return "unknown";
+  return /^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 8) : ref;
 }

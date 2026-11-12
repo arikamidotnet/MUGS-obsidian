@@ -115,7 +115,7 @@ const collectText = (el: any): string => {
 const emptyContext = () =>
   setMugsContext({
     map: { getRows: async () => [] },
-    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined }) },
+    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined, outcome: "no-baseline" as const }) },
     conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
   });
 
@@ -123,7 +123,15 @@ const emptyContext = () =>
 const diffNoBaselineContext = () =>
   setMugsContext({
   map: { getRows: async () => [{ mapping: { id: "m1", label: "Notes", remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" }, status: "ok" }] },
-    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined }) },
+    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined, outcome: "no-baseline" as const }) },
+    conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+  });
+
+/** Diff view whose mapping is fully synced (baseline == HEAD, empty diff). */
+const diffIdenticalContext = () =>
+  setMugsContext({
+    map: { getRows: async () => [{ mapping: { id: "m1", label: "Notes", remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" }, status: "ok" }] },
+    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: "abc123def4abc123def4abc123def4abc123def4", outcome: "identical" as const }) },
     conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
   });
 
@@ -160,6 +168,31 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new DiffView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
     expect(collectText(v.contentEl)).toContain("No comparison available");
+  });
+
+  it("Diff view: identical trees show the no-changes message with a truncated baseline", async () => {
+    diffIdenticalContext();
+    const v = new DiffView({} as any);
+    await expect(v.onOpen()).resolves.toBeUndefined();
+    const text = collectText(v.contentEl);
+    // A fully synced mapping must NOT read as "no comparison available" — it says
+    // exactly what happened, with the baseline SHA shortened for readability.
+    expect(text).toContain("No changes since last sync");
+    expect(text).toContain("abc123de");
+    expect(text).not.toContain("abc123def4abc123def4");
+  });
+
+  it("Diff view: a git error surfaces the error instead of claiming a clean tree", async () => {
+    setMugsContext({
+      map: { getRows: async () => [{ mapping: { id: "m1", label: "Notes", remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" }, status: "ok" }] },
+      diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: "abc123", outcome: "git-error" as const, detail: "fatal: bad object" }) },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+    });
+    const v = new DiffView({} as any);
+    await v.onOpen();
+    const text = collectText(v.contentEl);
+    expect(text).toContain("could not build the comparison");
+    expect(text).toContain("fatal: bad object");
   });
 
   it("Map view: empty mappings shows the setup hint (and renders the legend)", async () => {

@@ -90,6 +90,11 @@ export interface LastSyncAccessor {
   /** Optional: epoch ms of the mapping's most recent completed pull or push —
    *  the steady-state shortcut's mtime reference point. */
   lastCompletedAt?(mappingId: string): number | undefined;
+  /** Optional: per-file (mtimeMs, size) snapshot recorded at the last completed
+   *  push-only pass. Without it the shortcut never skips files (full read). */
+  contentSnapshot?(mappingId: string): Record<string, [number, number]> | undefined;
+  /** Optional: persist a fresh per-file snapshot after a completed pass. */
+  recordContentSnapshot?(mappingId: string, snap: Record<string, [number, number]>): void;
 }
 
 /** Writes merged file content (and removes deleted files) into a clone's working tree. */
@@ -122,6 +127,11 @@ export interface VaultMirror {
    *  input for automatic conflict resolution. Absent/undefined leaves the policy
    *  to fall back to defaultResolution. */
   mtime?(localFolder: string, relPath: string): Promise<number | undefined>;
+  /** Optional: mtime + size of one file — the steady-state shortcut's change
+   *  detector. The skip rule needs BOTH fields (mtime alone lied: a file restored
+   *  from a backup has an old mtime but new content). Absent -> the shortcut
+   *  never engages and every pass takes the full safe path. */
+  stat?(localFolder: string, relPath: string): Promise<{ mtime: number; size: number } | undefined>;
   /** Optional: true when a path could ever appear in list() (not a binary
    *  extension, not under a dot-folder). Repo paths the mirror can never list
    *  are excluded from merge/mirror scope entirely so filtered-out remote files
@@ -143,6 +153,14 @@ export interface CloneLayout {
 }
 
 const defaultSlug = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+/** Steady-state skip rule (pure): a file may be skipped as unchanged only when BOTH
+ *  the current (mtime, size) pair matches the snapshot recorded at the last completed
+ *  pass AND its mtime predates that pass. A missing snapshot entry (first run after
+ *  upgrade, brand-new file) or an unavailable stat never skips — the safe direction. */
+export function isSnapshotStale(fp: [number, number] | undefined, prev: [number, number] | undefined, lastDone: number): boolean {
+  return fp !== undefined && prev !== undefined && fp[0] === prev[0] && fp[1] === prev[1] && fp[0] <= lastDone;
+}
 
 /** Stable on-disk path for a mapping's clone, grouped by provider. */
 export function cloneDir(layout: CloneLayout, providerId: string, id: string): string {
@@ -464,6 +482,9 @@ export class CloneManager {
     // re-evaluates every in-scope file each pass, so stale records (from an older
     // divergent state, since resolved or overwritten) would only clutter the UI.
     if (this.conflicts) this.conflicts.setConflicts(mapping.id, []);
+    // Persist the per-file fingerprints gathered during THIS pass so the next
+    // steady-state check compares against a snapshot of the last COMPLETED pass.
+    this.syncs.recordContentSnapshot?.(mapping.id, merged.fingerprints);
     // Record the post-push tip when this pass pushed: the pre-push remoteSha would
     // leave the 3-way base one commit stale, surfacing spurious conflicts (and
     // content duplication under the default "both" resolution) on the next pass.
@@ -558,37 +579,42 @@ export class CloneManager {
     remoteRef: string,
     remoteSha: string,
     status?: (m: string) => void,
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string>; autoResolvedPaths: string[] }> {
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string>; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]> }> {
     // Steady-state shortcut (push-only mappings): when the remote tip equals the
-    // recorded baseline and a vault file's mtime predates the last completed
-    // pass, ours == theirs == base — the per-file vault read AND `git show` are
-    // skipped (git's own index stat-cache idea). On a 2,000-file vault this
-    // collapses an idle pass from minutes to seconds, so the status bar stops
-    // living on "⟳ syncing". Push-pull/pull-only mappings keep the full path:
-    // mirrorPull needs vault content for its no-op write detection.
-    const steadyState = mapping.direction === "push-only" && this.vaultMirror?.mtime !== undefined;
+    // recorded baseline and a vault file's (mtime, size) pair matches the snapshot
+    // recorded at the last completed pass, ours == theirs == base — the per-file
+    // vault read AND `git show` are skipped. On a 2,000-file vault this collapses
+    // an idle pass from minutes to seconds. mtime ALONE was not safe: a file
+    // restored from a backup (old mtime, new content) was skipped as unchanged.
+    // Push-pull/pull-only mappings keep the full path: mirrorPull needs vault
+    // content for its no-op write detection.
+    const steadyState = mapping.direction === "push-only" && this.vaultMirror?.stat !== undefined;
     const remoteUnchanged = baseSha !== "" && remoteSha === baseSha;
     const lastDone = remoteUnchanged ? (this.syncs.lastCompletedAt?.(mapping.id) ?? 0) : 0;
+    const prevSnap = remoteUnchanged ? (this.syncs.contentSnapshot?.(mapping.id) ?? {}) : {};
     const staleRels = new Set<string>();
-    if (steadyState && remoteUnchanged) {
+    const fingerprints: Record<string, [number, number]> = {};
+    if (steadyState) {
       for (const rel of await this.vaultMirror!.list(mapping.localFolder)) {
         const repoPath = vaultToRepoPath(mapping, rel);
         if (!this.inScope(mapping, repoPath) || !this.mirrorListable(repoPath)) continue;
-        let m: number | undefined;
+        let fp: [number, number] | undefined;
         try {
-          m = await this.vaultMirror!.mtime?.(mapping.localFolder, rel);
+          const st = await this.vaultMirror!.stat!(mapping.localFolder, rel);
+          fp = st ? [st.mtime, st.size] : undefined;
         } catch {
-          m = undefined; // unreadable -> treat as fresh (safe direction)
+          fp = undefined; // unreadable -> treat as fresh (safe direction)
         }
-        if (m !== undefined && m <= lastDone) staleRels.add(rel);
+        if (fp) fingerprints[rel] = fp;
+        if (remoteUnchanged && isSnapshotStale(fp, prevSnap[rel], lastDone)) staleRels.add(rel);
       }
     }
     const isStale = (repoPath: string): boolean => {
       const rel = repoToVaultPath(mapping, repoPath);
       return rel !== null && staleRels.has(rel);
     };
-    const clonePaths = (await c.lsFiles())
-      .filter((p) => this.inScope(mapping, p) && this.mirrorListable(p) && !isStale(p));
+    const allClonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
+    const clonePaths = allClonePaths.filter((p) => !isStale(p));
     const vaultFiles = await this.readVaultFiles(mapping, (rel) => staleRels.has(rel));
     const vaultByRepo = new Map<string, string>();
     for (const f of vaultFiles) {
@@ -609,11 +635,28 @@ export class CloneManager {
 
     status?.(`merging (${allPaths.size} files)`);
 
+    // Legacy-state reconciliation (fail-safe, one-time per mapping): without the
+    // vaultPopulated flag a vault-absent file is NEVER treated as a deletion, so a
+    // genuinely deleted file would never leave the remote. When the vault folder
+    // contains EVERY in-scope remote file, correspondence is proven and the flag can
+    // be set; when it does not, keep deletions disabled and say why — never guess.
+    if (this.vaultMirror && mapping.direction !== "pull-only" && !(this.syncs.vaultPopulated?.(mapping.id) ?? false)) {
+      const vaultNames = new Set(await this.vaultMirror.list(mapping.localFolder));
+      const missing = allClonePaths.filter((p) => {
+        const rel = repoToVaultPath(mapping, p);
+        return rel === null || !vaultNames.has(rel);
+      });
+      if (allClonePaths.length > 0 && missing.length === 0) {
+        this.syncs.recordVaultSync?.(mapping.id);
+      } else if (missing.length > 0) {
+        status?.(`reconciliation: ${missing.length} remote file(s) not in the vault — deletions stay disabled for this mapping`);
+      }
+    }
     // A vault-absent in-scope file is a genuine user deletion ONLY once a sync has
-    // established vault↔remote correspondence (vaultPopulated — set by a mirror-pull
-    // or a completed first-sync push). Before that the file is simply one the vault
-    // has not seen yet, and treating it as deleted would wipe remote content.
-    // Pull-only mappings never push deletions.
+    // established vault↔remote correspondence (vaultPopulated — set by a mirror-pull,
+    // a completed first-sync push, or the coverage reconciliation above). Before that
+    // the file is simply one the vault has not seen yet, and treating it as deleted
+    // would wipe remote content. Pull-only mappings never push deletions.
     const deletable = mapping.direction !== "pull-only" && (this.syncs.vaultPopulated?.(mapping.id) ?? false);
     // Empty-vault guard — the refusal planMirrorPush documents, wired into the
     // regular path: a populated mapping whose vault folder went empty (rename,
@@ -716,7 +759,7 @@ export class CloneManager {
 
     // Safe applier ordering: writes before deletes, parents before children.
     await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
-    return { applied, conflicts: surfacedConflicts, renames, vaultByRepo, autoResolvedPaths };
+    return { applied, conflicts: surfacedConflicts, renames, vaultByRepo, autoResolvedPaths, fingerprints };
   }
 
   /** Pull the clone's current in-scope content into the vault folder: writes for

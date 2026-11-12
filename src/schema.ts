@@ -67,6 +67,9 @@ export const lastSyncStateSchema = z.object({
   opId: z.number().int().positive().optional(),
   /** Set once a mirror-pull has populated the vault folder (deletion-safety gate). */
   vaultPopulated: z.boolean().optional(),
+  /** Per-file (mtimeMs, size) fingerprints from the last completed push-only pass —
+ *  the steady-state shortcut's change detector (mtime alone is not trusted). */
+  contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
 });
 

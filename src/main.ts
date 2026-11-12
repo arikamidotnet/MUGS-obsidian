@@ -139,8 +139,10 @@ export default class MugsPlugin extends Plugin {
     // the abstract DataAdapter shape declared in obsidian.d.ts. Resolve it
     // defensively — a missing adapter method must not abort plugin load.
     let cloneRoot = "";
+    let vaultBase = "";
     try {
       const basePath = (this.app.vault.adapter as unknown as { getBasePath(): string }).getBasePath();
+      vaultBase = basePath;
       cloneRoot = `${basePath}/${DEFAULT_CLONE_DIRNAME}`;
     } catch (err) {
       console.warn("MUGS: could not resolve vault base path — using empty clone root.", err);
@@ -148,7 +150,15 @@ export default class MugsPlugin extends Plugin {
     setMugsContext({
       map: new StoreMapDataSource(this.store, cloneRoot),
       diff: new StoreDiffDataSource(this.store, cloneRoot),
-      conflicts: new StoreConflictDataSource(this.store, cloneRoot, this.workingTreeWriter()),
+      conflicts: new StoreConflictDataSource(this.store, cloneRoot, this.workingTreeWriter(), {
+        // Manual resolutions must land in the VAULT too, or the next sync reads the
+        // stale vault copy as "ours" and the conflict resurfaces every pass.
+        vault: this.workingTreeWriter(),
+        vaultRoot: vaultBase,
+        // EditorOpenGuard keys on vault-root-relative paths; translate before checking.
+        writeSafe: (abs) =>
+          this.editorOpen.isWriteSafe(vaultBase !== "" && abs.startsWith(`${vaultBase}/`) ? abs.slice(vaultBase.length + 1) : abs),
+      }),
     });
     this.registerView("mugs-map", (leaf) => new MapView(leaf));
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
@@ -421,7 +431,7 @@ export default class MugsPlugin extends Plugin {
       write(p: string, data: string | ArrayBuffer): Promise<void>;
       remove(p: string): Promise<void>;
       mkdir(p: string): Promise<void>;
-      stat(p: string): Promise<{ mtime: number } | null>;
+      stat(p: string): Promise<{ mtime: number; size: number } | null>;
     };
     const rootOf = (folder: string): string => (folder === "." ? "" : normalizeVaultPath(folder));
     const vaultPath = (folder: string, rel: string): string => {
@@ -463,6 +473,14 @@ export default class MugsPlugin extends Plugin {
           return st?.mtime;
         } catch {
           return undefined; // unreadable/absent -> recency falls back to defaultResolution
+        }
+      },
+      stat: async (folder, rel) => {
+        try {
+          const st = await adapter.stat(vaultPath(folder, rel));
+          return st ? { mtime: st.mtime, size: st.size } : undefined;
+        } catch {
+          return undefined; // unreadable/absent -> the steady-state shortcut never skips
         }
       },
       // Must agree with list(): getFiles() skips dot-folders and list() drops
