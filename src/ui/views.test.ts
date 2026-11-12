@@ -75,6 +75,8 @@ const { document } = vi.hoisted(() => {
     createSvg(tag: string) {
       return new El(tag);
     }
+    insertRow() { return this.createEl("tr"); }
+    insertCell() { return this.createEl("td"); }
     appendChild(child: El) {
       this.children.push(child);
       if (child.tagName === "option" && Array.isArray(this.options)) this.options.push(child);
@@ -210,6 +212,126 @@ function reviewPlugin(mappings: any[], staging: Record<string, any[]>) {
 describe("MUGS views — onOpen() renders without throwing", () => {
   beforeEach(() => __resetMugsContextForTests());
 
+  const diffRows = ["m1", "m2"].map((id) => ({
+    mapping: { id, label: id, remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" as const },
+    status: "ok" as const,
+  }));
+  const patch = ["a.md", "b.md"].map((name) =>
+    `diff --git a/${name} b/${name}\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n-old-${name}\n+new-${name}\n`).join("");
+
+  it("browses one file at a time without reloading git and keeps conflicts visible", async () => {
+    const getDiff = vi.fn(async () => ({ diffText: patch, authorsByFile: { "a.md": [{ name: "Ada" }, { name: "Grace" }] }, outcome: "changed" as const, fromLabel: "HEAD~1", toLabel: "HEAD" }));
+    setMugsContext({ map: { getRows: async () => diffRows }, diff: { getDiff },
+      conflicts: { getConflicts: async () => [sampleConflict()], resolveConflict: async () => ({ remaining: 0 }) } });
+    const v = new DiffView({} as any);
+    await v.onOpen();
+    const focused = () => v.contentEl.querySelector(".mugs-diff-focused")!;
+    expect(collectText(focused())).toContain("new-a.md");
+    expect(collectText(focused())).not.toContain("new-b.md");
+    expect(collectText(focused())).toContain("Git file authors in this range: Ada, Grace");
+    expect(collectText(focused())).toContain("file-level, not per-line");
+    expect(collectText(v.contentEl.querySelector(".mugs-diff-file-list"))).toContain("a.md · +1 −1 · Ada, Grace");
+    expect(collectText(focused())).toContain("+1");
+    expect(collectText(focused())).toContain("-1");
+    expect(v.contentEl.querySelector(".mugs-diff-row-added")).not.toBeNull();
+    expect(v.contentEl.querySelector(".mugs-diff-row-removed")).not.toBeNull();
+    expect(v.contentEl.querySelector(".mugs-diff-lineno-old")).not.toBeNull();
+    const header = v.contentEl.querySelector(".mugs-diff-file-header") as any;
+    fire(header, "click", { stopPropagation() {} });
+    expect((v.contentEl.querySelector(".mugs-diff-file-body") as any).style.display).toBe("none");
+    fire(v.contentEl.querySelectorAll(".mugs-diff-file-choice")[1] as any, "click");
+    expect(collectText(focused())).toContain("new-b.md");
+    expect(collectText(focused())).not.toContain("new-a.md");
+    expect(collectText(focused())).toContain("Author unavailable");
+    expect(v.contentEl.querySelector(".mugs-conflicts")).not.toBeNull();
+    expect(getDiff).toHaveBeenCalledTimes(1);
+    expect(collectText(v.contentEl)).toContain("Unsynced vault edits are not included");
+    expect(walk(v.contentEl).some((el) => el.textContent === "vs")).toBe(false);
+  });
+
+  it("discards earlier mapping responses and responses arriving after close", async () => {
+    let release!: (value: any) => void;
+    setMugsContext({ map: { getRows: async () => diffRows },
+      diff: { getDiff: async (q) => q.mappingId === "m1" ? new Promise((resolve) => { release = resolve; }) : IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) } });
+    const v = new DiffView({} as any);
+    const opening = v.onOpen();
+    await flush();
+    const mapping = v.contentEl.querySelector(".mugs-diff-mapping-select") as any;
+    mapping.value = "m2";
+    fire(mapping, "change", { target: mapping });
+    await flush();
+    release({ diffText: "", authorsByFile: {}, outcome: "git-error", detail: "STALE" });
+    await opening;
+    expect(collectText(v.contentEl)).not.toContain("STALE");
+    mapping.value = "m1";
+    fire(mapping, "change", { target: mapping });
+    await flush();
+    await v.onClose();
+    release(IDENTICAL());
+    await flush();
+    expect(collectText(v.contentEl)).toBe("");
+  });
+
+  it("invalid custom input invalidates an in-flight valid comparison", async () => {
+    let release!: (value: any) => void;
+    setMugsContext({ map: { getRows: async () => diffRows },
+      diff: { getDiff: async (q) => q.mode === "custom" ? new Promise((resolve) => { release = resolve; }) : IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) } });
+    const v = new DiffView({} as any);
+    await v.onOpen();
+    const mode = v.contentEl.querySelector(".mugs-diff-mode") as any;
+    mode.value = "custom";
+    fire(mode, "change");
+    await flush();
+    const input = findInputs(v.contentEl)[0];
+    input.value = "main..dev";
+    fire(input, "change");
+    release(IDENTICAL());
+    await flush();
+    expect(collectText(v.contentEl)).toContain("one ref at a time");
+    expect(collectText(v.contentEl)).not.toContain("Identical snapshots");
+  });
+
+  it("resolves the original mapping even when mapping changes during conflict reload", async () => {
+    let release!: (value: FileConflict[]) => void;
+    let count = 0;
+    const resolveConflict = vi.fn(async () => ({ remaining: 0 }));
+    setMugsContext({ map: { getRows: async () => diffRows }, diff: { getDiff: async () => IDENTICAL() },
+      conflicts: {
+        getConflicts: async (q) => q.mappingId === "m1" && ++count === 2
+          ? new Promise((resolve) => { release = resolve; }) : [sampleConflict()],
+        resolveConflict,
+      } });
+    const v = new DiffView({} as any);
+    await v.onOpen();
+    fire(findButtons(v.contentEl)[0], "click");
+    await flush();
+    const mapping = v.contentEl.querySelector(".mugs-diff-mapping-select") as any;
+    mapping.value = "m2";
+    fire(mapping, "change", { target: mapping });
+    await flush();
+    release([sampleConflict()]);
+    await flush();
+    expect(resolveConflict).toHaveBeenCalledWith({ mappingId: "m1", path: "notes/a.md", choice: "ours" });
+    expect(mapping.value).toBe("m2");
+  });
+
+  it("does not render rows arriving after refresh or close", async () => {
+    let release!: (value: any) => void;
+    let first = true;
+    setMugsContext({ map: { getRows: async () => first ? (first = false, new Promise((resolve) => { release = resolve; })) : [] },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) } });
+    const v = new DiffView({} as any);
+    const opening = v.onOpen();
+    await (v as any).render();
+    release(diffRows);
+    await opening;
+    expect(collectText(v.contentEl)).toContain("No folder mappings yet");
+    expect(v.contentEl.querySelector(".mugs-diff-mode")).toBeNull();
+  });
+
   it("Diff view: empty mappings shows the setup hint", async () => {
     emptyContext();
     const v = new DiffView({} as any);
@@ -260,7 +382,11 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     });
     const v = new DiffView({} as any);
     await v.onOpen();
-    expect(calls).toEqual([{ mappingId: "m1", ref: "HEAD" }]); // initial load
+    expect(calls).toEqual([{ mappingId: "m1", mode: "since-sync", olderRef: "HEAD~1" }]);
+    const mode = v.contentEl.querySelector(".mugs-diff-mode") as any;
+    mode.value = "custom";
+    fire(mode, "change");
+    await flush();
 
     const input = findInputs(v.contentEl)[0];
     input.value = "   ";
@@ -268,7 +394,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     await flush();
 
     expect(collectText(v.contentEl)).toContain("Enter a branch, tag, or commit");
-    expect(calls).toHaveLength(1); // the invalid ref was NOT sent to getDiff
+    expect(calls).toHaveLength(2); // the invalid ref was NOT sent to getDiff
   });
 
   it("Diff view: an obviously malformed ref (range) is rejected inline, not as a git error", async () => {
@@ -281,13 +407,17 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new DiffView({} as any);
     await v.onOpen();
 
+    const mode = v.contentEl.querySelector(".mugs-diff-mode") as any;
+    mode.value = "custom";
+    fire(mode, "change");
+    await flush();
     const input = findInputs(v.contentEl)[0];
     input.value = "main..dev";
     fire(input, "change");
     await flush();
 
     expect(collectText(v.contentEl)).toContain("one ref at a time");
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 
   it("Diff view: a resolution re-render preserves the selected mapping and ref", async () => {
@@ -315,11 +445,15 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     await flush();
 
     // …and apply a non-default ref on it.
+    const mode = v.contentEl.querySelector(".mugs-diff-mode") as any;
+    mode.value = "custom";
+    fire(mode, "change");
+    await flush();
     const input = findInputs(v.contentEl)[0];
     input.value = "v2.1";
     fire(input, "change");
     await flush();
-    expect(diffCalls.at(-1)).toEqual({ mappingId: "m2", ref: "v2.1" });
+    expect(diffCalls.at(-1)).toEqual({ mappingId: "m2", mode: "custom", olderRef: "v2.1" });
 
     // Resolve the one conflict the view surfaced for m2 → triggers a re-render.
     fire(findButtons(v.contentEl)[0], "click");
@@ -332,7 +466,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const inputAfter = findInputs(v.contentEl)[0];
     expect(selectAfter.value).toBe("m2");
     expect(inputAfter.value).toBe("v2.1");
-    expect(diffCalls.at(-1)).toEqual({ mappingId: "m2", ref: "v2.1" });
+    expect(diffCalls.at(-1)).toEqual({ mappingId: "m2", mode: "custom", olderRef: "v2.1" });
   });
 
   it("Map view: empty mappings shows the setup hint (and renders the legend)", async () => {

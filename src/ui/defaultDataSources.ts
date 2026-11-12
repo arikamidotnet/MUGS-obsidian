@@ -18,7 +18,7 @@ import { ChildProcessRunner } from "../git/runner";
 import type { GitRunner } from "../git/types";
 import { cloneDir, type CloneLayout, type LastSyncAccessor, type WorkingTreeWriter } from "../sync/cloneManager";
 import { repoToVaultPath } from "../sync/mirror";
-import { authorsByFileFromLog, type AuthorsByFile } from "./diffModel";
+import { authorsByFileFromLog, validateRef, type AuthorsByFile } from "./diffModel";
 import type {
   MapDataSource,
   MapRow,
@@ -162,17 +162,30 @@ export class StoreDiffDataSource implements DiffDataSource {
       if (!(await isWorkTree(client, dir))) return { diffText: "", authorsByFile: {}, outcome: "no-clone" };
 
       const ls = settings.lastSync[mapping.id];
-      const to = query.ref ?? "HEAD";
+      const to = query.mode ? "HEAD" : query.ref ?? "HEAD";
 
       // U01/U02: prefer correspondenceSha (proven last-completed) as baseline.
       // Fall back to lastRemoteSha (fetched tip) or branch tip, never claim fallback as "last sync".
       let from: string | undefined;
       let fromLabel: string | undefined;
       const corr = ls?.correspondenceSha;
-      if (corr && (await client.commitExists(corr))) {
+      if (query.mode === "previous" || query.mode === "custom") {
+        from = query.mode === "previous" ? "HEAD~1" : query.olderRef;
+        if (!from || validateRef(from)) {
+          return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: "Choose an explicit older commit ref.", errorKind: "missing-ref" };
+        }
+        if (!(await client.commitExists(from))) {
+          return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: `Commit ${from} is unavailable in this local clone.`, errorKind: "missing-ref" };
+        }
+        const ancestor = await client.run(["merge-base", "--is-ancestor", from, "HEAD"]);
+        if (ancestor.code !== 0) {
+          return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: "Choose an older commit on HEAD's history (not a divergent or newer ref).", errorKind: "other" };
+        }
+        fromLabel = `${from} (committed snapshot)`;
+      } else if (corr && (await client.commitExists(corr))) {
         from = corr;
         fromLabel = "last completed sync";
-      } else {
+      } else if (query.mode !== "since-sync") {
         // Fallback: use the old resolveBase logic but label truthfully.
         const fb = await this.resolveBase(client, mapping);
         if (fb) {
@@ -214,10 +227,8 @@ export class StoreDiffDataSource implements DiffDataSource {
       const log = await client.run(logArgs);
       const authorsByFile: AuthorsByFile = log.code === 0 ? authorsByFileFromLog(log.stdout) : {};
 
-      const toLabel = "HEAD (committed snapshot)";
-      const note = (ls?.pendingOps && ls.pendingOps.length > 0)
-        ? "not included — committed snapshot only"
-        : undefined;
+      const toLabel = `${to} (committed snapshot)`;
+      const note = "Unsynced vault edits are not included — committed snapshots only";
 
       const outcome: DiffResult["outcome"] = diffText.trim() ? "changed" : "identical";
       return { diffText, authorsByFile, baseRef: from, outcome, fromLabel: safeFromLabel, toLabel, note };

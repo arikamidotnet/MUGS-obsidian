@@ -1,3 +1,32 @@
+.mugs-diff-browser {
+  display: grid;
+  grid-template-columns: minmax(150px, 28%) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.mugs-diff-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 65vh;
+  overflow: auto;
+}
+.mugs-diff-file-choice {
+  text-align: left;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.mugs-diff-file-choice[aria-pressed="true"] {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.mugs-diff-focused { min-width: 0; overflow-x: auto; }
+.mugs-diff-endpoints { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
+  .mugs-diff-file-list { max-height: 180px; }
+}
 /*
  * MUGS — Multi-User Git Sync
  * Stylesheet for the Map view, Diff view, Conflicts panel and settings UI.

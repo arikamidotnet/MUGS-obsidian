@@ -37,6 +37,9 @@ export interface DiffQuery {
   mappingId: string;
   /** Optional explicit "to" ref (defaults to HEAD). */
   ref?: string;
+  /** Explicit UI comparisons always end at HEAD; legacy ref remains a "to" ref. */
+  mode?: "since-sync" | "previous" | "custom";
+  olderRef?: string;
 }
 
 /** Precise outcome behind a Diff result — the view renders a different message per case.

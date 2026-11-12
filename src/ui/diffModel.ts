@@ -153,7 +153,7 @@ export function attributeHunks(parsed: ParsedDiff, authorsByFile: AuthorsByFile 
 
   return {
     files: parsed.files.map((f) => ({
-      name: f.name,
+      ...f,
       hunks: f.hunks.map((h) => {
         const author = lookup(h.file);
         return author ? { ...h, author: author.name, email: author.email } : h;

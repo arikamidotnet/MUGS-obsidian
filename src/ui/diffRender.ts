@@ -11,7 +11,7 @@
  * view and the sidebar panel tint the same author identically. Folding + action
  * labels are pure presentation built on describeConflictActions / attributeHunks.
  */
-import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff } from "./diffModel";
+import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile } from "./diffModel";
 import { describeConflictActions, type ConflictAction } from "../sync/conflictActions";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
@@ -110,6 +110,7 @@ class ConflictButtons {
     });
     // Native title tooltip for hover accessibility.
     btn.setAttribute("title", title);
+    btn.disabled = this.disabled;
     btn.addEventListener("click", () => {
       // Visual feedback: disable the clicked button briefly.
       btn.disabled = true;
@@ -119,6 +120,36 @@ class ConflictButtons {
       });
     });
   }
+}
+
+/** Select one changed file without rerunning git or hiding unresolved conflicts. */
+export function renderFileBrowser(parsed: ParsedDiff, host: HTMLElement, authorsByFile: AuthorsByFile = {}): void {
+  const browser = host.createDiv({ cls: "mugs-diff-browser" });
+  const list = browser.createDiv({ cls: "mugs-diff-file-list" });
+  list.setAttribute("aria-label", "Changed files");
+  const focused = browser.createDiv({ cls: "mugs-diff-focused" });
+  const palette = assignAuthorColors(parsed.files.flatMap((f) => f.hunks.flatMap((h) => h.author ? [h.author] : [])));
+  const buttons: HTMLButtonElement[] = [];
+  const authors = (name: string) => [...new Set((authorsByFile[name] ?? []).map((author) => author.name).filter(Boolean))];
+  const select = (index: number): void => {
+    focused.empty();
+    buttons.forEach((button, i) => button.setAttribute("aria-pressed", String(i === index)));
+    const names = authors(parsed.files[index].name);
+    focused.createEl("p", {
+      text: names.length ? `Git file authors in this range: ${names.join(", ")}. Attribution is file-level, not per-line or the current editor.` : "Author unavailable",
+      cls: "mugs-diff-file-authors mugs-muted",
+    });
+    renderDiff({ ...parsed, files: [parsed.files[index]] }, focused, palette);
+  };
+  parsed.files.forEach((file, index) => {
+    const names = authors(file.name);
+    const added = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "added").length;
+    const removed = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "removed").length;
+    const button = list.createEl("button", { text: `${file.name} · +${added} −${removed} · ${names.length ? names.join(", ") : "Author unavailable"}`, cls: "mugs-diff-file-choice", type: "button" });
+    buttons.push(button);
+    button.addEventListener("click", () => select(index));
+  });
+  if (parsed.files.length) select(0);
 }
 
 /** An inline per-row error for a failed resolution, shown in addition to the Notice.
@@ -203,6 +234,9 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
   let fileOpen = true;
   const body = block.createDiv({ cls: "mugs-diff-file-body" });
+  if (file.binary) body.createEl("p", { text: "Binary file changed; textual diff is not available.", cls: "mugs-muted" });
+  if (file.renamedFrom) body.createEl("p", { text: `Renamed from ${file.renamedFrom}`, cls: "mugs-muted" });
+  if (!file.binary && !file.renamedFrom && file.hunks.length === 0) body.createEl("p", { text: "File metadata changed (no text hunks).", cls: "mugs-muted" });
   body.style.display = "";
 
   // Click the file header to collapse/expand all hunks.
