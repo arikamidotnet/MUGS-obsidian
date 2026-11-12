@@ -270,4 +270,90 @@ export interface LastSyncState {
    *  (restored file, external edit) can no longer hide a content change. */
   contentSnapshot?: Record<string, [number, number]>;
   status: SyncStatus;
+
+  /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
+   *  application completed AND state persisted. Distinct from lastRemoteSha
+   *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
+  correspondenceSha?: string;
+  /** Hash of (direction, remotePath, localFolder, branch, includes, excludes, syncTrashFolder).
+   *  Any change invalidates contentSnapshot shortcuts and replans from scratch. */
+  configFingerprint?: string;
+  /** Durable operations not yet fully applied+verified. Non-empty list BLOCKS
+   *  correspondence advance and forces replan/verify before any new reconciliation. */
+  pendingOps?: PendingOperation[];
 }
+
+/** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
+ *  application completed AND state persisted. Distinct from lastRemoteSha
+ *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
+export type PendingOpKind = "vault-write" | "vault-delete" | "clone-commit" | "remote-push";
+export interface PendingOperation {
+  opId: string;            // idempotent: `${mappingId}:${passOpId}:${kind}:${path}`
+  kind: PendingOpKind;
+  path: string;            // mapping-relative, safePath-validated
+  content?: string;        // payload for vault-write (absent for delete/commit/push)
+  refSha?: string;         // commit/push context
+  state: "pending" | "applied-unverified" | "failed";
+  createdAt: number;
+  attempts: number;
+  lastError?: string;      // redacted, never secrets
+}
+
+/**
+ * Sync plan kinds (runtime discovery/planning surface).
+ * idle = nothing to do; others describe the intended reconciliation class.
+ */
+export type SyncPlanKind =
+  | "idle"
+  | "publish-local"
+  | "apply-remote"
+  | "merge-clean"
+  | "conflict"
+  | "blocked"
+  | "retry-pending";
+
+export interface PlannedAction {
+  path: string;                                   // mapping-relative
+  op: "vault-write" | "vault-delete" | "stage" | "commit" | "push";
+  directionPermitted: boolean;                    // checked at PLAN time and re-checked pre-apply
+  requiresEditorCheck: boolean;                   // writes AND deletes
+}
+
+export interface SyncPlan {
+  mappingId: string;
+  kind: SyncPlanKind;
+  actions: PlannedAction[];                       // empty for idle
+  counts: { publish: number; apply: number; deferred: number; conflicted: number };
+}
+
+/** Repository identity for clone layout and locking (one worktree per repo+branch). */
+export interface RepoIdentity {
+  providerId: string;
+  repoId: string;          // owner/repo (safePath.checkRepoSlug) or local key
+  branch: string;          // RESOLVED concrete branch (checkRefName), never "default"/""
+  canonicalRemote: string; // normalized URL, no credentials
+}
+
+/** Outcome of a manual conflict resolution transaction. */
+export type ResolveOutcome =
+  | { ok: true; applied: boolean }
+  | { ok: false; error: string; retryable: boolean };
+
+/** Choice passed to a resolver. Copied here for shared surface; actual impl in conflict.ts. */
+export type ResolveChoice = "ours" | "theirs" | "both";
+
+/** Contract-defined resolver signature (app-runtime owns the transaction). */
+export type ConflictResolver = (c: FileConflict, choice: ResolveChoice) => Promise<ResolveOutcome>;
+
+/**
+ * Diff endpoint selectors (diff-ui consumes; git-runtime provides truth).
+ * baseline uses correspondenceSha (last completed sync).
+ */
+export type DiffEndpoint =
+  | { kind: "baseline"; sha: string }          // = correspondenceSha, labeled "last completed sync"
+  | { kind: "head" }                            // committed snapshot
+  | { kind: "remote-ref"; ref: string }         // labeled "fetched remote tip (not last sync)"
+  | { kind: "explicit"; ref: string };
+
+/** Result of a store.save() call. {ok:false} must be treated as failure by callers. */
+export type SaveResult = { ok: true } | { ok: false; reason: "load-error" };

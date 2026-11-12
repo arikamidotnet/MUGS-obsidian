@@ -57,6 +57,24 @@ export const folderMappingSchema = z.object({
   syncTrashFolder: z.boolean().default(true),
 });
 
+/** Pending operation kinds (verbatim contract). */
+export const pendingOpKindSchema = z.enum(["vault-write", "vault-delete", "clone-commit", "remote-push"]);
+
+export const pendingOperationSchema = z.object({
+  opId: z.string().min(1),
+  kind: pendingOpKindSchema,
+  path: z.string(),
+  content: z.string().optional(),
+  refSha: z.string().optional(),
+  state: z.enum(["pending", "applied-unverified", "failed"]),
+  createdAt: z.number().int().nonnegative(),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string().optional(),
+});
+
+export type PendingOpKindType = z.infer<typeof pendingOpKindSchema>;
+export type PendingOperationType = z.infer<typeof pendingOperationSchema>;
+
 export const lastSyncStateSchema = z.object({
   mappingId: z.string().min(1),
   lastPushAt: z.number().int().positive().optional(),
@@ -71,6 +89,10 @@ export const lastSyncStateSchema = z.object({
  *  the steady-state shortcut's change detector (mtime alone is not trusted). */
   contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
+  /** PROVEN vault↔repo correspondence (additive per contract). */
+  correspondenceSha: z.string().optional(),
+  configFingerprint: z.string().optional(),
+  pendingOps: z.array(pendingOperationSchema).optional(),
 });
 
 export const conflictSchema = z.object({
@@ -175,6 +197,10 @@ export type SyncPolicyType = z.infer<typeof syncPolicySchema>;
 export type ObsidianConfigType = z.infer<typeof obsidianConfigSchema>;
 export type AgentType = z.infer<typeof agentSchema>;
 export type StagedChangeType = z.infer<typeof stagedChangeSchema>;
+
+/** Wave B contract additive derived types (verbatim signatures from contract). */
+export type PendingOpKindSchemaType = z.infer<typeof pendingOpKindSchema>;
+export type PendingOperationSchemaType = z.infer<typeof pendingOperationSchema>;
 
 /**
  * Parse arbitrary persisted JSON into a validated MugsSettings, applying
