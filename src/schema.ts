@@ -15,10 +15,72 @@ import type {
   SyncDirection,
   SyncStatus,
 } from "./types";
+// Wave-B contract types (additive copy from WAVE-B-CONTRACTS.md):
+// PendingOperation, SyncPlan*, RepoIdentity, ResolveOutcome, ConflictResolver, DiffEndpoint, LastSyncState additions.
+// Zod schemas added below for the serializable subset (pendingOps in lastSync, etc.). Runtime-only types (ResolveOutcome etc.) are re-declared or typed from src/types.
 
 export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "gitea", "forgejo", "local"]);
 export const syncDirectionSchema = z.enum(["push-pull", "pull-only", "push-only"]);
 export const syncStatusSchema = z.enum(["ok", "conflict", "error", "up-to-date", "pending"]);
+
+// --- Wave-B contract additions (verbatim shapes, additive) -----------------
+export const pendingOpKindSchema = z.enum(["vault-write", "vault-delete", "clone-commit", "remote-push"]);
+export const pendingOperationSchema = z.object({
+  opId: z.string().min(1),
+  kind: pendingOpKindSchema,
+  path: z.string(),
+  content: z.string().optional(),
+  refSha: z.string().optional(),
+  state: z.enum(["pending", "applied-unverified", "failed"]),
+  createdAt: z.number().int(),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string().optional(),
+});
+
+export type PendingOperationType = z.infer<typeof pendingOperationSchema>;
+
+export const syncPlanKindSchema = z.enum(["idle", "publish-local", "apply-remote", "merge-clean", "conflict", "blocked", "retry-pending"]);
+export const plannedActionSchema = z.object({
+  path: z.string(),
+  op: z.enum(["vault-write", "vault-delete", "stage", "commit", "push"]),
+  directionPermitted: z.boolean(),
+  requiresEditorCheck: z.boolean(),
+});
+export const syncPlanSchema = z.object({
+  mappingId: z.string().min(1),
+  kind: syncPlanKindSchema,
+  actions: z.array(plannedActionSchema),
+  counts: z.object({
+    publish: z.number().int().nonnegative(),
+    apply: z.number().int().nonnegative(),
+    deferred: z.number().int().nonnegative(),
+    conflicted: z.number().int().nonnegative(),
+  }),
+});
+
+export type SyncPlanType = z.infer<typeof syncPlanSchema>;
+
+export const repoIdentitySchema = z.object({
+  providerId: z.string().min(1),
+  repoId: z.string().min(1),
+  branch: z.string().min(1),
+  canonicalRemote: z.string(),
+});
+export type RepoIdentityType = z.infer<typeof repoIdentitySchema>;
+
+// DiffEndpoint for truthful labeling (U01/U02). Not directly persisted in lastSync but part of the frozen contract surface.
+export const diffEndpointSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("baseline"), sha: z.string().min(1) }),
+  z.object({ kind: z.literal("head") }),
+  z.object({ kind: z.literal("remote-ref"), ref: z.string().min(1) }),
+  z.object({ kind: z.literal("explicit"), ref: z.string().min(1) }),
+]);
+export type DiffEndpointType = z.infer<typeof diffEndpointSchema>;
+
+// ResolveOutcome / ConflictResolver are runtime Promise contracts (see src/types.ts verbatim copy).
+// No Zod schema for the function type; the error shape is documented for UI keying.
+export const resolveOutcomeOkSchema = z.object({ ok: z.literal(true), applied: z.boolean() });
+export const resolveOutcomeErrSchema = z.object({ ok: z.literal(false), error: z.string(), retryable: z.boolean() });
 
 /** A repository path as `owner/repo` (GitLab nested groups allowed: `group/sub/repo`). */
 const repoPathSchema = z.string().trim().regex(
@@ -71,6 +133,11 @@ export const lastSyncStateSchema = z.object({
  *  the steady-state shortcut's change detector (mtime alone is not trusted). */
   contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
+
+  // Wave-B correspondence additions (additive, optional, frozen contract)
+  correspondenceSha: z.string().optional(),
+  configFingerprint: z.string().optional(),
+  pendingOps: z.array(pendingOperationSchema).optional(),
 });
 
 export const conflictSchema = z.object({

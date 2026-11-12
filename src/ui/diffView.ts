@@ -114,7 +114,8 @@ export class DiffView extends ItemView {
       void this.applyRef(refInput, recentDropdown, output);
     });
 
-    header.createSpan({ text: "against last-synced baseline", cls: "mugs-diff-range-hint" });
+    // Hint is neutral; truthful labels come from the diff result (fromLabel/toLabel).
+    header.createSpan({ text: "vs", cls: "mugs-diff-range-hint" });
 
     // Show this mapping's diff immediately (with its restored ref).
     await this.showDiff(this.selectedMappingId, output, refInput.value.trim() || "HEAD");
@@ -167,61 +168,129 @@ export class DiffView extends ItemView {
     await this.showDiff(this.selectedMappingId, output, ref);
   }
 
+  /** Monotonic generation per mapping to discard stale async results (U03). */
+  private diffGeneration: Record<string, number> = {};
+
   private async showDiff(mappingId: string, output: HTMLElement, ref = "HEAD"): Promise<void> {
     // Record the applied ref so a re-render (e.g. after a resolution) restores it.
     this.selectedRefs[mappingId] = ref;
+    const gen = (this.diffGeneration[mappingId] ?? 0) + 1;
+    this.diffGeneration[mappingId] = gen;
+
     output.empty();
     // Surface any unresolved conflicts above the diff so they are never missed.
     const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId });
     renderConflicts(conflicts, output, (c, choice) => void this.resolveFile(c, choice));
 
-    const { diffText, authorsByFile, baseRef, outcome, detail } = await getMugsContext().diff.getDiff({ mappingId, ref });
+    const res = await getMugsContext().diff.getDiff({ mappingId, ref });
+    // U03: discard stale responses
+    if ((this.diffGeneration[mappingId] ?? 0) !== gen) return;
+
+    const { diffText, authorsByFile, baseRef, outcome, detail, fromLabel, toLabel, note, errorKind } = res;
+
     if (outcome === "git-error") {
-      // A failed diff must never read as "no changes" — surface the git error.
-      output.createEl("p", {
-        text: `MUGS could not build the comparison${baseRef ? ` (baseline ${shortSha(baseRef)})` : ""}: ${detail ?? "unknown git error"}`,
-        cls: "mugs-muted",
-      });
-      return;
-    }
-    if (outcome === "identical") {
-      // Friendly, honest all-clear: what it means + how to see a real diff
-      // (compare against an older ref via the picker above).
+      // Distinct messages per ReadErrorKind (auth vs timeout vs missing vs other)
+      const kindMsg =
+        errorKind === "auth" ? "authentication or permission failure (check credential)"
+        : errorKind === "timeout" ? "network timeout while fetching comparison data"
+        : errorKind === "missing-ref" ? "required commit or object is missing from the local clone"
+        : "git error";
       const card = output.createDiv({ cls: "mugs-empty-state" });
-      card.createEl("h3", { text: "In sync — no changes since last sync" });
+      card.createEl("h3", { text: "Comparison failed" });
       card.createEl("p", {
-        text: `This mapping matches its last-synced baseline (${shortSha(baseRef)}). Edits appear here after the next sync pushes them; to inspect history, type an older ref (e.g. ${shortSha(baseRef)}~1) in the picker above.`,
+        text: `${kindMsg}${detail ? ` — ${detail}` : ""}${fromLabel ? ` (from ${fromLabel})` : ""}.`,
         cls: "mugs-muted",
       });
       return;
     }
+
+    if (outcome === "identical") {
+      const card = output.createDiv({ cls: "mugs-empty-state" });
+      const baseLabel = fromLabel ?? (baseRef ? shortSha(baseRef) : "baseline");
+      card.createEl("h3", { text: "Identical snapshots" });
+      card.createEl("p", {
+        text: `No differences between ${baseLabel} and ${toLabel ?? "HEAD (committed snapshot)"}.${note ? ` ${note}.` : ""} To see history, pick an older ref (e.g. ${shortSha(baseRef)}~1).`,
+        cls: "mugs-muted",
+      });
+      return;
+    }
+
+    if (outcome === "no-baseline") {
+      const card = output.createDiv({ cls: "mugs-empty-state" });
+      card.createEl("h3", { text: "No baseline yet" });
+      card.createEl("p", { text: "Run a sync first to establish a comparison point (correspondence or fetched remote tip).", cls: "mugs-muted" });
+      return;
+    }
+
     if (outcome !== "changed") {
       const why =
         outcome === "no-clone" ? "the repository has not been cloned yet — run a sync first"
-        : outcome === "no-baseline" ? "no baseline exists yet — run a sync first"
-        : "this mapping no longer exists"; // no-mapping
+        : "this mapping no longer exists";
       const card = output.createDiv({ cls: "mugs-empty-state" });
       card.createEl("h3", { text: "No comparison available" });
       card.createEl("p", { text: `${why.charAt(0).toUpperCase()}${why.slice(1)}.`, cls: "mugs-muted" });
       return;
     }
+
+    // Pending local edits note (committed snapshot only)
+    if (note) {
+      const banner = output.createDiv({ cls: "mugs-note" });
+      banner.createEl("span", { text: note });
+    }
+
     const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);
     renderDiff(parsed, output);
   }
 
 /** Resolve one file's conflict, persist it (working-tree write + store), then re-render. */
+  /** Paths currently resolving for this view (U03: whole group disabled until promise settles). */
+  private resolving: Set<string> = new Set();
+
   private async resolveFile(c: FileConflict, choice: ResolveChoice): Promise<void> {
+    const key = c.path;
+    // Key errors by mapping + path (conflict version approximated by re-render cycle).
+    this.resolving.add(key);
+    // Re-render to disable the whole action group for this conflict.
+    // We re-fetch conflicts and pass busy set through renderConflicts.
+    const output = this.contentEl.querySelector(".mugs-diff-output") as HTMLElement | null;
+    if (output) {
+      output.empty();
+      const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId: this.selectedMappingId });
+      renderConflicts(conflicts, output, (cc, ch) => void this.resolveFile(cc, ch), this.resolving);
+    }
     try {
-      const res = await getMugsContext().conflicts.resolveConflict({ mappingId: this.selectedMappingId, path: c.path, choice });
+      const res = await getMugsContext().conflicts.resolveConflict({ mappingId: this.selectedMappingId, path: key, choice });
+      this.resolving.delete(key);
       const left = res.remaining;
       new Notice(
-        `MUGS — resolved ${c.path} (${choice}).${
+        `MUGS — resolved ${key} (${choice}).${
           left > 0 ? ` ${left} file${left === 1 ? "" : "s"} still unresolved.` : " No conflicts remain."
         }`,
       );
       void this.render();
     } catch (err) {
-      new Notice(`MUGS — could not resolve ${c.path}: ${err instanceof Error ? err.message : String(err)}`);
+      this.resolving.delete(key);
+      const msg = err instanceof Error ? err.message : String(err);
+      // Retryable keeps the conflict visible with inline actionable error (keyed).
+      const retryable = /retry|temporary|timeout|network/i.test(msg);
+      if (output) {
+        // Re-render rows so they are not stuck disabled, then attach error under the path.
+        output.empty();
+        const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId: this.selectedMappingId });
+        renderConflicts(conflicts, output, (cc, ch) => void this.resolveFile(cc, ch), this.resolving);
+        // Find the row for this path and attach error (best-effort).
+        const rows = Array.from(output.querySelectorAll(".mugs-conflict-row"));
+        for (const r of rows) {
+          if ((r as any).textContent?.includes(key)) {
+            // inline error (best effort in shim)
+            try { (r as any).createEl?.("p", { text: msg, cls: "mugs-conflict-row-error" }); } catch {}
+            break;
+          }
+        }
+      }
+      if (!retryable) {
+        new Notice(`MUGS — could not resolve ${key}: ${msg}`);
+      }
     }
   }
 }

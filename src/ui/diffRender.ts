@@ -30,13 +30,13 @@ export function renderConflictRow(
   container: HTMLElement,
   c: FileConflict,
   onResolve: (c: FileConflict, choice: ResolveChoice) => void,
+  busyPaths?: Set<string>,
 ): HTMLElement {
   const { ours, theirs } = describeConflictActions(c);
 
   const row = container.createDiv({ cls: "mugs-conflict-row" });
   const pathEl = row.createSpan({ text: c.path, cls: "mugs-conflict-path" });
   if (c.oursSavedAt || c.theirsModifiedAt) {
-    // Show a small timestamp hint for recency-based conflicts.
     let when = "";
     if (c.oursSavedAt) when += `saved ${relativeTime(Date.now() - c.oursSavedAt)}`;
     if (c.theirsModifiedAt && c.oursSavedAt) when += " · ";
@@ -48,7 +48,8 @@ export function renderConflictRow(
   renderActionLabel(labels, ours);
   renderActionLabel(labels, theirs);
 
-  new ConflictButtons(row, c, onResolve).mount();
+  const disabled = !!busyPaths?.has(c.path);
+  new ConflictButtons(row, c, onResolve, disabled).mount();
   return row;
 }
 
@@ -77,6 +78,7 @@ class ConflictButtons {
     private host: HTMLElement,
     private c: FileConflict,
     private onResolve: (c: FileConflict, choice: ResolveChoice) => void,
+    private disabled = false,
   ) {}
 
   mount(): void {
@@ -130,14 +132,15 @@ export function renderConflicts(
   conflicts: FileConflict[],
   host: HTMLElement,
   onResolve: (c: FileConflict, choice: ResolveChoice) => void,
+  busyPaths?: Set<string>,
 ): void {
   if (conflicts.length === 0) return;
   const box = host.createDiv({ cls: "mugs-conflicts" });
   box.createEl("h3", {
-    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "s" : ""} manual resolution`,
+    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "" : "s"} manual resolution`,
     cls: "mugs-conflicts-title",
   });
-  for (const c of conflicts) renderConflictRow(box, c, onResolve);
+  for (const c of conflicts) renderConflictRow(box, c, onResolve, busyPaths);
 }
 
 /**
@@ -275,7 +278,10 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
     const signEl = row.insertCell().createSpan({ text: line.type === "added" ? "+" : line.type === "removed" ? "-" : " ", cls: `mugs-diff-sign mugs-diff-${line.type}` });
 
     // Content with author tint for changed lines.
-    const contentEl = row.insertCell().createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
+    // Align class on the TD (CSS rules target td.mugs-diff-content) while keeping span for text+tint.
+    const contentCell = row.insertCell();
+    contentCell.addClass("mugs-diff-content");
+    const contentEl = contentCell.createSpan({ text: line.content || " ", cls: "mugs-diff-content" });
     if (authorColor && line.type !== "context") {
       signEl.style.borderLeftColor = authorColor;
       contentEl.style.backgroundColor = paleTint(authorColor);

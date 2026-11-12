@@ -133,6 +133,7 @@ export class StoreDiffDataSource implements DiffDataSource {
     private readonly store: MugsStore,
     private readonly cloneRoot: string,
     private readonly runner: GitRunner = new ChildProcessRunner(),
+    private readonly authedClient?: (base: GitClient) => GitClient,
   ) {}
 
   async getDiff(query: DiffQuery): Promise<DiffResult> {
@@ -140,36 +141,76 @@ export class StoreDiffDataSource implements DiffDataSource {
     const mapping = settings.mappings.find((m) => m.id === query.mappingId);
     if (!mapping) return { diffText: "", authorsByFile: {}, outcome: "no-mapping" };
 
-    // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
-    // m.id-only form made the Diff view permanently "no comparison available"
-    // for every folder-scoped mapping.
     const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
-    // Bind EVERY git call to the clone: rev-parse/diff/log on an unbound client ran
-    // in the plugin process's cwd — the WRONG repository — so perfectly synced
-    // mappings showed "no comparison available" (baseline unresolvable there).
-    const client = new GitClient(this.runner).at(dir);
+    let client = new GitClient(this.runner).at(dir);
+    if (this.authedClient) client = this.authedClient(client);
+
     try {
       if (!(await isWorkTree(client, dir))) return { diffText: "", authorsByFile: {}, outcome: "no-clone" };
 
+      const ls = settings.lastSync[mapping.id];
       const to = query.ref ?? "HEAD";
-      const base = await this.resolveBase(client, mapping);
-      if (!base) return { diffText: "", authorsByFile: {}, outcome: "no-baseline" }; // nothing to compare against yet
+
+      // U01/U02: prefer correspondenceSha (proven last-completed) as baseline.
+      // Fall back to lastRemoteSha (fetched tip) or branch tip, never claim fallback as "last sync".
+      let from: string | undefined;
+      let fromLabel: string | undefined;
+      const corr = ls?.correspondenceSha;
+      if (corr && (await client.commitExists(corr))) {
+        from = corr;
+        fromLabel = "last completed sync";
+      } else {
+        // Fallback: use the old resolveBase logic but label truthfully.
+        const fb = await this.resolveBase(client, mapping);
+        if (fb) {
+          from = fb;
+          fromLabel = "fetched remote tip (not last sync)";
+        }
+      }
+      if (!from) return { diffText: "", authorsByFile: {}, outcome: "no-baseline" };
+      // fromLabel is guaranteed when from is set
+      const safeFromLabel = fromLabel ?? "fetched remote tip (not last sync)";
+
+      // Scope ALL queries to the mapping's remote subtree (shared-repo isolation).
+      const pathspec: string[] = mapping.remotePath && mapping.remotePath.trim().length > 0 ? [mapping.remotePath.replace(/^\/+|\/+$/g, "")] : [];
 
       let diffText: string;
       try {
-        diffText = await client.diff(base, to);
+        // U01: two-endpoint diffRange (NOT three-dot merge-base) for user-facing comparisons.
+        // HEAD~N style refs are passed through as-is; caller ensures they are explicit.
+        diffText = await client.diffRange(from, to, pathspec);
       } catch (err) {
-        // A failed diff is NOT an empty diff: report the git error instead of the
-        // misleading "no changes" message (a bad ref / missing object / large-file
-        // failure all surfaced as a clean tree before this).
-        return { diffText: "", authorsByFile: {}, baseRef: base, outcome: "git-error", detail: err instanceof Error ? err.message : String(err) };
+        const msg = err instanceof Error ? err.message : String(err);
+        const lower = msg.toLowerCase();
+        const errorKind: DiffResult["errorKind"] =
+          lower.includes("auth") || lower.includes("permission") || lower.includes("403") || lower.includes("401")
+            ? "auth"
+            : lower.includes("timeout") || lower.includes("timed out")
+            ? "timeout"
+            : lower.includes("not a git") || lower.includes("bad object") || lower.includes("missing")
+            ? "missing-ref"
+            : "other";
+        return { diffText: "", authorsByFile: {}, baseRef: from, outcome: "git-error", detail: msg, fromLabel: safeFromLabel, errorKind };
       }
-      const range = `${base}...${to}`;
-      const log = await client.run(["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, range]);
+
+      // Attribution log must also be scoped to the mapping subtree.
+      const logRange = `${from}..${to}`; // two-endpoint style for log
+      const logArgs = pathspec.length > 0
+        ? ["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, logRange, "--", ...pathspec]
+        : ["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, logRange];
+      const log = await client.run(logArgs);
       const authorsByFile: AuthorsByFile = log.code === 0 ? authorsByFileFromLog(log.stdout) : {};
-      return { diffText, authorsByFile, baseRef: base, outcome: diffText.trim() ? "changed" : "identical" };
+
+      const toLabel = "HEAD (committed snapshot)";
+      const note = (ls?.pendingOps && ls.pendingOps.length > 0)
+        ? "not included — committed snapshot only"
+        : undefined;
+
+      const outcome: DiffResult["outcome"] = diffText.trim() ? "changed" : "identical";
+      return { diffText, authorsByFile, baseRef: from, outcome, fromLabel: safeFromLabel, toLabel, note };
     } catch (err) {
-      return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      return { diffText: "", authorsByFile: {}, outcome: "git-error", detail: msg, errorKind: "other" };
     }
   }
 
