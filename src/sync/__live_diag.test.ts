@@ -214,8 +214,11 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
           problems++;
           continue;
         }
+        // The engine since 0.3.28 keys clones by resolved identity and records the
+        // dir in lastSync (main.ts cloneDirFor uses the same record); recomputing the
+        // legacy slug layout here verifies the abandoned clone instead of the live one.
         const slug = (s: string): string => s.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const dir = `${CLONE_ROOT}/${slug(m.providerId)}/${slug(m.repoRef ?? m.id)}`;
+        const dir = ls?.cloneDir ?? `${CLONE_ROOT}/${slug(m.providerId)}/${slug(m.repoRef ?? m.id)}`;
         try {
           execFileSync("git", ["cat-file", "-e", `${base}^{commit}`], { cwd: dir });
           console.log(`[verify] ${m.label}: baseline ${base.slice(0, 8)} resolves in clone - status=${ls.status}`);

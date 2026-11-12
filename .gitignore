@@ -8,3 +8,6 @@ node_modules/
 
 # Do NOT commit vault-local secrets. The plugin stores credentials inside
 # the Obsidian vault at runtime — that is a separate concern from this repo.
+
+# Release staging area (artifacts are uploaded from here, not committed)
+dist/

@@ -119,8 +119,9 @@ module exists, unwired); a view for the membership data layer.
   Per-file blocked outcomes (binary, unreadable, unsafe paths) carry redacted
   reasons and are never treated as deletions.
 - **Reconciliation proof.** Every pass computes a fingerprint over the repo
-  identity and the mapping's shape (local folder, remote path, direction,
-  filters); any change to that shape invalidates all proven ownership and
+  identity and the mapping's shape (id, local folder, remote path, direction,
+  include/exclude globs, trash and `.obsidian/` policy); any change to that
+  shape invalidates all proven ownership and
   correspondence — proof is never carried across re-scoped links. After
   first-push and after normal passes, vault bytes are verified against the
   published Git blob IDs from the remote tree. Unknown remote-only paths land
@@ -128,8 +129,8 @@ module exists, unwired); a view for the membership data layer.
   held, pending, unreadable, or content-mismatch paths are withheld from proof
   (advisory). The "last completed sync" anchor (used by since-sync Diff) only
   advances when every path is verified. A pass that completes with items
-  awaiting review reports status *ok* and carries the review list as advisory
-  data — it does not change the outcome status.
+  awaiting review reports status *ok* (plan kind *retry-pending*) and carries
+  the review list as advisory data — it does not change the outcome status.
 - Generated commits receive explicit author and committer identities from the
   configured provider/agent where available, with a deterministic fallback.
   A teammate's global Git configuration is not required.
@@ -182,10 +183,13 @@ module exists, unwired); a view for the membership data layer.
 - When a mapping shows "needs merge" / conflict status, open the Conflicts panel (via status bar click or dedicated view) and choose per file: ours / theirs / both.
 - When the **Reconciliation review** lists paths (remote files this vault never
   received, or a local deletion that raced a remote edit), open the
-  Reconciliation review modal and decide per file: delete the remote path or
-  recover it into the vault. Decisions are bound to the exact blob they were
-  made against — a changed remote blob re-queues the path for review instead
-  of executing a stale decision.
+  Reconciliation review modal (ribbon icon or command palette → *Reconcile
+  remote-only files*) and decide per file: delete the remote path or recover
+  it into the vault. Decisions are bound to the exact ref and blob they were
+  made against — if any precondition fails at execution (remote moved, path
+  out of scope, file back in the vault or open in an editor), the decision is
+  dropped with an advisory and the path re-queues for review; a stale decision
+  never executes.
 - Resolved choices are written to both the clone's working tree and your vault
   folder, so a stale vault copy cannot resurface the same conflict. Originals
   are preserved first (`.mugs-origin` sidecar files plus the trash store), and

@@ -587,10 +587,16 @@ export class CloneManager {
     const legacyDir = cloneDir(this.layout, mapping.providerId, mapping.repoRef ?? repo.id);
     const legacyOnDisk = await this.seams.workingTree?.readFile?.(`${legacyDir}/.git/HEAD`) !== undefined;
     if (legacyDir !== dir && legacyOnDisk && (await this.isCloned(legacyDir))) {
-      const dirty = await this.client.at(legacyDir).workingTreePaths();
+      // These probes MUST carry auth: a blobless legacy clone lazily fetches missing
+      // objects on otherwise-local commands (status/log), and an unauthenticated
+      // fallback helper (e.g. an empty glab/GCM helper) answers with no password —
+      // the probe then fails and `unpushed` would read false, misclassifying a
+      // legacy clone with unpushed commits as clean (client.ts fullArgs rationale).
+      const legacyClient = this.client.withAuth(auth).at(legacyDir);
+      const dirty = await legacyClient.workingTreePaths();
       let unpushed = false;
       if (branch !== "HEAD") {
-        const r = await this.client.at(legacyDir).run(["log", "--oneline", `origin/${branch}..HEAD`]);
+        const r = await legacyClient.run(["log", "--oneline", `origin/${branch}..HEAD`]);
         unpushed = r.code === 0 && r.stdout.trim().length > 0;
       }
       if (dirty.length > 0 || unpushed) {

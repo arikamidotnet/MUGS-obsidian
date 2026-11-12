@@ -4,6 +4,7 @@ import type { Provider, RepoSummary } from "../providers/types";
 import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
+import { cloneDir } from "./cloneManager";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
 import { identityCloneDir, canonicalizeRemote } from "./repoIdentity";
 import { EditorOpenGuard } from "./editorOpen";
@@ -261,6 +262,47 @@ describe("syncAllMappings — HTTP(S) credentials for git", () => {
     });
     const cloneCall = calls.find((c) => c[0] === "clone")!;
     expect(cloneCall).toEqual(["clone", "/tmp/shared.git", expect.any(String)]);
+  });
+
+  it("authenticates the legacy-clone inventory probes (S03)", async () => {
+    // Regression: the pre-identity legacy-clone inventory ran status/log through an
+    // unauthenticated client. On a blobless legacy clone those otherwise-local
+    // commands can lazily fetch missing objects; the machine's empty credential
+    // helper then answers with no password (the "HTTP Basic: Access denied" spam),
+    // and a failed `log` probe reads unpushed=false — misclassifying a legacy clone
+    // holding unpushed commits as clean and migrating instead of blocking.
+    const { runner, calls, callOpts } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const legacyDir = cloneDir({ root: CLONE_ROOT }, "c1", "m1");
+    const workingTree: WorkingTreeWriter = {
+      writeFile: async () => {},
+      // Only the legacy-clone probe exists on disk; the identity lock file read
+      // (and any other read) sees nothing.
+      readFile: async (p) => (p === `${legacyDir}/.git/HEAD` ? "ref: refs/heads/main\n" : undefined),
+      deleteFile: async () => {},
+    };
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor, // base == head -> clean fast-forward pass
+      workingTree,
+    });
+    expect(outcomes[0]).toMatchObject({ status: "ok" });
+    // The inventory's dirty/unpushed probes aimed at the legacy clone (status/log —
+    // not the purely local rev-parse isCloned checks) must carry the credential env.
+    const probes = calls
+      .map((args, i) => ({ args, opts: callOpts[i] }))
+      .filter(({ args, opts }) => {
+        if (opts?.cwd !== legacyDir) return false;
+        let j = 0;
+        while (args[j] === "-c") j += 2; // skip -c <value> pairs (helper prefix on authed calls)
+        return args[j] === "status" || args[j] === "log";
+      });
+    expect(probes.length).toBeGreaterThanOrEqual(2); // workingTreePaths + unpushed log
+    for (const p of probes) expect(p.opts?.env?.MUGS_GIT_TOKEN).toBe("t");
   });
 });
 
