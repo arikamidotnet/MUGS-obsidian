@@ -196,10 +196,15 @@ export interface MugsSettings {
   /** Curated cleanup/review queue, keyed by mappingId (Area 8). Empty by default. */
   staging: Record<string, StagedChange[]>;
   security: {
-    /** When true, token field is encrypted at rest in data.json. */
+    /** When true, tokens are encrypted at rest in data.json. */
     encryptCredentials: boolean;
-    /** Placeholder for a future KDF-derived key input (not used yet). */
+    /** LEGACY: hint-derived key input from the old scheme. Kept so old data.json
+     *  files still load; dropped on migration to the passphrase KDF. */
     encryptionKeyHint?: string;
+    /** Passphrase-KDF parameters (structural twin of schema.ts KdfParams). Presence
+     *  marks the vault as using the passphrase scheme; the passphrase itself is
+     *  NEVER persisted — only these public parameters. */
+    kdf?: { algorithm: "PBKDF2-SHA-256"; salt: string; iterations: number };
   };
 }
 

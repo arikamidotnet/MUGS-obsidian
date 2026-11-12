@@ -111,6 +111,15 @@ export default class MugsPlugin extends Plugin {
         0,
       );
     }
+    // A passphrase-encrypted vault starts locked every session: until the user
+    // unlocks (Settings → MUGS → Security), every credential resolves to the visible
+    // "missing token" state and syncs would skip. Say so up front, once, sticky.
+    if (this.store.isLocked() && this.store.getSettings().credentials.some((c) => c.token)) {
+      new Notice(
+        "MUGS: credentials are locked — open Settings → MUGS → Security and unlock with your passphrase to enable syncing.",
+        0,
+      );
+    }
     // Seed the status bar from the persisted sync bookkeeping so a reload shows the
     // real last-synced time instead of a blank "idle".
     const lastSync = this.store.getSettings().lastSync;
