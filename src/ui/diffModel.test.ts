@@ -5,6 +5,7 @@ import {
   authorsByFileFromLog,
   authorAccent,
   assignAuthorColors,
+  validateRef,
 } from "./diffModel";
 
 const US = "\u001f"; // field separator (git %x1f)
@@ -155,6 +156,41 @@ describe("authorAccent", () => {
 
   it("produces different hues for different names", () => {
     expect(authorAccent("Alice")).not.toBe(authorAccent("Bob"));
+  });
+});
+
+describe("validateRef — inline pre-check before git sees the ref", () => {
+  it("accepts ordinary refs: HEAD, branch names, tags, full and short SHAs", () => {
+    for (const ref of ["HEAD", "main", "feature/new-notes", "v1.2.3", "origin/main", "HEAD~2", "abc123", "0123456789abcdef0123456789abcdef01234567"]) {
+      expect(validateRef(ref)).toBeUndefined();
+    }
+  });
+
+  it("rejects empty and whitespace-only refs with an actionable message", () => {
+    expect(validateRef("")).toContain("Enter a branch, tag, or commit");
+    expect(validateRef("   ")).toContain("Enter a branch, tag, or commit");
+    expect(validateRef("\t\n")).toContain("Enter a branch, tag, or commit");
+  });
+
+  it("rejects refs with spaces", () => {
+    expect(validateRef("main branch")).toContain("spaces");
+  });
+
+  it("rejects refs that git would parse as options (leading dash)", () => {
+    expect(validateRef("-exec")).toContain("dash");
+  });
+
+  it("rejects ranges — the picker compares one ref at a time", () => {
+    expect(validateRef("main..dev")).toContain("one ref at a time");
+  });
+
+  it("rejects control characters, slashes at the edges, @{, .lock and trailing dots", () => {
+    expect(validateRef("ma\u0007in")).toContain("control characters");
+    expect(validateRef("/main")).toContain("slash");
+    expect(validateRef("main/")).toContain("slash");
+    expect(validateRef("refs@{u}")).toContain("@{");
+    expect(validateRef("main.lock")).toContain(".lock");
+    expect(validateRef("main.")).toContain("period");
   });
 });
 

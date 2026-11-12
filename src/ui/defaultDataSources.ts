@@ -102,12 +102,24 @@ export class StoreMapDataSource implements MapDataSource {
         owner = undefined; // no clone / git error -> surface without an owner
       }
       const ls = lastSync[m.id];
+      // Skips provable from settings alone: a mapping pointing at a missing
+      // credential can never run, so the Map row says "skipped" (with the reason)
+      // instead of a quiet "pending" that implies sync will get to it eventually.
+      const credential = settings.credentials.find((c) => c.id === m.providerId);
+      const skipReason = !credential
+        ? "no credential selected — choose one for this mapping in MUGS settings"
+        : credential.kind === "local" && !credential.baseUrl?.trim()
+          ? "local provider needs a repo path — set it in the credential's settings"
+          : undefined;
+      const conflictCount = unresolvedConflicts(this.store.getConflicts(m.id)).length;
       rows.push({
         mapping: m,
         status: ls?.status ?? "pending",
         owner,
         lastPushAt: ls?.lastPushAt,
         lastPullAt: ls?.lastPullAt,
+        skipReason,
+        conflictCount: conflictCount > 0 ? conflictCount : undefined,
       });
     }
 

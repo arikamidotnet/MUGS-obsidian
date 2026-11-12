@@ -6,16 +6,23 @@
  * this file never runs under vitest because it imports the Obsidian DOM API.
  */
 import { ItemView, Notice } from "obsidian";
-import { buildMapGraph, type MapContext, type MapEdge, type MapNode, type MapGraph } from "./mapModel";
-import { getMugsContext } from "./dataSources";
+import { buildMapGraph, describeMapRow, directionHint, type MapContext, type MapEdge, type MapNode, type MapGraph, type MapRowDisplay } from "./mapModel";
+import { getMugsContext, type MapRow } from "./dataSources";
 
-/** Status icon glyph shown on each mapping card. */
-const STATUS_ICON: Record<string, string> = {
-  ok: "✓",
-  "up-to-date": "✓",
+/** Status icon glyph per display status (status-bar vocabulary). */
+const STATUS_ICON: Record<MapRowDisplay["label"], string> = {
+  "in sync": "✓",
   pending: "⋯",
-  conflict: "!",
-  error: "×",
+  "needs merge": "!",
+  skipped: "⊘",
+  failed: "×",
+};
+
+/** Map a display tone onto the existing status-icon CSS classes. */
+const TONE_ICON_CLASS: Record<MapRowDisplay["tone"], string> = {
+  success: "ok",
+  warning: "pending",
+  error: "conflict",
 };
 
 /** Direction label + icon for a mapping card. */
@@ -67,7 +74,7 @@ export class MapView extends ItemView {
     }
   }
 
-  private render(graph: MapGraph, rows: Array<{ status: string; lastPushAt?: number; lastPullAt?: number; mapping: { id: string } }>): void {
+  private render(graph: MapGraph, rows: MapRow[]): void {
     this.contentEl.empty();
     this.renderLegend();
 
@@ -84,12 +91,8 @@ export class MapView extends ItemView {
     this.renderSummary(rows);
 
     const grid = this.contentEl.createDiv({ cls: "mugs-map-grid" });
-    // Build a lookup from edge → row for status/last-sync info.
-    const rowByMappingId = new Map<string, (typeof rows)[number]>();
-    for (const r of rows) {
-      const m = graph.edges.find((e) => e.mappingId === r.mapping.id);
-      if (m) rowByMappingId.set(m.mappingId, r);
-    }
+    // Build a lookup from mapping id → row for status/last-sync info.
+    const rowByMappingId = new Map<string, MapRow>(rows.map((r) => [r.mapping.id, r]));
 
     // Render one card per mapping edge. Each card shows the folder→repo relationship.
     for (const edge of graph.edges) {
@@ -100,8 +103,12 @@ export class MapView extends ItemView {
   }
 
   /** Compact summary bar: mapping count, in-sync count, last sync time. */
-  private renderSummary(rows: Array<{ status: string; lastPushAt?: number; lastPullAt?: number }>): void {
-    const inSync = rows.filter((r) => r.status === "ok" || r.status === "up-to-date").length;
+  private renderSummary(rows: MapRow[]): void {
+    // "In sync" uses the same honest status model as the cards — a skipped or
+    // conflicted mapping never counts as synced.
+    const inSync = rows.filter(
+      (r) => describeMapRow({ status: r.status, direction: r.mapping.direction, skipReason: r.skipReason }).label === "in sync",
+    ).length;
     let latest = 0;
     for (const r of rows) {
       if (r.lastPushAt && r.lastPushAt > latest) latest = r.lastPushAt;
@@ -119,20 +126,24 @@ export class MapView extends ItemView {
     }
   }
 
-  private renderCard(
-    grid: HTMLElement,
-    edge: MapEdge,
-    folder: MapNode,
-    repo: MapNode,
-    row?: { status: string; lastPushAt?: number; lastPullAt?: number },
-  ): void {
+  private renderCard(grid: HTMLElement, edge: MapEdge, folder: MapNode, repo: MapNode, row?: MapRow): void {
     const card = grid.createDiv({ cls: "mugs-map-card" });
+
+    // Honest display status — same vocabulary as the status bar ("needs merge",
+    // "skipped", …) with the reason available on hover.
+    const display = describeMapRow({
+      status: row?.status ?? "pending",
+      direction: edge.direction,
+      skipReason: row?.skipReason,
+      conflictCount: row?.conflictCount,
+    });
 
     // Status accent bar + icon.
     const header = card.createDiv({ cls: "mugs-map-card-header" });
-    const statusIcon = header.createSpan({
-      cls: `mugs-status-icon mugs-status-${row?.status ?? "pending"}`,
-      text: STATUS_ICON[row?.status ?? "pending"] ?? "⋯",
+    header.createSpan({
+      cls: `mugs-status-icon mugs-status-${TONE_ICON_CLASS[display.tone]}`,
+      text: STATUS_ICON[display.label] ?? "⋯",
+      ...(display.reason ? { attr: { title: display.reason } } : {}),
     });
 
     // Folder name (left side).
@@ -142,8 +153,21 @@ export class MapView extends ItemView {
       folderCol.createEl("span", { cls: "mugs-map-card-owner", text: `owned by ${folder.owner}` });
     }
 
-    // Direction glyph (center).
-    header.createSpan({ cls: "mugs-map-card-direction", text: DIRECTION_LABEL[edge.direction] ?? edge.direction });
+    // Direction glyph (center) — hover says what the arrow does NOT do.
+    header.createSpan({
+      cls: "mugs-map-card-direction",
+      text: DIRECTION_LABEL[edge.direction] ?? edge.direction,
+      attr: { title: directionHint(edge.direction) },
+    });
+    // Push-only mappings never pull — a distinct muted chip stops the "in sync"
+    // card from implying content ever flows back from the remote.
+    if (edge.direction === "push-only") {
+      header.createSpan({
+        cls: "mugs-chip mugs-chip-muted mugs-map-card-never",
+        text: "never pulls",
+        attr: { title: directionHint(edge.direction) },
+      });
+    }
 
     // Repo name (right side) with branch.
     const repoCol = header.createDiv({ cls: "mugs-map-card-repo" });
@@ -154,47 +178,40 @@ export class MapView extends ItemView {
       repoCol.createEl("span", { cls: "mugs-map-card-detail", text: edge.remotePath || "whole repository" });
     }
 
-    // Footer with last sync times.
+    // Footer with last sync times — only the times this direction can actually
+    // produce (a push-only mapping never shows "pulled", a pull-only never "pushed").
     if (row) {
       const footer = card.createDiv({ cls: "mugs-map-card-footer" });
       const parts: string[] = [];
-      if (row.lastPushAt) parts.push(`pushed ${relativeTime(Date.now() - row.lastPushAt)}`);
-      if (row.lastPullAt) parts.push(`pulled ${relativeTime(Date.now() - row.lastPullAt)}`);
-      footer.createEl("span", { cls: "mugs-map-card-sync-times", text: parts.length ? parts.join(" · ") : "never synced" });
+      if (edge.direction !== "pull-only" && row.lastPushAt) parts.push(`pushed ${relativeTime(Date.now() - row.lastPushAt)}`);
+      if (edge.direction !== "push-only" && row.lastPullAt) parts.push(`pulled ${relativeTime(Date.now() - row.lastPullAt)}`);
+      const never =
+        edge.direction === "push-only" ? "never pushed" : edge.direction === "pull-only" ? "never pulled" : "never synced";
+      footer.createEl("span", { cls: "mugs-map-card-sync-times", text: parts.length ? parts.join(" · ") : never });
 
-      const statusLabel = (row.status ?? "pending").replace(/-/g, " ");
-      footer.createSpan({ cls: `mugs-chip mugs-chip-${statusChipClass(row.status)}`, text: statusLabel });
+      footer.createSpan({
+        cls: `mugs-chip mugs-chip-${display.tone}`,
+        text: display.label,
+        ...(display.reason ? { attr: { title: display.reason } } : {}),
+      });
     }
   }
 
   private renderLegend(): void {
     const legend = this.contentEl.createDiv({ cls: "mugs-map-legend" });
     legend.createEl("span", { text: "Status:", cls: "mugs-map-legend-label" });
-    for (const [status, label] of [
-      ["ok", "In sync"],
-      ["pending", "Pending"],
-      ["conflict", "Conflict"],
-      ["error", "Error"],
+    // Same vocabulary as the cards and the status bar.
+    for (const [label, tone] of [
+      ["in sync", "success"],
+      ["pending", "warning"],
+      ["needs merge", "error"],
+      ["skipped", "warning"],
+      ["failed", "error"],
     ] as const) {
       const chip = legend.createDiv({ cls: "mugs-map-legend-item" });
-      chip.createSpan({ cls: "mugs-map-legend-swatch", attr: { style: `background:${statusColor(status)}` } });
+      chip.createSpan({ cls: "mugs-map-legend-swatch", attr: { style: `background:${statusColor(tone)}` } });
       chip.createSpan({ text: label });
     }
-  }
-}
-
-function statusChipClass(status?: string): string {
-  switch (status) {
-    case "ok":
-    case "up-to-date":
-      return "success";
-    case "conflict":
-    case "pending":
-      return "warning";
-    case "error":
-      return "error";
-    default:
-      return "muted";
   }
 }
 
@@ -210,13 +227,11 @@ function relativeTime(ms: number): string {
   return `${d} day${d === 1 ? "" : "s"} ago`;
 }
 
-function statusColor(status: string): string {
-  switch (status) {
-    case "conflict":
-      return "#e45b3d";
+function statusColor(tone: MapRowDisplay["tone"]): string {
+  switch (tone) {
     case "error":
-      return "#f85149";
-    case "pending":
+      return "#e45b3d";
+    case "warning":
       return "#d29922";
     default:
       return "#3fb950";

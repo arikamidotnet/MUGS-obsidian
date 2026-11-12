@@ -23,12 +23,14 @@ function paleTint(hsl: string): string {
 }
 
 /** Render one unresolved conflict as a labeled row with resolution buttons.
- * `onResolve` receives the conflict and the chosen winner so callers can persist it. */
+ * `onResolve` receives the conflict and the chosen winner so callers can persist it.
+ * Returns the row element so callers can attach per-row notes (e.g. a failed
+ * resolution's error message) directly under it. */
 export function renderConflictRow(
   container: HTMLElement,
   c: FileConflict,
   onResolve: (c: FileConflict, choice: ResolveChoice) => void,
-): void {
+): HTMLElement {
   const { ours, theirs } = describeConflictActions(c);
 
   const row = container.createDiv({ cls: "mugs-conflict-row" });
@@ -47,6 +49,7 @@ export function renderConflictRow(
   renderActionLabel(labels, theirs);
 
   new ConflictButtons(row, c, onResolve).mount();
+  return row;
 }
 
 /** Human-friendly relative time. */
@@ -78,19 +81,33 @@ class ConflictButtons {
 
   mount(): void {
     const wrap = this.host.createDiv({ cls: "mugs-conflict-buttons" });
-    this.button(wrap, "Take ours", "ours");
-    this.button(wrap, "Take theirs", "theirs");
-    this.button(wrap, "Merge both", "both");
+    // Honest labels: when a side deleted the file, choosing it DELETES the file on
+    // both sides (vault and clone) — the button and its tooltip must say so,
+    // not imply a content pick.
+    const deletion = "Delete this file on both sides — your vault copy and the synced repository copy.";
+    this.button(
+      wrap,
+      this.c.oursAbsent ? "Take ours (delete file)" : "Take ours",
+      "ours",
+      this.c.oursAbsent ? deletion : "Keep our version of this file",
+    );
+    this.button(
+      wrap,
+      this.c.theirsAbsent ? "Take theirs (delete file)" : "Take theirs",
+      "theirs",
+      this.c.theirsAbsent ? deletion : "Use their version of this file",
+    );
+    this.button(wrap, "Merge both", "both", "Merge both versions where possible");
   }
 
-  private button(wrap: HTMLElement, text: string, choice: ResolveChoice): void {
+  private button(wrap: HTMLElement, text: string, choice: ResolveChoice, title: string): void {
     const btn = wrap.createEl("button", {
       type: "button",
       text,
       cls: `mugs-conflict-btn mugs-conflict-btn-${choice}`,
     });
     // Native title tooltip for hover accessibility.
-    btn.setAttribute("title", `${choice === "ours" ? "Keep our version of this file" : choice === "theirs" ? "Use their version of this file" : "Merge both versions where possible"}`);
+    btn.setAttribute("title", title);
     btn.addEventListener("click", () => {
       // Visual feedback: disable the clicked button briefly.
       btn.disabled = true;
@@ -102,6 +119,12 @@ class ConflictButtons {
   }
 }
 
+/** An inline per-row error for a failed resolution, shown in addition to the Notice.
+ *  Rendered directly under the conflict's path so the affected row is unambiguous. */
+export function renderRowError(row: HTMLElement, message: string): void {
+  row.createEl("p", { text: message, cls: "mugs-conflict-row-error" });
+}
+
 /** Render unresolved conflicts with a summary title above the diff. */
 export function renderConflicts(
   conflicts: FileConflict[],
@@ -111,7 +134,7 @@ export function renderConflicts(
   if (conflicts.length === 0) return;
   const box = host.createDiv({ cls: "mugs-conflicts" });
   box.createEl("h3", {
-    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need manual resolution`,
+    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "s" : ""} manual resolution`,
     cls: "mugs-conflicts-title",
   });
   for (const c of conflicts) renderConflictRow(box, c, onResolve);
