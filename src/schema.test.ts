@@ -6,8 +6,37 @@ import {
   normalizeVaultPath,
   mugsSettingsSchema,
 } from "./schema";
+import { DEFAULT_SYNC_POLICY } from "./types";
 
 describe("data-plane schema (contract)", () => {
+  it("parses nested shared input defaults and never aliases shared settings", () => {
+    const before = structuredClone(DEFAULT_SYNC_POLICY);
+    const first = parseSettings({});
+    const second = parseSettings({ sync: {} });
+    for (const settings of [first, second]) {
+      expect(settings.sync.firstSyncDirection).toBe("pull");
+      expect(settings.sync.obsidianConfig).toEqual({
+        enabled: before.obsidianConfig.enabled,
+        entries: before.obsidianConfig.entries.map((entry) => ({ ...entry, includes: entry.includes ?? [], excludes: entry.excludes ?? [] })),
+      });
+    }
+    first.sync.obsidianConfig.entries.push({ path: "test.json", scope: "personal", includes: [], excludes: [] });
+    expect(second.sync.obsidianConfig.entries).toHaveLength(before.obsidianConfig.entries.length);
+    expect(DEFAULT_SYNC_POLICY).toEqual(before);
+  });
+
+  it("retains nested array defaults, unknown-field stripping, and structured issues", () => {
+    const settings = parseSettings({ unknownFutureField: true, sync: {
+      paused: true, obsidianConfig: { enabled: true, entries: [{ path: "app.json", scope: "personal", unknown: "strip" }] },
+    } });
+    expect(settings.sync.paused).toBe(true);
+    expect(settings.sync.obsidianConfig.entries).toEqual([{ path: "app.json", scope: "personal", includes: [], excludes: [] }]);
+    expect(settings).not.toHaveProperty("unknownFutureField");
+    const invalid = mugsSettingsSchema.safeParse({ sync: { intervalSeconds: 0 } });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) expect(invalid.error.issues.some((issue) => issue.path.join(".") === "sync.intervalSeconds")).toBe(true);
+  });
+
   it("applies defaults for a partial/empty settings blob", () => {
     const s = parseSettings(null);
     expect(s.credentials).toEqual([]);

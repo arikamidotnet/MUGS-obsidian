@@ -208,7 +208,7 @@ export const syncPolicySchema = z.object({
   /** Which side wins a mapping's first initialization; "pull" = remote populates
    *  the vault (historic default), "push" = vault uploads without downloading history. */
   firstSyncDirection: z.enum(["pull", "push"]).default("pull"),
-  obsidianConfig: obsidianConfigSchema.default(() => structuredClone(DEFAULT_SYNC_POLICY.obsidianConfig)),
+  obsidianConfig: obsidianConfigSchema.prefault(() => structuredClone(DEFAULT_SYNC_POLICY.obsidianConfig)),
 });
 
 export const agentSchema = z.object({
@@ -235,7 +235,7 @@ export const mugsSettingsSchema = z.object({
   mappings: z.array(folderMappingSchema).default([]),
   lastSync: z.record(z.string(), lastSyncStateSchema).default({}),
   conflicts: z.record(z.string(), z.array(conflictSchema)).default({}),
-  sync: syncPolicySchema.default(cloneSyncPolicy),
+  sync: syncPolicySchema.prefault(cloneSyncPolicy),
   agents: z.array(agentSchema).default([]),
   staging: z.record(z.string(), z.array(stagedChangeSchema)).default({}),
   security: securitySchema.default({ encryptCredentials: false }),
