@@ -64,14 +64,14 @@ Feature work is delivered in phases (see below). Implemented so far:
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon and the *Run sync* command; each mapping reports ok / push+pull / conflict / skip as a Notice. (`src/providers/factory.ts`, `src/main.ts`)
 - **Settings controls.** Add or delete credentials (provider picker + token) and folder mappings (provider/branch/direction) directly from Settings, with `.obsidian/` targets rejected outright. (`src/settingsTab.ts`)
 
-Also shipped since the phases below: **first-sync direction** (populate the vault from the remote, or upload the vault onto it without downloading history), **shared per-repo blobless clones**, **event-driven sync** on vault changes, a **live clickable status bar** (conflicts → Conflicts panel, otherwise the Diff view), **AES-256-GCM token encryption at rest** (opt-in), and a **live-diagnostic harness** (`MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts`) that replays the plugin's exact sync against a real vault/remote. Remaining work: mobile support (desktop-only for now), review-queue producer wiring, per-hunk blame.
+Also shipped since the phases below: **first-sync direction** (populate the vault from the remote, or upload the vault onto it without downloading history), **shared per-repo blobless clones**, **event-driven sync** on vault changes, a **live clickable status bar** (conflicts → Conflicts panel, otherwise the Diff view), **opt-in token encryption at rest with a passphrase**, and a **live-diagnostic harness** (`MUGS_LIVE_DIAG=1 npx vitest run src/sync/__live_diag.test.ts`) that replays the plugin's exact sync against a real vault/remote. Remaining work: mobile support (desktop-only for now), review-queue producer wiring, per-hunk blame.
 
 ## Installing into Obsidian
 
 1. `npm install && npm run build`
-2. Copy `main.js`, `manifest.json`, and `versions.json` into
+2. Copy `main.js`, `manifest.json`, and `styles.css` into
    `.obsidian/plugins/mugs-obsidian/`.
-3. Enable **MUGS — Multi-User Git Sync** in Community plugins (or load via [BRAT](https://github.com/tgrosing/BRAT)
+3. Enable **MUGS — Multi-User Git Sync** in Community plugins (or install via [BRAT](https://github.com/TfTHacker/obsidian42-brat)
    from the public repo).
 
 ## Phases
@@ -87,11 +87,10 @@ Also shipped since the phases below: **first-sync direction** (populate the vaul
 
 ## Security notes
 
-Credentials are stored in the vault's `data.json`. Enable **Encrypt credentials at rest** (Settings →
-Security & Credentials) to encrypt tokens with **AES-256-GCM**, keys derived via PBKDF2-SHA256 (250k
-iterations) from your key hint; tokens are decrypted in memory only, and a wrong hint degrades that
-credential to a visible "missing token" instead of failing the plugin. Encryption is **off by default**
-— without it tokens are stored as-is, so treat the vault with the same care you would a password
+Credentials are stored in the vault's `data.json`. When you enable **Encrypt credentials at rest**
+(Settings → Security & Credentials), tokens are encrypted at rest with a passphrase you choose; the
+passphrase is never stored in the vault and cannot be recovered. Encryption is **off by default** —
+without it tokens are stored as-is, so treat the vault with the same care you would a password
 manager. Git authentication passes tokens through per-invocation environment variables (never argv,
 `.git/config`, or logs); tokens are masked wherever displayed; provider error messages contain URLs,
 never credentials.
@@ -99,7 +98,7 @@ never credentials.
 ## Teammate quickstart
 
 1. Install: copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/mugs-obsidian/`
-   (or add the repo via [BRAT](https://github.com/tgrosing/BRAT)). **Desktop Obsidian only.**
+   (or add the repo via [BRAT](https://github.com/TfTHacker/obsidian42-brat)). **Desktop Obsidian only.**
 2. Settings → MUGS → Credentials: add your GitLab PAT (needs `api` scope + access to the shared repo),
    your username, and optionally restrict the token to that repo.
 3. Folder Mappings: pick your credential → the shared repo → check your folders → choose direction.
