@@ -98,7 +98,10 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         const ref = refPath.slice(0, idx);
         const path = refPath.slice(idx + 1);
         const content = showMap[ref]?.[path];
-        if (content === undefined) return { code: 128, stdout: "", stderr: "" };
+        // Mimic real git's stderr for a path missing from the tree — showTyped's
+        // classifier maps this exact message to {kind:"absent"} (an error result
+        // must stay reserved for genuine read failures, S02).
+        if (content === undefined) return { code: 128, stdout: "", stderr: `fatal: path '${path}' does not exist in '${ref}'` };
         return { code: 0, stdout: content, stderr: "" };
       }
       if (cmd === "status") return { code: 0, stdout: changedPaths.map((p) => ` M ${p}`).join("\n"), stderr: "" }; // porcelain (push staging)
@@ -333,7 +336,10 @@ describe("syncAllMappings — sync outcomes", () => {
       runner,
       lastSync: accessor,
     });
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1",
+      kind: "apply-remote", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.pull).toEqual([["m1", "R1"]]);
     expect(state.push).toEqual([]);
     expect(state.conflict).toEqual([]);
@@ -358,7 +364,10 @@ describe("syncAllMappings — sync outcomes", () => {
   expect(cloneCall).toContain("https://example.com/m1.git");
     // A pass that pushed records the POST-push tip as the remote baseline (the
     // pre-push remoteSha left the 3-way base one commit stale).
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1",
+      kind: "publish-local", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]);
   });
@@ -434,13 +443,16 @@ describe("syncAllMappings — sync outcomes", () => {
       policy: { ...DEFAULT_SYNC_POLICY }, // autoMerge + recencyWins on, "both" fallback
       vaultMirror,
     });
-    // Overlapping add/add auto-resolved by recency: the newer vault copy wins.
-    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
-    expect(store.getState()).toEqual([]); // nothing surfaced for manual resolve
-    // The ours-winner was written into the clone working tree and staged for push.
-    expect(writes).toEqual([[`${CLONE_ROOT}/c1/m1/todo.md`, "a\nLOCAL\nc\n"]]);
-    expect(calls.some((cl) => cl.includes("add") && cl.includes("todo.md"))).toBe(true);
-    expect(calls.some((cl) => cl.includes("commit"))).toBe(true);
+    // S06 (contract §4): the engine NEVER silently auto-resolves. The genuine
+    // add/add divergence is recorded and surfaced; the recency INPUTS are still
+    // gathered (both timestamps) so the UI can offer one-click suggestions.
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
+    expect(store.getState()).toEqual([
+      { path: "todo.md", base: undefined, ours: "a\nLOCAL\nc\n", theirs: "a\nREMOTE\nc\n", oursSavedAt: OURS_MS, theirsModifiedAt: 1_000_000_000 },
+    ]);
+    // Nothing was auto-written into the clone and nothing was committed/pushed.
+    expect(writes).toEqual([]);
+    expect(calls.some((cl) => cl.includes("commit"))).toBe(false);
   });
 
   it("skips per-file reads and shows entirely on an unchanged push-only pass (steady-state shortcut)", async () => {
@@ -674,7 +686,10 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
       runner,
       lastSync: accessor,
     });
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: false, newRemoteSha: "R1",
+      kind: "apply-remote", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.pull).toEqual([["m1", "R1"]]);
     expect(state.push).toEqual([]);
   });
@@ -695,7 +710,10 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
   const cloneCall = calls.find((c) => c.includes("clone"));
     const cloneIdx = cloneCall!.indexOf("clone");
     expect(cloneCall![cloneIdx + 1]).toBe("/tmp/shared.git");
-    expect(outcomes).toEqual([{ mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1" }]);
+    expect(outcomes).toEqual([{
+      mappingId: "m1", label: "Notes", status: "ok", pull: "fast-forward", push: true, newRemoteSha: "L1",
+      kind: "publish-local", counts: { publish: 0, apply: 0, deferred: 0, conflicted: 0 }, blocked: [], pendingFailures: undefined,
+    }]);
     expect(state.push).toEqual([["m1", "L1"]]);
     expect(state.pull).toEqual([["m1", "L1"]]);
   });
@@ -731,7 +749,7 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
 });
 
 describe("syncAllMappings — sync outcomes", () => {
-  it("auto-resolves a genuine conflict via injected policy instead of surfacing it", async () => {
+  it("surfaces a genuine conflict even with an injected policy (S06: no silent auto-resolution)", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
     const store = memoryConflictStore();
@@ -757,11 +775,16 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
       policy: { ...DEFAULT_SYNC_POLICY, defaultResolution: "theirs" },
     });
-    // Auto-resolved to theirs and written into the working tree; NOT surfaced as a conflict.
-    expect(writes).toEqual([["/vault/.mugs-clones/c1/m1/notes/todo.md", J(["a", "REMOTE", "c"])]]);
-    expect(store.getState()).toEqual([]);
-    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
-    expect(state.conflict).toEqual([]);
+    // S06 (contract §4): even with an injected policy (autoMerge + "theirs"), the
+    // engine surfaces the genuine conflict instead of silently resolving it —
+    // resolution is an explicit one-click user action (conflictActions), never a
+    // silent engine default.
+    expect(writes).toEqual([]);
+    expect(store.getState()).toEqual([
+      { path: "notes/todo.md", base: J(["a", "shared", "c"]), ours: J(["a", "LOCAL", "c"]), theirs: J(["a", "REMOTE", "c"]) },
+    ]);
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
+    expect(state.conflict).toEqual(["m1"]);
   });
 
   it("still surfaces a conflict when no policy is injected (default behavior unchanged)", async () => {

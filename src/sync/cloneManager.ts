@@ -19,16 +19,24 @@ import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
 import { applyMerge, type AppliedChange, type FileVersions } from "./conflict";
+import type { SyncPlanKind, PendingOperation } from "../types";
+import { checkRelPath } from "../git/safePath";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
 import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
 import { planMirrorPull, vaultToRepoPath, repoToVaultPath } from "./mirror";
 import type { TrashStore } from "./trash";
 import { EditorOpenGuard } from "./editorOpen";
-import { canAutoResolve, resolveConflictAuto, autoResolvedContent } from "./policy";
 
 /** Pull action, mirrored from the sync contract. */
 export type SyncPull = SyncAction;
+
+/** A file whose content could not be read this pass (S02): surfaced per-file with a
+ *  redacted reason, NEVER treated as absence/deletion. ADDITIVE (Wave B). */
+export interface BlockedFile {
+  path: string;
+  reason: string;
+}
 
 /** The full push/pull decision for one sync pass. */
 export interface SyncDecision {
@@ -95,6 +103,14 @@ export interface LastSyncAccessor {
   contentSnapshot?(mappingId: string): Record<string, [number, number]> | undefined;
   /** Optional: persist a fresh per-file snapshot after a completed pass. */
   recordContentSnapshot?(mappingId: string, snap: Record<string, [number, number]>): void;
+  /** ADDITIVE (S01): durable operations not yet applied+verified. Non-empty BLOCKS
+   *  correspondence advance and forces replan/verify before new reconciliation. */
+  pendingOps?(mappingId: string): PendingOperation[] | undefined;
+  /** ADDITIVE (S01): replace the mapping's durable pendingOps list. */
+  recordPendingOps?(mappingId: string, ops: PendingOperation[]): void;
+  /** ADDITIVE (S01): record the PROVEN correspondence SHA — called only after every
+   *  planned vault application completed AND state persisted. */
+  recordCorrespondence?(mappingId: string, sha: string): void;
 }
 
 /** Writes merged file content (and removes deleted files) into a clone's working tree. */
@@ -177,6 +193,17 @@ export interface SyncOpts {
   /** Optional progress reporter — receives human-readable phase text (rendered
    *  live in the status bar) while the pass runs. */
   onStatus?: (message: string) => void;
+  /** ADDITIVE (contract §2): when true the pass performs discovery + planning ONLY
+   *  and returns before any mutation (no clone writes, no vault writes/deletes,
+   *  no add/commit/push). The result carries the plan kind/counts. */
+  dryRun?: boolean;
+  /** ADDITIVE (contract §7): cancellation signal threaded into every GitRunOpts. */
+  signal?: AbortSignal;
+  /** ADDITIVE (contract §8 / E02): watcher uncertainty (startup, lost events, changed
+   *  configFingerprint). When true the steady-state stat shortcut is disabled for the
+   *  pass — every file is re-verified so a same-size/same-mtime replacement can never
+   *  report a false success. */
+  uncertain?: boolean;
 }
 
 /** Result of one sync pass for a mapping. */
@@ -190,6 +217,15 @@ export interface SyncResult {
   conflicts: FileConflict[];
   /** Files moved by content identity between local and remote (empty when none). */
   renames?: Rename[];
+  /** ADDITIVE (contract §2): the plan kind for this pass — "idle" for a verified no-op. */
+  kind?: SyncPlanKind;
+  /** ADDITIVE (contract §2): per-outcome plan counts. */
+  counts?: { publish: number; apply: number; deferred: number; conflicted: number };
+  /** ADDITIVE (S02/§9): per-file blocked outcomes (unreadable content, unsafe path,
+   *  binary) with redacted reasons — never treated as absence/deletion. */
+  blocked?: BlockedFile[];
+  /** ADDITIVE (S01): count of pendingOps stuck in "failed" state after recovery. */
+  pendingFailures?: number;
 }
 
 export class CloneManager {
@@ -406,11 +442,50 @@ export class CloneManager {
       localHasUnpushed: localSha !== base,
     });
 
+    // Planning phase (contract §2): derive the SyncPlan from topology + direction.
+    // Idle is PROVISIONAL here — it is verified only after mergeSides' stat-scan
+    // proves trustworthy unchanged-vault evidence (contract §8). The dryRun gate
+    // lives at plan time: planning is read-only, so a dry run returns immediately
+    // with the plan and never reaches mergeSides/execute (zero mutations).
+    const plannedKind: SyncPlanKind =
+      decision.pull === "none" && !decision.push
+        ? "idle"
+        : decision.pull === "rebase" && decision.push
+          ? "merge-clean"
+          : decision.pull === "rebase"
+            ? "apply-remote"
+            : decision.push
+              ? "publish-local"
+              : "apply-remote";
+    const plannedCounts = { publish: decision.push ? 1 : 0, apply: decision.pull === "none" ? 0 : 1, deferred: 0, conflicted: 0 };
+    if (opts.dryRun) {
+      // Zero mutations from here on: no merge/apply/commit/push.
+      return {
+        mappingId: mapping.id,
+        pull: decision.pull,
+        push: decision.push,
+        needsConflictResolution: false,
+        conflicts: [],
+        renames: [],
+        kind: plannedKind,
+        counts: plannedCounts,
+      };
+    }
+
+    // S01 recovery: pendingOps from a previous pass (deferred by the editor guard or
+    // interrupted) are verified against actual vault bytes FIRST — completed entries
+    // drop, incomplete ones re-apply (the editor may have closed since). Never
+    // silently dropped; failures surface with attempts+lastError.
+    const remainingPending = await this.recoverPendingOps(mapping);
+
     // 3-way merge the local side in as "ours": base = the last-synced tree, theirs =
     // the remote tip, ours = the mapping's vault folder (via the mirror) or, without
     // a mirror, the clone's own HEAD (legacy clone↔remote semantics). Clean results
     // land in the clone's working tree; genuine conflicts are surfaced below.
-    const merged = await this.mergeSides(mapping, c, dir, baseSha, localSha, remoteRef, remoteSha, status);
+    const merged = await this.mergeSides(mapping, c, dir, baseSha, localSha, remoteRef, remoteSha, status, {
+      uncertain: opts.uncertain || remainingPending.length > 0,
+      signal: opts.signal,
+    });
 
     if (merged.conflicts.length > 0) {
       // Replace-by-path, not append: a fresh divergence supersedes the stored record
@@ -420,7 +495,17 @@ export class CloneManager {
       const prior = new Map((this.conflicts?.getConflicts(mapping.id) ?? []).map((c) => [c.path, c]));
       for (const c of merged.conflicts) prior.set(c.path, c);
       this.conflicts?.setConflicts(mapping.id, [...prior.values()]);
-      return { mappingId: mapping.id, pull: decision.pull, push: false, needsConflictResolution: true, conflicts: merged.conflicts, renames: merged.renames };
+      return {
+        mappingId: mapping.id,
+        pull: decision.pull,
+        push: false,
+        needsConflictResolution: true,
+        conflicts: merged.conflicts,
+        renames: merged.renames,
+        kind: "conflict",
+        counts: { ...plannedCounts, conflicted: merged.conflicts.length },
+        blocked: merged.blocked,
+      };
     }
 
     // Clean merge is now in the working tree. Re-point the branch at the remote tip
@@ -434,8 +519,23 @@ export class CloneManager {
 
     // Pull side: land the clone's now-current content back into the vault folder
     // (skipped for push-only mappings — they must never take remote content).
+    // E01: on a VERIFIED-idle pass (remote unchanged, correspondence proven, and the
+    // merge produced nothing to apply) mirrorPull would be pure no-op re-reading —
+    // skip it. First-sync/never-populated mappings always take the full path.
     if (mapping.direction !== "push-only") {
-      await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status);
+      const alreadyPopulated = this.syncs.vaultPopulated?.(mapping.id) ?? false;
+      const verifiedIdle = decision.pull === "none" && alreadyPopulated && merged.applied.length === 0 && merged.autoResolvedPaths.length === 0;
+      let deferred: PendingOperation[] = [];
+      if (!verifiedIdle) {
+        deferred = await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status, opts.signal);
+      }
+      // S01: deferred vault operations (editor-open guard) become DURABLE pendingOps.
+      // They ride in persisted state until applied+verified; correspondence never
+      // advances past unapplied work.
+      this.syncs.recordPendingOps?.(mapping.id, deferred.length > 0 ? deferred : this.syncs.pendingOps?.(mapping.id) ?? []);
+      if (deferred.length > 0) status?.(`deferred ${deferred.length} vault change(s) — files open with unsaved edits`);
+    } else {
+      this.syncs.recordPendingOps?.(mapping.id, this.syncs.pendingOps?.(mapping.id) ?? []);
     }
 
     // Push side: stage, commit and push the in-scope merged changes. Without a
@@ -451,10 +551,12 @@ export class CloneManager {
       if (stagedPaths.length > 0) {
         status?.(base === "" ? `first sync: committing vault content (${stagedPaths.length} files)` : `committing (${stagedPaths.length} files)`);
         await c.add(stagedPaths);
-        // Only commit when something is actually staged — mirroring content that
-        // already equals the remote tree stages nothing and `git commit` would fail
-        // with "nothing to commit".
-        if ((await c.porcelain()).length > 0) {
+        // S04: commit eligibility is STAGED-ONLY and SCOPED. The gate is a pathspec-
+        // scoped `git diff --cached --name-only -- <stagedPaths>`, so pre-existing
+        // index entries OUTSIDE this mapping's scope (another mapping's or a user's
+        // staged work in the shared clone) can neither enter the commit nor trip an
+        // empty one. Full porcelain stays discovery-only.
+        if (await this.hasScopedStagedChanges(c, stagedPaths)) {
           const agent = this.pickAgent?.(mapping);
           const author = agent ? authorRefForAgent(agent) : undefined;
           await c.commit(
@@ -490,7 +592,35 @@ export class CloneManager {
     // content duplication under the default "both" resolution) on the next pass.
     const finalRemoteSha = pushed ? await c.currentHead() : remoteSha;
     this.syncs.recordPull(mapping.id, finalRemoteSha);
-    return { mappingId: mapping.id, pull: decision.pull, push: pushed, needsConflictResolution: false, newRemoteSha: finalRemoteSha, conflicts: [], renames: [] };
+    // S01: correspondence (the PROVEN vault↔repo point) advances ONLY when every
+    // planned vault application completed — no deferred writes/deletes and no
+    // pending ops left. Otherwise correspondence stays at the last proven point and
+    // the pendingOps list forces replan/verify on the next pass.
+    const pendingNow = this.syncs.pendingOps?.(mapping.id) ?? [];
+    const blockedNow = pendingNow.filter((p) => p.state === "failed");
+    if (pendingNow.length === 0) {
+      this.syncs.recordCorrespondence?.(mapping.id, finalRemoteSha);
+    }
+    const deferredNow = pendingNow.filter((p) => p.state !== "failed").length;
+    const verifiedIdlePass = decision.pull === "none" && !pushed && pendingNow.length === 0 && merged.applied.length === 0 && merged.autoResolvedPaths.length === 0;
+    return {
+      mappingId: mapping.id,
+      pull: decision.pull,
+      push: pushed,
+      needsConflictResolution: false,
+      newRemoteSha: finalRemoteSha,
+      conflicts: [],
+      renames: [],
+      kind: verifiedIdlePass ? "idle" : pushed ? "publish-local" : decision.pull !== "none" ? "apply-remote" : "idle",
+      counts: {
+        publish: pushed ? merged.applied.length : 0,
+        apply: decision.pull !== "none" ? merged.applied.length : 0,
+        deferred: deferredNow,
+        conflicted: 0,
+      },
+      blocked: merged.blocked,
+      ...(blockedNow.length > 0 ? { pendingFailures: blockedNow.length } : {}),
+    };
   }
 
   /**
@@ -519,12 +649,15 @@ export class CloneManager {
       );
     }
     const held = this.heldPaths?.(mapping.id);
+    // §9: every path is safePath-validated BEFORE use; rejected paths are blocked
+    // (skipped + surfaced), never sanitized.
     const uploads = vaultNames
       .map((rel) => ({ rel, repoPath: vaultToRepoPath(mapping, rel) }))
-      .filter(({ repoPath }) => this.inScope(mapping, repoPath) && this.mirrorListable(repoPath))
+      .filter(({ repoPath }) => this.inScope(mapping, repoPath) && this.mirrorListable(repoPath) && checkRelPath(repoPath).ok)
       .filter(({ repoPath }) => !(held?.has(repoPath) ?? false));
     status?.(`first sync: uploading vault (${uploads.length} files)`);
     // Additive: remote-only files are kept — no deletions during a push-first init.
+    let skippedUploads = 0;
     for (const { rel, repoPath } of uploads) {
       let content: string;
       try {
@@ -532,6 +665,7 @@ export class CloneManager {
       } catch (err) {
         // One unreadable file must not abort the whole init — skip it.
         console.warn("MUGS: skipping unreadable vault file during first-sync push:", rel, err);
+        skippedUploads++;
         continue;
       }
       const absPath = `${dir}/${repoPath}`;
@@ -558,10 +692,14 @@ export class CloneManager {
     const newHead = await c.currentHead();
     this.syncs.recordPush(mapping.id, newHead);
     this.syncs.recordPull(mapping.id, newHead);
-    // Vault content == remote content from here on: seed the populated flag so a
-    // vault-absent in-scope file reads as a real deletion on later passes — and
-    // push-only mappings propagate deletions too, not just push-pull ones.
-    this.syncs.recordVaultSync?.(mapping.id);
+    // E03: populated is set ONLY on real correspondence — every in-scope vault file
+    // actually reached the remote. Skipped (unreadable/held) uploads leave the vault
+    // and remote divergent, so the flag stays unset and deletions stay disabled.
+    if (skippedUploads === 0) {
+      this.syncs.recordVaultSync?.(mapping.id);
+    } else {
+      status?.(`first sync: ${skippedUploads} file(s) could not be read — deletions stay disabled for this mapping`);
+    }
     // A completed init supersedes any previously recorded conflicts for the mapping.
     if (this.conflicts) this.conflicts.setConflicts(mapping.id, []);
     return { mappingId: mapping.id, pull: "none", push: pushed, needsConflictResolution: false, newRemoteSha: newHead, conflicts: [], renames: [] };
@@ -594,19 +732,21 @@ export class CloneManager {
     remoteRef: string,
     remoteSha: string,
     status?: (m: string) => void,
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]> }> {
-    // Steady-state shortcut (push-only mappings): when the remote tip equals the
-    // recorded baseline and a vault file's (mtime, size) pair matches the snapshot
-    // recorded at the last completed pass, ours == theirs == base — the per-file
-    // vault read AND `git show` are skipped. On a 2,000-file vault this collapses
-    // an idle pass from minutes to seconds. mtime ALONE was not safe: a file
-    // restored from a backup (old mtime, new content) was skipped as unchanged.
-    // Push-pull/pull-only mappings keep the full path: mirrorPull needs vault
-    // content for its no-op write detection.
-    const steadyState = mapping.direction === "push-only" && this.vaultMirror?.stat !== undefined;
+    o?: { uncertain?: boolean; signal?: AbortSignal },
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]>; blocked: BlockedFile[] }> {
+    // Steady-state shortcut (ALL directions, contract §8/E01): when the remote tip
+    // equals the recorded baseline and a vault file's (mtime, size) pair matches the
+    // snapshot recorded at the last completed pass (mtime predating it), ours ==
+    // theirs == base is PROVEN — the per-file vault read AND both `git show`s are
+    // skipped. mtime ALONE was not safe: a file restored from a backup (old mtime,
+    // new content) was skipped as unchanged; the exact pair + mtime-ordering rule
+    // closes that. Uncertainty (startup, watcher doubt, changed fingerprint,
+    // pending work) disables the skip entirely — verify, never report false success.
     const remoteUnchanged = baseSha !== "" && remoteSha === baseSha;
+    const statAvailable = this.vaultMirror?.stat !== undefined;
+    const steadyState = statAvailable;
     const lastDone = remoteUnchanged ? (this.syncs.lastCompletedAt?.(mapping.id) ?? 0) : 0;
-    const prevSnap = remoteUnchanged ? (this.syncs.contentSnapshot?.(mapping.id) ?? {}) : {};
+    const prevSnap = remoteUnchanged && !o?.uncertain ? (this.syncs.contentSnapshot?.(mapping.id) ?? {}) : {};
     const staleRels = new Set<string>();
     const fingerprints: Record<string, [number, number]> = {};
     if (steadyState) {
@@ -621,14 +761,14 @@ export class CloneManager {
           fp = undefined; // unreadable -> treat as fresh (safe direction)
         }
         if (fp) fingerprints[rel] = fp;
-        if (remoteUnchanged && isSnapshotStale(fp, prevSnap[rel], lastDone)) staleRels.add(rel);
+        if (remoteUnchanged && !o?.uncertain && isSnapshotStale(fp, prevSnap[rel], lastDone)) staleRels.add(rel);
       }
     }
     const isStale = (repoPath: string): boolean => {
       const rel = repoToVaultPath(mapping, repoPath);
       return rel !== null && staleRels.has(rel);
     };
-    const allClonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
+    const allClonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p) && checkRelPath(p).ok);
     const clonePaths = allClonePaths.filter((p) => !isStale(p));
     // NAMES-ONLY vault scan: the pre-streaming version preloaded EVERY vault file's
     // content here, then held base+ours+theirs for the whole tree simultaneously —
@@ -700,16 +840,40 @@ export class CloneManager {
     const appliedPaths: string[] = [];
     const autoResolvedPaths: string[] = [];
     const surfacedConflicts: FileConflict[] = [];
+    const blocked: BlockedFile[] = [];
     const renames: Rename[] = [];
+    // Typed reads (S02): an ERROR result blocks the file for this pass with a
+    // redacted reason — it must NEVER be treated as absence (which would plan a
+    // deletion or push one). Only {kind:"absent"} is a true deletion on that side.
+    const readTyped = async (ref: string, path: string): Promise<string | undefined | null> => {
+      const res = await c.showTyped(ref, path);
+      if (res.kind === "content") return res.content;
+      if (res.kind === "absent") return undefined;
+      blocked.push({ path, reason: res.error.message });
+      return null; // blocked marker
+    };
     for (let i = 0; i < paths.length; i += MERGE_BATCH) {
       const batch = paths.slice(i, i + MERGE_BATCH);
       const entries: FileVersions[] = [];
       for (const path of batch) {
         // Preserve undefined so a deleted side is treated as a deletion (jj None), not an empty file.
-        const base = baseSha ? await c.show(baseSha, path) : undefined;
+        let base: string | undefined;
+        if (baseSha) {
+          const b = await readTyped(baseSha, path);
+          if (b === null) continue; // blocked — surfaced per-file, never a deletion
+          base = b;
+        }
         let ours: string | undefined;
         if (!this.vaultMirror) {
-          ours = await c.show("HEAD", path);
+          // When the clone HEAD is exactly the baseline tree, ours == base by
+          // construction — reuse instead of a second show (E01 idle cost).
+          if (baseSha && localSha === baseSha) {
+            ours = base;
+          } else {
+            const r = await readTyped("HEAD", path);
+            if (r === null) continue;
+            ours = r;
+          }
         } else {
           const rel = repoToVaultPath(mapping, path);
           if (rel !== null && vaultNames.has(rel)) {
@@ -718,18 +882,35 @@ export class CloneManager {
             try {
               ours = await this.vaultMirror!.read(mapping.localFolder, rel);
             } catch (err) {
-              console.warn("MUGS: skipping unreadable vault file this pass:", rel, err);
+              blocked.push({ path, reason: `vault file unreadable: ${String(err).slice(0, 160)}` });
               continue;
             }
           } else if (deletable) {
             ours = undefined; // vault had it (populated) and no longer does -> deletion
           } else if (baseSha) {
-            ours = await c.show(baseSha, path); // not seen yet -> act as unchanged; mirror-pull will fetch it
+            // not seen yet -> act as unchanged (the base content the vault has not
+            // taken yet); base was already read above — reuse it (E01).
+            ours = base;
           } else {
             ours = undefined;
           }
         }
-        const theirs = await c.show(remoteRef, path);
+        // When the remote tip IS the baseline tree, theirs == base by construction —
+        // reuse instead of a second show per file (E01 idle cost: 600 → 0 shows).
+        let theirs: string | undefined;
+        if (remoteSha === baseSha && baseSha) {
+          theirs = base;
+        } else {
+          const t = await readTyped(remoteRef, path);
+          if (t === null) continue;
+          theirs = t;
+        }
+        // S06: binary content must never enter text concatenation — a NUL byte in
+        // any side marks the file binary; blocked with a distinct reason.
+        if ([base, ours, theirs].some((s) => s !== undefined && s.includes("\0"))) {
+          blocked.push({ path, reason: "binary content excluded from text merge" });
+          continue;
+        }
         entries.push({ path, base, ours, theirs });
       }
       const resolved = await Promise.all(entries);
@@ -771,11 +952,12 @@ export class CloneManager {
         }
       }
 
-      // Automatic-first resolution: when a policy is injected and autoMerge is on, resolve
-      // genuine conflicts automatically (recency-wins / defaultResolution) and write the
-      // resolved content instead of surfacing them. Only unresolvable conflicts are returned
-      // for manual review. With no policy injected this is a no-op — behavior is unchanged.
-      let batchSurfaced = conflicts;
+      // S06 (contract §4): autoMerge now means CLEAN three-way auto-merge ONLY.
+      // Genuine conflicts (unresolved hunks, delete/modify, divergent add/add,
+      // binary) are RECORDED and SURFACED — never silently auto-resolved.
+      // recencyWins / defaultResolution:"both" are one-click UI suggestions
+      // (conflictActions) requiring explicit user choice, not engine defaults.
+      const batchSurfaced = conflicts;
       // Best-effort recoverable content for deletes: the clone's current (theirs) content,
       // so a deletion is recorded in `.mugs-trash` before the working-tree removal.
       const priorByPath = new Map(resolved.map((e) => [e.path, e.theirs]));
@@ -784,22 +966,6 @@ export class CloneManager {
         if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
         return op;
       });
-      if (this.policy?.autoMerge) {
-        batchSurfaced = [];
-        for (const cf of conflicts) {
-          if (canAutoResolve(cf, this.policy)) {
-            const content = autoResolvedContent(cf, resolveConflictAuto(cf, this.policy)!);
-            // Always write the resolved content into the clone working tree. Even when
-            // it equals the vault's copy (an "ours" win) the clone does not hold it yet,
-            // and `git add` stages from the working tree — the previous no-op skip left
-            // ours-wins uncommitted in the clone forever.
-            toApply.push({ path: cf.path, kind: "write", content });
-            autoResolvedPaths.push(cf.path);
-          } else {
-            batchSurfaced.push(cf);
-          }
-        }
-      }
 
       // Safe applier ordering: writes before deletes, parents before children.
       await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
@@ -813,15 +979,89 @@ export class CloneManager {
       renames,
       autoResolvedPaths,
       fingerprints,
+      blocked,
     };
   }
 
+  /** S01 recovery: verify pendingOps against ACTUAL vault bytes before any new
+   *  reconciliation. Completed operations (file bytes already match / file already
+   *  gone) are dropped; incomplete ones re-apply (the editor may have closed since);
+   *  failures are kept surfaced with attempts+lastError — never silently dropped,
+   *  never republished as a new local edit. Returns the still-outstanding list. */
+  private async recoverPendingOps(mapping: FolderMapping): Promise<PendingOperation[]> {
+    const pending = this.syncs.pendingOps?.(mapping.id) ?? [];
+    if (pending.length === 0 || !this.vaultMirror) return pending.length > 0 && !this.vaultMirror ? pending : [];
+    const remaining: PendingOperation[] = [];
+    for (const op of pending) {
+      if (op.state === "failed") {
+        remaining.push(op); // surfaced to the user; retried only via explicit resolution
+        continue;
+      }
+      let current: string | undefined;
+      try {
+        current = await this.vaultMirror.read(mapping.localFolder, op.path);
+      } catch {
+        current = undefined;
+      }
+      if (op.kind === "vault-write") {
+        if (current === (op.content ?? "")) continue; // applied + verified -> complete
+        const vaultPath = vaultRootPath(mapping.localFolder, op.path);
+        if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultPath)) {
+          remaining.push({ ...op, attempts: op.attempts + 1 });
+          continue;
+        }
+        try {
+          await this.vaultMirror.write(mapping.localFolder, op.path, op.content ?? "");
+        } catch (err) {
+          remaining.push({ ...op, attempts: op.attempts + 1, lastError: String(err).slice(0, 200) });
+        }
+      } else if (op.kind === "vault-delete") {
+        if (current === undefined) continue; // already gone -> verified
+        const vaultPath = vaultRootPath(mapping.localFolder, op.path);
+        if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultPath)) {
+          remaining.push({ ...op, attempts: op.attempts + 1 });
+          continue;
+        }
+        try {
+          this.trash?.trash(mapping.id, vaultPath, current);
+          await this.vaultMirror.remove(mapping.localFolder, op.path);
+        } catch (err) {
+          remaining.push({ ...op, attempts: op.attempts + 1, lastError: String(err).slice(0, 200) });
+        }
+      } else {
+        // clone-commit / remote-push: the normal pass re-plans and re-runs them.
+        remaining.push(op);
+      }
+    }
+    this.syncs.recordPendingOps?.(mapping.id, remaining);
+    return remaining;
+  }
+
+  /** S04: commit eligibility — STAGED-ONLY and SCOPED. Runs
+   *  `git diff --cached --name-only -z -- <paths>` and requires a non-empty result,
+   *  so pre-existing index entries outside this mapping's pathspec can neither enter
+   *  the commit nor trigger an empty one. Full porcelain is discovery-only. */
+  private async hasScopedStagedChanges(c: GitClient, paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return false;
+    const CHUNK = 500;
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      const scope = paths.slice(i, i + CHUNK);
+      const r = await c.run(["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "-z", "--", ...scope]);
+      if (r.code !== 0) return false; // cannot prove eligibility -> no commit (safe)
+      if (r.stdout.split("\u0000").some((s) => s.length > 0)) return true;
+    }
+    return false;
+  }
+
   /** Pull the clone's current in-scope content into the vault folder: writes for
-   *  every in-scope clone file (skipping no-ops the vault already has and files
-   *  open with unsaved edits), deletions only for paths git says the remote side
-   *  removed since the last sync — never for vault files the remote simply has
-   *  never seen. STREAMING: plan ops are name-only; clone content is read one
-   *  file at a time in the apply loop, so memory stays flat on huge trees. */
+   *  every in-scope clone file (skipping no-ops the vault already has), deletions
+   *  only for paths git says the remote side removed since the last sync — never
+   *  for vault files the remote simply has never seen. Writes AND deletes are
+   *  editor-protected: a path open with unsaved changes is DEFERRED into a durable
+   *  pendingOp (returned to the caller for persistence) instead of silently
+   *  skipped — correspondence never advances past unapplied work (S01). STREAMING:
+   *  plan ops are name-only; clone content is read one file at a time in the apply
+   *  loop, so memory stays flat on huge trees. Returns the deferred pendingOps. */
   private async mirrorPull(
     mapping: FolderMapping,
     dir: string,
@@ -829,12 +1069,17 @@ export class CloneManager {
     baseSha: string,
     remoteRef: string,
     status?: (m: string) => void,
-  ): Promise<void> {
-    if (!this.vaultMirror) return;
-    // Names only — contents are read per op below.
-    const clonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
+    signal?: AbortSignal,
+  ): Promise<PendingOperation[]> {
+    if (!this.vaultMirror) return [];
+    const passOpId = Date.now().toString(36);
+    const deferred: PendingOperation[] = [];
+    // Names only — contents are read per op below. §9: every path from the index
+    // listing passes checkRelPath before use; rejected paths are blocked, never
+    // sanitized.
+    const clonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p) && checkRelPath(p).ok);
     const deletedRepoPaths = baseSha
-      ? (await c.deletedPaths(`${baseSha}..${remoteRef}`)).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p))
+      ? (await c.deletedPaths(`${baseSha}..${remoteRef}`)).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p) && checkRelPath(p).ok)
       : [];
     // Reuse the pure pull planner for ordering + scoping; placeholder contents are
     // replaced with the real (lazily read) clone content in the apply loop below.
@@ -846,6 +1091,7 @@ export class CloneManager {
     status?.(baseSha === "" ? `first sync: populating vault (${clonePaths.length} files)` : `updating vault (${plan.ops.length} changes)`);
 
     for (const op of plan.ops) {
+      if (signal?.aborted) break; // cancelled is never success — stop applying
       if (op.kind === "delete") {
         // Record the vault file's content before removing it so a remote-driven
         // deletion is recoverable via `.mugs-trash` (Area 3).
@@ -855,17 +1101,49 @@ export class CloneManager {
         } catch {
           prior = undefined;
         }
-        this.trash?.trash(mapping.id, vaultRootPath(mapping.localFolder, op.path), prior);
+        // S01: editor protection for DELETES too — a file open with unsaved changes
+        // is never removed; the deletion defers into a durable pendingOp.
+        const delVaultPath = vaultRootPath(mapping.localFolder, op.path);
+        if (this.editorOpen && !this.editorOpen.isWriteSafe(delVaultPath)) {
+          deferred.push({
+            opId: `${mapping.id}:${passOpId}:vault-delete:${op.path}`,
+            kind: "vault-delete",
+            path: op.path,
+            state: "pending",
+            createdAt: Date.now(),
+            attempts: 0,
+          });
+          continue;
+        }
+        this.trash?.trash(mapping.id, delVaultPath, prior);
         await this.vaultMirror.remove(mapping.localFolder, op.path);
         continue;
       }
       // Prefer the working-tree content (it carries uncommitted merged results);
       // fall back to the committed tip for files not yet materialized on disk —
       // e.g. fetched-since-last-checkout files (a mixed reset never writes them).
-      const content = (await this.readCloneFile(dir, op.path)) ?? (await c.show(remoteRef, op.path));
-      if (content === undefined) continue; // gone from both — nothing to write
-      // Skip a no-op write (vault content already current) and never clobber a
-      // file that is open with unsaved changes (the editor-open guard, Area 5).
+      let content = await this.readCloneFile(dir, op.path);
+      if (content === undefined) {
+        // S02 typed read: an ERROR blocks the file (per-file blocked outcome) —
+        // it must never read as absence (which would skip the write and strand
+        // the vault stale while correspondence advanced).
+        const res = await c.showTyped(remoteRef, op.path);
+        if (res.kind === "content") content = res.content;
+        else if (res.kind === "error") {
+          deferred.push({
+            opId: `${mapping.id}:${passOpId}:vault-write:${op.path}`,
+            kind: "vault-write",
+            path: op.path,
+            refSha: remoteRef,
+            state: "failed",
+            createdAt: Date.now(),
+            attempts: 1,
+            lastError: res.error.message,
+          });
+          continue;
+        } else continue; // genuinely absent at the ref — nothing to write
+      }
+      // Skip a no-op write (vault content already current).
       let current: string | undefined;
       try {
         current = await this.vaultMirror.read(mapping.localFolder, op.path);
@@ -874,12 +1152,29 @@ export class CloneManager {
       }
       if (current === content) continue;
       const vaultPath = vaultRootPath(mapping.localFolder, op.path);
-      if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultPath)) continue;
+      // S01: never clobber a file that is open with unsaved changes (Area 5) —
+      // the write defers into a durable pendingOp and is retried/verified next pass.
+      if (this.editorOpen && !this.editorOpen.isWriteSafe(vaultPath)) {
+        deferred.push({
+          opId: `${mapping.id}:${passOpId}:vault-write:${op.path}`,
+          kind: "vault-write",
+          path: op.path,
+          content,
+          refSha: remoteRef,
+          state: "pending",
+          createdAt: Date.now(),
+          attempts: 0,
+        });
+        continue;
+      }
       await this.vaultMirror.write(mapping.localFolder, op.path, content);
     }
     // The vault folder now mirrors the clone's in-scope content — from here on, a
     // vault-absent in-scope file is a real deletion (see mergeSides' `deletable`).
+    // With deferred work the claim is only partial: the caller persists pendingOps
+    // and leaves correspondence at its previous proven point.
     this.syncs.recordVaultSync?.(mapping.id);
+    return deferred;
   }
 
 

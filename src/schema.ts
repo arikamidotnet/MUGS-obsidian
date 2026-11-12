@@ -14,11 +14,55 @@ import type {
   ProviderKind,
   SyncDirection,
   SyncStatus,
+  PendingOpKind,
+  PendingOperation,
+  SyncPlanKind,
+  PlannedAction,
+  SyncPlan,
+  RepoIdentity,
 } from "./types";
 
 export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "gitea", "forgejo", "local"]);
 export const syncDirectionSchema = z.enum(["push-pull", "pull-only", "push-only"]);
 export const syncStatusSchema = z.enum(["ok", "conflict", "error", "up-to-date", "pending"]);
+
+export const pendingOpKindSchema = z.enum(["vault-write", "vault-delete", "clone-commit", "remote-push"]);
+export const pendingOperationSchema = z.object({
+  opId: z.string().min(1),
+  kind: pendingOpKindSchema,
+  path: z.string().min(1),
+  content: z.string().optional(),
+  refSha: z.string().optional(),
+  state: z.enum(["pending", "applied-unverified", "failed"]),
+  createdAt: z.number().int().nonnegative(),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string().optional(),
+});
+
+export const syncPlanKindSchema = z.enum(["idle", "publish-local", "apply-remote", "merge-clean", "conflict", "blocked", "retry-pending"]);
+export const plannedActionSchema = z.object({
+  path: z.string().min(1),
+  op: z.enum(["vault-write", "vault-delete", "stage", "commit", "push"]),
+  directionPermitted: z.boolean(),
+  requiresEditorCheck: z.boolean(),
+});
+export const syncPlanSchema = z.object({
+  mappingId: z.string().min(1),
+  kind: syncPlanKindSchema,
+  actions: z.array(plannedActionSchema),
+  counts: z.object({
+    publish: z.number().int().nonnegative(),
+    apply: z.number().int().nonnegative(),
+    deferred: z.number().int().nonnegative(),
+    conflicted: z.number().int().nonnegative(),
+  }),
+});
+export const repoIdentitySchema = z.object({
+  providerId: z.string().min(1),
+  repoId: z.string().min(1),
+  branch: z.string().min(1),
+  canonicalRemote: z.string().min(1),
+});
 
 /** A repository path as `owner/repo` (GitLab nested groups allowed: `group/sub/repo`). */
 const repoPathSchema = z.string().trim().regex(
@@ -71,6 +115,14 @@ export const lastSyncStateSchema = z.object({
  *  the steady-state shortcut's change detector (mtime alone is not trusted). */
   contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
+  /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
+   *  application completed AND state persisted. */
+  correspondenceSha: z.string().optional(),
+  /** Hash of (direction, remotePath, localFolder, branch, includes, excludes, syncTrashFolder).
+   *  Any change invalidates contentSnapshot shortcuts and replans from scratch. */
+  configFingerprint: z.string().optional(),
+  /** Durable operations not yet fully applied+verified. */
+  pendingOps: z.array(pendingOperationSchema).optional(),
 });
 
 export const conflictSchema = z.object({
