@@ -297,6 +297,7 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     pendingOps: (id) => store.getSettings().lastSync[id]?.pendingOps,
     recordPendingOps: (id, ops) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, pendingOps: ops })),
     recordCorrespondence: (id, sha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, correspondenceSha: sha })),
+    recordCloneDir: (id, dir) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, cloneDir: dir })),
   };
 }
 

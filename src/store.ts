@@ -433,8 +433,15 @@ export class MugsStore {
     const cred = { ...input };
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
-    this.runtimeTokens.set(cred.id, cred.token);
-    this.unreadableTokens.delete(cred.id); // a fresh token supersedes an undecryptable one
+    if (isRealSecret) {
+      // Only a real secret supersedes the runtime plaintext and clears an
+      // undecryptable marker. A metadata-only edit (masked/cipher re-supply)
+      // must PRESERVE both — overwriting runtimeTokens with the stored
+      // ciphertext/mask would poison the live token map (sync would hand the
+      // mask/cipher to git as if it were the secret).
+      this.runtimeTokens.set(cred.id, cred.token);
+      this.unreadableTokens.delete(cred.id);
+    }
     return { ...cred, token: redactToken(cred.token) };
   }
 

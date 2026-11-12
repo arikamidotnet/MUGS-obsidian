@@ -112,6 +112,10 @@ export interface LastSyncAccessor {
   /** ADDITIVE (S01): record the PROVEN correspondence SHA — called only after every
    *  planned vault application completed AND state persisted. */
   recordCorrespondence?(mappingId: string, sha: string): void;
+  /** ADDITIVE (integration): persist the resolved identity clone dir so the UI
+   *  (Map/Diff/conflicts) and tests resolve the clone without recomputing the
+   *  RepoIdentity or hardcoding the layout. */
+  recordCloneDir?(mappingId: string, dir: string): void;
 }
 
 /** Writes merged file content (and removes deleted files) into a clone's working tree. */
@@ -450,7 +454,13 @@ export class CloneManager {
     base: string,
     status?: (m: string) => void,
   ): Promise<SyncResult> {
-    const lockFile = `${dir}/.mugs-sync.lock`;
+    // Record the resolved identity clone dir (the UI and tests read it from lastSync).
+    this.syncs.recordCloneDir?.(mapping.id, dir);
+    // The lock lives OUTSIDE the clone dir (a sibling file): a lock inside the
+    // dir makes `git clone` fail with "already exists and is not an empty
+    // directory" on a first sync whenever the rmDir seam is absent (and the
+    // pre-clone cleanup would delete an inside-dir lock anyway).
+    const lockFile = `${dir}.mugs-sync.lock`;
     const lockContents = `${process.pid}:${Date.now()}`;
     if (this.seams.workingTree?.readFile) {
       const existing = await this.seams.workingTree.readFile(lockFile);

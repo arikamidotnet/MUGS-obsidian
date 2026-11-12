@@ -305,13 +305,14 @@ describe("S03: shared-clone isolation + advisory lock + legacy inventory", () =>
       expect(existsSync(join(dirSide, "side.md"))).toBe(true);
       expect(existsSync(join(dirMain, "side.md"))).toBe(false);
 
-      // Cross-process advisory lock: a lock from a foreign pid blocks the pass.
-      writeFileSync(join(dirMain, ".mugs-sync.lock"), "999999:123");
+      // Cross-process advisory lock (a SIBLING file next to the clone dir, so it
+      // can never interfere with `git clone` into the dir): a foreign pid blocks.
+      writeFileSync(`${dirMain}.mugs-sync.lock`, "999999:123");
       writeFileSync(join(vaultRoot, "mb", "main.md"), "edited\n");
       const outLocked = await syncAllMappings(makeSharedDeps(base, remote, store, runner, vaultRoot, mkMapping("mb", "main")));
       expect(outLocked[0]?.status).toBe("blocked");
       expect(outLocked[0]?.reason).toContain("another process");
-      rmSync(join(dirMain, ".mugs-sync.lock"), { force: true });
+      rmSync(`${dirMain}.mugs-sync.lock`, { force: true });
 
       // Legacy clone (provider/repoId layout) holding an UNPUSHED commit -> blocked,
       // and the legacy commit is NEVER reset.

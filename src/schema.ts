@@ -147,6 +147,8 @@ export const lastSyncStateSchema = z.object({
   /** Durable operations not yet fully applied+verified. Non-empty list BLOCKS
    *  correspondence advance and forces replan/verify before any new reconciliation. */
   pendingOps: z.array(pendingOperationSchema).optional(),
+  /** Resolved identity clone dir recorded at the last pass (UI/test resolution). */
+  cloneDir: z.string().optional(),
 });
 
 export const conflictSchema = z.object({

@@ -326,6 +326,10 @@ export interface LastSyncState {
   /** Durable operations not yet fully applied+verified. Non-empty list BLOCKS
    *  correspondence advance and forces replan/verify before any new reconciliation. */
   pendingOps?: PendingOperation[];
+  /** Resolved identity clone dir (`<cloneRoot>/<shortHash(identity)>/<branch>`)
+   *  recorded at the last pass — lets the UI and tests locate the clone without
+   *  recomputing the RepoIdentity or hardcoding the layout. */
+  cloneDir?: string;
 }
 
 /** Outcome of a manual conflict resolution transaction. */

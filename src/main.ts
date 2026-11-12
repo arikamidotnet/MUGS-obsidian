@@ -296,6 +296,10 @@ export default class MugsPlugin extends Plugin {
 
   }
 
+  /** E02/§8: true until the first sync pass completes after load — the startup
+   *  pass re-verifies content instead of trusting the steady-state stat shortcut. */
+  private startupUncertain = true;
+
   /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice.
    *  Guarded: while a pass is in flight, further calls (scheduler ticks, file events,
    *  repeated Sync clicks) return immediately — passes can never stack.
@@ -328,11 +332,6 @@ export default class MugsPlugin extends Plugin {
     let syncThrown: unknown = null;
 
     try {
-      // Cancellation seam (contract §7): pass signal when SyncDriverDeps / SyncOpts
-      // accepts it. For now we allocate the controller so unload can abort and so
-      // we are ready for the driver change from sync-core. GitRunOpts already
-      // declares signal; the threading lands in cloneManager/runner at integration.
-      // (Flagged seam: no `signal` or `cancellation` field on current deps.)
       outcomes = await syncAllMappings({
         mappings: settings.mappings,
         credentials: settings.credentials,
@@ -363,12 +362,20 @@ export default class MugsPlugin extends Plugin {
         firstSyncDirection: settings.sync.firstSyncDirection,
         onStatus: (message) => this.updateStatusBar("syncing", message),
         onRepoResolved: (mappingId, repoRef) => this.backfillRepoRef(mappingId, repoRef),
-        // Optional future seam for cancellation (no-op adapter today):
-        // signal: runController.signal,
+        // E02/§8: the startup pass (and any pass while watcher state is doubted)
+        // must not trust the steady-state stat shortcut — content is re-verified.
+        watcherUncertain: this.startupUncertain,
+      }, {
+        // Cancellation (contract §7): one controller per run; unload aborts it and
+        // the runner kills the child git process tree.
+        signal: runController.signal,
       });
     } catch (err) {
       syncThrown = err;
     }
+    // A completed (non-thrown) pass has re-verified content: the startup
+    // uncertainty window is over for subsequent passes.
+    if (!syncThrown) this.startupUncertain = false;
 
     // Persist under ownership. Contract: syncInFlight releases only after save resolves.
     // Consume SaveResult: {ok:false} is failure — do not let status become "synced".
@@ -729,6 +736,10 @@ export default class MugsPlugin extends Plugin {
       getMapping: (id) => this.store.getSettings().mappings.find((m) => m.id === id),
       cloneDirFor: (id) => {
         const m = this.store.getSettings().mappings.find((x) => x.id === id);
+        // Prefer the identity clone dir recorded at the last sync pass; the
+        // legacy layout is only a fallback for never-synced mappings.
+        const recorded = this.store.getSettings().lastSync[id]?.cloneDir;
+        if (recorded) return recorded;
         return cloneDir({ root: this.cloneRoot() }, m?.providerId ?? "", m?.repoRef ?? id);
       },
       cloneTree: this.workingTreeWriter(),

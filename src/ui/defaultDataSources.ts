@@ -43,6 +43,19 @@ async function isWorkTree(client: GitClient, dir: string): Promise<boolean> {
   return r.code === 0 && r.stdout.trim() === "true";
 }
 
+/** Resolve a mapping's clone dir: the identity-layout dir recorded at the last
+ *  sync pass (authoritative), falling back to the legacy provider/slug layout
+ *  for mappings that have not synced since the upgrade. */
+function resolveCloneDir(
+  store: MugsStore,
+  cloneRoot: string,
+  m: Pick<FolderMapping, "id" | "providerId" | "repoRef">,
+): string {
+  const recorded = store.getSettings().lastSync[m.id]?.cloneDir;
+  if (recorded) return recorded;
+  return cloneDir({ root: cloneRoot }, m.providerId, m.repoRef ?? m.id);
+}
+
 /** Choose the owning user: most recent activity, ties broken by commit count. */
 function pickOwner(authors: AuthorActivity[]): string | undefined {
   let best: AuthorActivity | undefined;
@@ -88,9 +101,9 @@ export class StoreMapDataSource implements MapDataSource {
     for (const m of settings.mappings) {
       let owner: string | undefined;
       try {
-        // Same clone-dir resolution as the sync engine (repoRef ?? id) — the old
-        // m.id-only form missed every folder-scoped mapping's shared clone.
-        const dir = cloneDir({ root: this.cloneRoot }, m.providerId, m.repoRef ?? m.id);
+        // Recorded identity clone dir from the last pass; the legacy layout is
+        // only a fallback (the old m.id-only form missed scoped clones).
+        const dir = resolveCloneDir(this.store, this.cloneRoot, m);
         // Bind EVERY git call to the clone — an unbound client ran rev-parse/log in the
         // plugin process's cwd (the wrong repository), so owner attribution silently
         // failed for every mapping.
@@ -141,7 +154,7 @@ export class StoreDiffDataSource implements DiffDataSource {
     const mapping = settings.mappings.find((m) => m.id === query.mappingId);
     if (!mapping) return { diffText: "", authorsByFile: {}, outcome: "no-mapping" };
 
-    const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
+    const dir = resolveCloneDir(this.store, this.cloneRoot, mapping);
     let client = new GitClient(this.runner).at(dir);
     if (this.authedClient) client = this.authedClient(client);
 
@@ -279,7 +292,7 @@ export class StoreConflictDataSource implements ConflictDataSource {
     // BOTH writes happen before the record is dropped — the old code cleared the
     // record after writing only the clone, so the vault kept the conflicting copy and
     // the same conflict resurfaced (or the resolution was overwritten) on the next sync.
-    const dir = cloneDir({ root: this.cloneRoot }, mapping.providerId, mapping.repoRef ?? mapping.id);
+    const dir = resolveCloneDir(this.store, this.cloneRoot, mapping);
     const cloneAbs = `${dir}/${query.path}`;
     const vaultRel = repoToVaultPath(mapping, query.path);
     const vaultAbs =
