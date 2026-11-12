@@ -178,7 +178,7 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
 .mugs-section {
   border: 1px solid var(--background-modifier-border);
   border-radius: 10px;
-  padding: 10px 18px 18px;
+  padding: 14px 18px 18px;
   margin-bottom: 18px;
   background: var(--background-modifier-hover);
 }
@@ -292,7 +292,7 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
   min-width: 120px;
 }
 
-.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* "never pulls" chip on push-only cards \u2014 a quiet warning that remote content never flows back. */
@@ -300,21 +300,33 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
 
 /* --- Diff view ------------------------------------------------------------- */
 
-.mugs-diff-view { padding: 12px 8px 16px; }
+/* Same gutter rhythm as the Map view; extra bottom room so the last file block
+   doesn't sit on the status bar. */
+.mugs-diff-view { padding: 12px 16px 24px; }
 
 .mugs-diff-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  align-items: flex-end;
-  padding-bottom: 12px;
+  gap: 10px 12px;
+  align-items: center;
+  padding: 2px 0 12px;
   border-bottom: 1px solid var(--background-modifier-border);
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .mugs-diff-mapping-select, .mugs-diff-ref-input {
   min-width: 0;
   flex-shrink: 0;
+}
+
+/* Match the ref input's height/radius so the picker row reads as one control. */
+.mugs-diff-mapping-select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-form-field);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
 }
 
 .mugs-diff-ref-input {
@@ -359,7 +371,8 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
 .mugs-conflicts-title { margin: 0 0 8px; font-weight: 600; color: var(--text-error); }
 
 /* Conflict row */
-.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.mugs-conflict-row + .mugs-conflict-row { border-top: 1px solid var(--background-modifier-border); }
 
 /* Inline error under a row whose resolution failed (e.g. file open with unsaved changes). */
 .mugs-conflict-row-error { margin: 2px 0 6px; font-size: var(--font-ui-smaller); color: var(--text-error, #f85149); }
@@ -396,7 +409,7 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
 /* Diff hunk table */
 .mugs-diff-hunk { width: 100%; border-collapse: collapse; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
 
-.mugs-diff-hunk td { padding: 0 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.mugs-diff-hunk td { padding: 1px 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
 .mugs-diff-sign     { width: 1%; min-width: 24px; text-align: center; user-select: none; color: var(--text-muted); }
 
 .mugs-diff-lineno    { width: 1%; min-width: 38px; text-align: right; user-select: none; color: var(--text-faint); padding-right: 10px; }
@@ -425,14 +438,14 @@ ${t}`:e}${ks(r.ownerHuman)}`}function Sa(r){let e=["mugs",r.op];return r.label&&
 
 /* --- Conflicts sidebar panel ---------------------------------------------- */
 
-.mugs-conflicts-panel { padding: 12px; }
+.mugs-conflicts-panel { padding: 12px 14px 20px; }
 
-.mugs-conflicts-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.mugs-conflicts-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .mugs-conflicts-panel-title   { margin: 0; font-size: var(--font-ui-medium); font-weight: 600; }
 .mugs-conflicts-panel-refresh { font-size: var(--font-ui-smaller); }
 
-.mugs-conflicts-panel-group    { border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; background: var(--background-modifier-hover); }
-.mugs-conflicts-panel-group-title { margin: 2px 0 6px; font-size: var(--font-ui-small); font-weight: 600; }
+.mugs-conflicts-panel-group    { border: 1px solid var(--background-modifier-border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; background: var(--background-modifier-hover); }
+.mugs-conflicts-panel-group-title { margin: 2px 0 8px; font-size: var(--font-ui-small); font-weight: 600; }
 
 /* --- Review Queue ---------------------------------------------------------- */
 
