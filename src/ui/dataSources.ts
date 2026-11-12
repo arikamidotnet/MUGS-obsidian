@@ -51,7 +51,15 @@ export interface DiffResult {
   outcome: DiffOutcome;
   /** Human-readable detail for failure outcomes (e.g. git's stderr). */
   detail?: string;
-}
+  /** Truthful label for the "from" endpoint per contract DiffEndpoint kinds. */
+  fromLabel?: string;
+  /** Label for the "to" side (e.g. "HEAD (committed snapshot)"). */
+  toLabel?: string;
+  /** Caveat when the shown diff is a committed snapshot only. */
+  note?: string;
+  /** Classified error for distinct offline/auth messages. */
+  errorKind?: "auth" | "timeout" | "missing-ref" | "other";
+} 
 
 /** Supplies the data the Diff view renders. */
 export interface DiffDataSource {

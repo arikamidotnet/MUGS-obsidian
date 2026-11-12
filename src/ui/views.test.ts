@@ -221,7 +221,8 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     diffNoBaselineContext();
     const v = new DiffView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
-    expect(collectText(v.contentEl)).toContain("No comparison available");
+    // U04: distinct truthful state for no-baseline (not lumped into generic "no comparison").
+    expect(collectText(v.contentEl)).toContain("No baseline yet");
   });
 
   it("Diff view: identical trees show the no-changes message with a truncated baseline", async () => {
@@ -229,10 +230,10 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new DiffView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
     const text = collectText(v.contentEl);
-    // A fully synced mapping must NOT read as "no comparison available" — it says
-    // exactly what happened, with the baseline SHA shortened for readability.
-    expect(text).toContain("In sync — no changes since last sync");
+    // Truthful labels per contract: identical uses from/to labels, not legacy copy.
+    expect(text).toContain("Identical snapshots");
     expect(text).toContain("abc123de");
+    expect(text).toContain("HEAD (committed snapshot)");
     expect(text).not.toContain("abc123def4abc123def4");
   });
 
@@ -245,7 +246,8 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new DiffView({} as any);
     await v.onOpen();
     const text = collectText(v.contentEl);
-    expect(text).toContain("could not build the comparison");
+    // Distinct error surface (never silent no-changes) with classified kind.
+    expect(text).toContain("Comparison failed");
     expect(text).toContain("fatal: bad object");
   });
 

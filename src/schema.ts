@@ -21,6 +21,9 @@ import type {
   SyncPlan,
   RepoIdentity,
 } from "./types";
+// Wave-B contract types (additive copy from WAVE-B-CONTRACTS.md):
+// PendingOperation, SyncPlan*, RepoIdentity, ResolveOutcome, ConflictResolver, DiffEndpoint, LastSyncState additions.
+// Zod schemas added below for the serializable subset (pendingOps in lastSync, etc.). Runtime-only types (ResolveOutcome etc.) are re-declared or typed from src/types.
 
 export const providerKindSchema = z.enum(["github", "gitlab", "bitbucket", "gitea", "forgejo", "local"]);
 export const syncDirectionSchema = z.enum(["push-pull", "pull-only", "push-only"]);
@@ -57,12 +60,31 @@ export const syncPlanSchema = z.object({
     conflicted: z.number().int().nonnegative(),
   }),
 });
+
+export type SyncPlanType = z.infer<typeof syncPlanSchema>;
+
 export const repoIdentitySchema = z.object({
   providerId: z.string().min(1),
   repoId: z.string().min(1),
   branch: z.string().min(1),
   canonicalRemote: z.string().min(1),
 });
+
+export type RepoIdentityType = z.infer<typeof repoIdentitySchema>;
+
+// DiffEndpoint for truthful labeling (U01/U02). Not directly persisted in lastSync but part of the frozen contract surface.
+export const diffEndpointSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("baseline"), sha: z.string().min(1) }),
+  z.object({ kind: z.literal("head") }),
+  z.object({ kind: z.literal("remote-ref"), ref: z.string().min(1) }),
+  z.object({ kind: z.literal("explicit"), ref: z.string().min(1) }),
+]);
+export type DiffEndpointType = z.infer<typeof diffEndpointSchema>;
+
+// ResolveOutcome / ConflictResolver are runtime Promise contracts (see src/types.ts).
+// No Zod schema for the function type; the error shape is documented for UI keying.
+export const resolveOutcomeOkSchema = z.object({ ok: z.literal(true), applied: z.boolean() });
+export const resolveOutcomeErrSchema = z.object({ ok: z.literal(false), error: z.string(), retryable: z.boolean() });
 
 /** A repository path as `owner/repo` (GitLab nested groups allowed: `group/sub/repo`). */
 const repoPathSchema = z.string().trim().regex(

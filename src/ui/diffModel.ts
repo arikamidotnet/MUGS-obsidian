@@ -52,6 +52,12 @@ export interface DiffHunk {
 export interface DiffFile {
   name: string;
   hunks: DiffHunk[];
+  /** Binary file (content not shown as text). */
+  binary?: boolean;
+  /** For renames: original path. */
+  renamedFrom?: string;
+  /** For renames: new path (often same as name). */
+  renamedTo?: string;
 }
 
 export interface ParsedDiff {
@@ -86,6 +92,17 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
         files.push(state.file);
       }
       continue;
+    }
+    // Binary / rename markers (must be seen while a file is open)
+    const lower = rawLine.toLowerCase();
+    if (state.file) {
+      if (lower.includes("binary files") || lower.includes("git binary patch")) {
+        state.file.binary = true;
+      }
+      const rf = rawLine.match(/^rename from\s+(.+)$/i);
+      if (rf) state.file.renamedFrom = stripPrefix(rf[1]);
+      const rt = rawLine.match(/^rename to\s+(.+)$/i);
+      if (rt) state.file.renamedTo = stripPrefix(rt[1]);
     }
 
     const hunk = rawLine.match(HUNK_HEADER);

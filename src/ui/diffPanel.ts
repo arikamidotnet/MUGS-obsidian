@@ -179,10 +179,8 @@ export class MugsConflictsPanel extends ItemView {
       groupHeader.createSpan({ text: String(g.conflicts.length), cls: "mugs-chip mugs-chip-error" });
 
       for (const c of g.conflicts) {
-        const row = renderConflictRow(section, c, (conflict, choice) => void this.resolve(g.mappingId, conflict, choice));
+        const row = renderConflictRow(section, c, (conflict, choice) => void this.resolve(g.mappingId, conflict, choice), this.resolving);
         seen.add(c.path);
-        // Repaint any recorded resolution failure under its row — the editor-open
-        // guard names the exact file and remedy; the Notice alone vanishes.
         const error = this.resolveErrors[c.path];
         if (error) renderRowError(row, error);
       }
@@ -193,22 +191,28 @@ export class MugsConflictsPanel extends ItemView {
     }
   }
 
+  /** Paths whose resolution is in flight (disable whole group for that conflict until settles). */
+  private resolving: Set<string> = new Set();
+
   /** Resolve one file's conflict for its mapping, persist it, then refresh groups.
-   *  A failure (e.g. the file is open with unsaved changes) is recorded per path
-   *  and rendered inline under the affected row on the refresh — in addition to
-   *  the Notice — until the file is resolved or disappears. */
+   *  U03: whole action group disabled until promise; errors keyed; retryable keeps visible.
+   */
   private async resolve(mappingId: string, c: FileConflict, choice: ResolveChoice): Promise<void> {
+    const key = c.path;
+    this.resolving.add(key);
+    // Immediate re-render to reflect disabled group.
+    await this.render();
     try {
-      await getMugsContext().conflicts.resolveConflict({ mappingId, path: c.path, choice });
-      delete this.resolveErrors[c.path];
-      new Notice(`MUGS — resolved ${c.path} (${choice}).`);
+      await getMugsContext().conflicts.resolveConflict({ mappingId, path: key, choice });
+      this.resolving.delete(key);
+      delete this.resolveErrors[key];
+      new Notice(`MUGS — resolved ${key} (${choice}).`);
     } catch (err) {
-      const message = `Could not resolve ${c.path}: ${err instanceof Error ? err.message : String(err)}`;
-      this.resolveErrors[c.path] = message;
+      this.resolving.delete(key);
+      const message = `Could not resolve ${key}: ${err instanceof Error ? err.message : String(err)}`;
+      this.resolveErrors[key] = message;
       new Notice(`MUGS — ${message}`);
     }
-    // Always refresh groups afterwards: a success must remove the row (and update
-    // the remaining counts), a failure must re-sync any state a concurrent sync changed.
     void this.render();
   }
 }
