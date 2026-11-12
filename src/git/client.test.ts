@@ -31,10 +31,10 @@ describe("GitClient — command construction", () => {
     expect(last(r).args).toEqual(["clone", "https://host/repo.git", "/clones/repo"]);
   });
 
-  it("fetches the default remote (origin)", async () => {
+  it("fetches the default remote (origin) with stall detection", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--prune", "origin"]);
   });
 
   it("pulls in each mode with the right flags", async () => {
@@ -63,12 +63,12 @@ describe("GitClient — command construction", () => {
     expect(last(r).args).toEqual(["commit", "--message", "mugs push", "--author", "Ada <ada@example.com>"]);
   });
 
-  it("pushes with and without a branch", async () => {
+  it("pushes with and without a branch, with stall detection", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).push("origin", "main");
-    expect(last(r).args).toEqual(["push", "origin", "main"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin", "main"]);
     await client(r).push();
-    expect(last(r).args).toEqual(["push", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin"]);
   });
 
   it("mixed-resets to a ref", async () => {
@@ -99,17 +99,18 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("attaches the same helper to fetch and push, keeping the named remote", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     const c = client(r, "/c/y").withAuth({ username: "u", token: "t" });
+    const STALL = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"];
     await c.fetch();
-    expect(last(r).args).toEqual([...HELPER_ARGS, "fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, ...STALL, "fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toMatchObject({ MUGS_GIT_TOKEN: "t" });
     await c.push("origin", "main");
-    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, ...STALL, "push", "origin", "main"]);
   });
 
   it("leaves network commands untouched when no auth is set (local provider)", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r).fetch();
-    expect(last(r).args).toEqual(["fetch", "--prune", "origin"]);
+    expect(last(r).args).toEqual(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--prune", "origin"]);
     expect(last(r).opts?.env).toBeUndefined();
   });
 
@@ -117,7 +118,7 @@ describe("GitClient — HTTP(S) credentials", () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     const bound = client(r).withAuth({ username: "u", token: "t" }).at("/c/y");
     await bound.push("origin", "main");
-    expect(last(r).args).toEqual([...HELPER_ARGS, "push", "origin", "main"]);
+    expect(last(r).args).toEqual([...HELPER_ARGS, "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "push", "origin", "main"]);
     expect(last(r).opts).toMatchObject({ cwd: "/c/y", env: { MUGS_GIT_TOKEN: "t" } });
     // Even a local read like rev-parse carries the helper: on a blobless clone a
     // lazy blob fetch can trigger from any content-touching command.
@@ -134,7 +135,7 @@ describe("GitClient — HTTP(S) credentials", () => {
   it("throws readable errors that omit the credential-helper prefix", async () => {
     const r = new FakeRunner(() => ({ code: 128, stdout: "", stderr: "fatal: bad" }));
     await expect(client(r).withAuth({ username: "u", token: "t" }).fetch()).rejects.toThrow(
-      "git fetch --prune origin failed (128): fatal: bad",
+      "git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 fetch --prune origin failed (128): fatal: bad",
     );
   });
 });

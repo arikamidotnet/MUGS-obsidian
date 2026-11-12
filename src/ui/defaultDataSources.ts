@@ -130,22 +130,31 @@ export class StoreDiffDataSource implements DiffDataSource {
       const base = await this.resolveBase(client, mapping);
       if (!base) return { diffText: "", authorsByFile: {} }; // nothing to compare against yet
 
-      const diffText = await client.diff(base, to);
+      let diffText = "";
+      try {
+        diffText = await client.diff(base, to);
+      } catch {
+        diffText = "";
+      }
       const range = `${base}...${to}`;
       const log = await client.run(["log", `--max-count=300`, "--name-only", `--format=%an%x1f%ae%x1e`, range]);
       const authorsByFile: AuthorsByFile = log.code === 0 ? authorsByFileFromLog(log.stdout) : {};
-      return { diffText, authorsByFile };
+      return { diffText, authorsByFile, baseRef: base };
     } catch {
       return { diffText: "", authorsByFile: {} };
     }
   }
 
-  /** Resolve a sensible "from" ref: last synced remote SHA, else the mapping's
-   *  branch, else the clone's default (origin/HEAD) — matching the engine's
-   *  resolveSyncBranch instead of a hardcoded "main". */
+  /** Resolve a sensible "from" ref: last synced remote SHA (verified present in this clone),
+   *  else the mapping's branch tip, else origin/HEAD. Verifies the explicit baseline
+   *  SHA still exists (handles re-clones, GC, shallow histories, etc.). */
   private async resolveBase(client: GitClient, mapping: FolderMapping): Promise<string | undefined> {
     const explicit = storeLastSyncAccessor(this.store).lastRemoteSha(mapping.id);
-    if (explicit) return explicit;
+    if (explicit) {
+      const r = await client.run(["rev-parse", "--verify", "--quiet", explicit]);
+      if (r.code === 0) return explicit;
+      // recorded baseline no longer present in this clone — fall back
+    }
     const candidates = mapping.branch ? [`origin/${mapping.branch}`, "origin/HEAD"] : ["origin/HEAD"];
     for (const ref of candidates) {
       const r = await client.run(["rev-parse", "--verify", "--quiet", ref]);

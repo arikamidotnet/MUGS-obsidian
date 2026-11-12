@@ -27,6 +27,8 @@ const AUTHORS_LOG = "Ada Lovelace\u001fada@example.com\nnotes/day.md\nnotes/othe
 interface RunnerCfg {
   worktree?: boolean;
   originSha?: string | null;
+  /** When set, rev-parse --verify for this exact string succeeds (simulates a recorded lastRemoteSha that still exists). */
+  lastRemoteSha?: string;
   diffCode?: number;
 }
 
@@ -35,7 +37,11 @@ function makeRunner(cfg: RunnerCfg = {}) {
   return new FakeRunner((args) => {
     if (args[0] === "rev-parse") {
       if (args.includes("--is-inside-work-tree")) return worktree ? ok("true\n") : fail();
-      if (args.includes("--verify")) return cfg.originSha ? ok(`${cfg.originSha}\n`) : fail();
+      if (args.includes("--verify")) {
+        // Accept an explicit lastRemoteSha value if provided in cfg.
+        if (cfg.lastRemoteSha && args.includes(cfg.lastRemoteSha)) return ok(`${cfg.lastRemoteSha}\n`);
+        return cfg.originSha ? ok(`${cfg.originSha}\n`) : fail();
+      }
       return ok("headsha\n");
     }
     if (args[0] === "log") {
@@ -116,10 +122,45 @@ describe("StoreDiffDataSource.getDiff — graceful degradation", () => {
     await expect(ds.getDiff({ mappingId: "nope" })).resolves.toEqual({ diffText: "", authorsByFile: {} });
   });
 
+  it("returns baseRef when an explicit last-synced SHA resolves to a diff", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base123", status: "ok" } });
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner({ lastRemoteSha: "base123" }));
+    const res = await ds.getDiff({ mappingId: "m1" });
+    expect(res.diffText).toBe("@@ diff @@");
+    expect(res.baseRef).toBe("base123");
+  });
+
+  it("returns baseRef even when diff is empty (identical trees) so the UI can say 'no changes'", async () => {
+    // Runner returns a successful rev-parse for the explicit SHA, but diff returns empty
+    const runner = new FakeRunner((args) => {
+      if (args[0] === "rev-parse") {
+        if (args.includes("--is-inside-work-tree")) return ok("true\n");
+        if (args.includes("--verify")) return ok("verified\n");
+        return ok("headsha\n");
+      }
+      if (args[0] === "diff") return ok(""); // identical
+      if (args[0] === "log") return ok("");
+      return ok("");
+    });
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "abc123", status: "ok" } });
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", runner);
+    const res = await ds.getDiff({ mappingId: "m1" });
+    expect(res.diffText).toBe("");
+    expect(res.baseRef).toBe("abc123");
+  });
+
   it("returns empty when the mapping has no clone", async () => {
     const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base", status: "ok" } });
     const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner({ worktree: false }));
     await expect(ds.getDiff({ mappingId: "m1" })).resolves.toEqual({ diffText: "", authorsByFile: {} });
+  });
+
+  it("does not return baseRef when the clone is absent (no baseline available)", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base", status: "ok" } });
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner({ worktree: false }));
+    const res = await ds.getDiff({ mappingId: "m1" });
+    expect(res).toEqual({ diffText: "", authorsByFile: {} });
+    expect(res.baseRef).toBeUndefined();
   });
 
   it("swallows a git failure and returns an empty diff", async () => {
@@ -128,11 +169,42 @@ describe("StoreDiffDataSource.getDiff — graceful degradation", () => {
     await expect(ds.getDiff({ mappingId: "m1" })).resolves.toEqual({ diffText: "", authorsByFile: {} });
   });
 
-  it("returns the diff text and per-file authors using an explicit last-synced base", async () => {
+  it("returns empty (no baseRef) when diff command itself fails", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base", status: "ok" } });
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner({ diffCode: 1 }));
+    const res = await ds.getDiff({ mappingId: "m1" });
+    expect(res.diffText).toBe("");
+    expect(res.baseRef).toBeUndefined(); // failure path swallows and returns no base
+  });
+
+  it("falls back without baseRef when explicit lastRemoteSha no longer exists in the clone", async () => {
+    // rev-parse for explicit SHA fails (code != 0), so resolveBase should fall back
+    const runner = new FakeRunner((args) => {
+      if (args[0] === "rev-parse") {
+        if (args.includes("--is-inside-work-tree")) return ok("true\n");
+        if (args.includes("--verify") && args.includes("base123")) return fail(); // explicit gone
+        if (args.includes("--verify")) return ok("originsha\n");
+        return ok("headsha\n");
+      }
+      if (args[0] === "log") return ok(AUTHORS_LOG);
+      if (args[0] === "diff") return ok("@@ diff @@");
+      return ok("");
+    });
     const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base123", status: "ok" } });
-    const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner());
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", runner);
     const res = await ds.getDiff({ mappingId: "m1" });
     expect(res.diffText).toBe("@@ diff @@");
+    // Should have used the fallback origin/main, not the missing explicit SHA
+    expect(res.baseRef).toBe("origin/main");
+    expect(runner.calls.some((a) => a.includes("--verify") && a.includes("origin/main"))).toBe(true);
+  });
+
+  it("returns the diff text and per-file authors using an explicit last-synced base", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", lastRemoteSha: "base123", status: "ok" } });
+    const ds = new StoreDiffDataSource(store, ".mugs-clones", makeRunner({ lastRemoteSha: "base123" }));
+    const res = await ds.getDiff({ mappingId: "m1" });
+    expect(res.diffText).toBe("@@ diff @@");
+    expect(res.baseRef).toBe("base123");
     expect(res.authorsByFile).toEqual({
       "notes/day.md": [{ name: "Ada Lovelace", email: "ada@example.com" }],
       "notes/other.md": [{ name: "Ada Lovelace", email: "ada@example.com" }],
@@ -145,6 +217,7 @@ describe("StoreDiffDataSource.getDiff — graceful degradation", () => {
     const ds = new StoreDiffDataSource(store, ".mugs-clones", runner);
     const res = await ds.getDiff({ mappingId: "m1" });
     expect(res.diffText).toBe("@@ diff @@");
+    expect(res.baseRef).toBe("origin/main");
     // The fallback rev-parse origin/branch was consulted.
     expect(runner.calls.some((a) => a.includes("--verify") && a.includes("origin/main"))).toBe(true);
   });

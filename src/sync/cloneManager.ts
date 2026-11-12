@@ -87,6 +87,9 @@ export interface LastSyncAccessor {
   vaultPopulated?(mappingId: string): boolean | undefined;
   /** Optional: mark the mapping's vault folder as populated by a mirror-pull. */
   recordVaultSync?(mappingId: string): void;
+  /** Optional: epoch ms of the mapping's most recent completed pull or push —
+   *  the steady-state shortcut's mtime reference point. */
+  lastCompletedAt?(mappingId: string): number | undefined;
 }
 
 /** Writes merged file content (and removes deleted files) into a clone's working tree. */
@@ -349,7 +352,15 @@ export class CloneManager {
     }
     if (firstPush) return this.firstSyncPush(mapping, branch, c, dir, status, committer);
 
-    status?.(base === "" ? "first sync: fetching remote" : "fetching remote changes");
+    // Push-only mappings still fetch — the remote tip is what a push must build
+    // on to stay fast-forward — but the label should say why, not imply pulling.
+    status?.(
+      base === ""
+        ? "first sync: fetching remote"
+        : mapping.direction === "push-only"
+          ? "checking remote tip"
+          : "fetching remote changes",
+    );
     await c.fetch();
     const localSha = await c.currentHead();
     const remoteRef = `origin/${branch}`;
@@ -381,7 +392,7 @@ export class CloneManager {
     // the remote tip, ours = the mapping's vault folder (via the mirror) or, without
     // a mirror, the clone's own HEAD (legacy clone↔remote semantics). Clean results
     // land in the clone's working tree; genuine conflicts are surfaced below.
-    const merged = await this.mergeSides(mapping, c, dir, baseSha, localSha, remoteRef, status);
+    const merged = await this.mergeSides(mapping, c, dir, baseSha, localSha, remoteRef, remoteSha, status);
 
     if (merged.conflicts.length > 0) {
       // Replace-by-path, not append: a fresh divergence supersedes the stored record
@@ -545,10 +556,40 @@ export class CloneManager {
     baseSha: string,
     localSha: string,
     remoteRef: string,
+    remoteSha: string,
     status?: (m: string) => void,
   ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; vaultByRepo: Map<string, string>; autoResolvedPaths: string[] }> {
-    const clonePaths = (await c.lsFiles()).filter((p) => this.inScope(mapping, p) && this.mirrorListable(p));
-    const vaultFiles = await this.readVaultFiles(mapping);
+    // Steady-state shortcut (push-only mappings): when the remote tip equals the
+    // recorded baseline and a vault file's mtime predates the last completed
+    // pass, ours == theirs == base — the per-file vault read AND `git show` are
+    // skipped (git's own index stat-cache idea). On a 2,000-file vault this
+    // collapses an idle pass from minutes to seconds, so the status bar stops
+    // living on "⟳ syncing". Push-pull/pull-only mappings keep the full path:
+    // mirrorPull needs vault content for its no-op write detection.
+    const steadyState = mapping.direction === "push-only" && this.vaultMirror?.mtime !== undefined;
+    const remoteUnchanged = baseSha !== "" && remoteSha === baseSha;
+    const lastDone = remoteUnchanged ? (this.syncs.lastCompletedAt?.(mapping.id) ?? 0) : 0;
+    const staleRels = new Set<string>();
+    if (steadyState && remoteUnchanged) {
+      for (const rel of await this.vaultMirror!.list(mapping.localFolder)) {
+        const repoPath = vaultToRepoPath(mapping, rel);
+        if (!this.inScope(mapping, repoPath) || !this.mirrorListable(repoPath)) continue;
+        let m: number | undefined;
+        try {
+          m = await this.vaultMirror!.mtime?.(mapping.localFolder, rel);
+        } catch {
+          m = undefined; // unreadable -> treat as fresh (safe direction)
+        }
+        if (m !== undefined && m <= lastDone) staleRels.add(rel);
+      }
+    }
+    const isStale = (repoPath: string): boolean => {
+      const rel = repoToVaultPath(mapping, repoPath);
+      return rel !== null && staleRels.has(rel);
+    };
+    const clonePaths = (await c.lsFiles())
+      .filter((p) => this.inScope(mapping, p) && this.mirrorListable(p) && !isStale(p));
+    const vaultFiles = await this.readVaultFiles(mapping, (rel) => staleRels.has(rel));
     const vaultByRepo = new Map<string, string>();
     for (const f of vaultFiles) {
       const repoPath = vaultToRepoPath(mapping, f.path);
@@ -750,14 +791,16 @@ export class CloneManager {
   }
 
   /** List + read the mapping's vault files (folder-relative). Empty without a
-   *  mirror. One unreadable/locked vault file skips only that file for this pass
-   *  — it must not abort the whole mapping (which would block push AND pull until
-   *  it clears). */
-  private async readVaultFiles(mapping: FolderMapping): Promise<MirrorFile[]> {
+   *  mirror. `skipRel` filters files the caller already knows are unchanged
+   *  (the steady-state shortcut). One unreadable/locked vault file skips only
+   *  that file for this pass — it must not abort the whole mapping (which would
+   *  block push AND pull until it clears). */
+  private async readVaultFiles(mapping: FolderMapping, skipRel?: (rel: string) => boolean): Promise<MirrorFile[]> {
     if (!this.vaultMirror) return [];
     const rels = await this.vaultMirror.list(mapping.localFolder);
     const files: MirrorFile[] = [];
     for (const rel of rels) {
+      if (skipRel?.(rel)) continue;
       try {
         files.push({ path: rel, content: await this.vaultMirror.read(mapping.localFolder, rel) });
       } catch (err) {

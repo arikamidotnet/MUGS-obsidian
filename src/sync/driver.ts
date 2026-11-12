@@ -241,6 +241,12 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
     vaultPopulated: (id) => store.getSettings().lastSync[id]?.vaultPopulated,
     recordVaultSync: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, vaultPopulated: true })),
+    // Newest completed pull/push — the steady-state shortcut's mtime reference.
+    lastCompletedAt: (id) => {
+      const s = store.getSettings().lastSync[id];
+      const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
+      return at > 0 ? at : undefined;
+    },
   };
 }
 

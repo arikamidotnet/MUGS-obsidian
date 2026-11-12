@@ -58,6 +58,8 @@ interface ContentScenario {
   /** Epoch seconds served by every `git log -1 --format=%ct <ref> -- <path>` call
    *  (the remote-side recency input for automatic conflict resolution). */
   pathLogTimeSecs?: number;
+  /** Paths served by `git ls-files` (the clone-side tracked-file list). */
+  lsFiles?: string[];
 }
 
 /** A git runner that never touches disk: rev-parse/merge-base/show/diff are canned,
@@ -105,6 +107,7 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
         return { code: 0, stdout: changedPaths.join("\n"), stderr: "" };
       }
       if (cmd === "log") return { code: 0, stdout: o.pathLogTimeSecs !== undefined ? String(o.pathLogTimeSecs) : "", stderr: "" };
+      if (cmd === "ls-files") return { code: 0, stdout: (o.lsFiles ?? []).join("\n"), stderr: "" };
       return { code: 0, stdout: "", stderr: "" }; // clone / fetch / ls-files / reset / add / commit / push
     },
   };
@@ -438,6 +441,48 @@ describe("syncAllMappings — sync outcomes", () => {
     expect(writes).toEqual([[`${CLONE_ROOT}/c1/m1/todo.md`, "a\nLOCAL\nc\n"]]);
     expect(calls.some((cl) => cl.includes("add") && cl.includes("todo.md"))).toBe(true);
     expect(calls.some((cl) => cl.includes("commit"))).toBe(true);
+  });
+
+  it("skips per-file reads and shows entirely on an unchanged push-only pass (steady-state shortcut)", async () => {
+    // Regression: every pass re-read every vault file and ran `git show` per
+    // in-scope path (~2 minutes on a 2,000-file vault — the status bar was busy
+    // ~40% of the time). With the remote tip unchanged and vault mtimes
+    // predating the last completed pass, the merge universe is empty and the
+    // pass does no content work at all.
+    const LAST_DONE = Date.now();
+    const reads: string[] = [];
+    const vaultMirror = {
+      list: async () => ["todo.md"],
+      read: async (_folder: string, rel: string) => { reads.push(rel); return "a\nb\nc\n"; },
+      write: async () => {},
+      remove: async () => {},
+      mtime: async () => LAST_DONE - 1000, // untouched since the last pass
+    };
+    const { runner, calls } = makeRunner({
+      head: "R1", remote: "R1", ancestor: true, cloned: true, // remote tip == baseline
+      lsFiles: ["todo.md"], // the clone tracks the file — without the shortcut it would be shown
+    });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping({ direction: "push-only" })],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: {
+        lastRemoteSha: () => "R1",
+        recordPull: () => undefined,
+        recordPush: () => undefined,
+        recordConflict: () => undefined,
+        lastCompletedAt: () => LAST_DONE,
+      },
+      vaultMirror,
+    });
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+    // No content work at all: no `git show`, no vault reads — even though the
+    // clone tracks the file (ls-files listed it) and the mirror has it.
+    expect(calls.some((cl) => cl.includes("show"))).toBe(false);
+    expect(reads).toEqual([]);
   });
 
   it("auto-merges a clean divergence into the working tree and pushes", async () => {

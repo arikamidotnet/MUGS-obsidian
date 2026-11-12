@@ -145,7 +145,9 @@ export class GitClient {
   async fetch(remote = "origin"): Promise<GitResult> {
     // --prune drops remote-tracking refs for branches deleted/renamed upstream,
     // so a removed branch can't keep syncing a ghost tip (or resurrect on push).
-    return this.must(["fetch", "--prune", remote]);
+    // lowSpeed* aborts a stalled HTTPS transfer (<1KB/s for 60s) — without it a
+    // dead connection hangs the sync pass (and the in-flight guard) forever.
+    return this.must(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60", "fetch", "--prune", remote]);
   }
 
   async pull(remote: string, branch: string, mode: PullMode = "rebase"): Promise<GitResult> {
@@ -183,7 +185,10 @@ export class GitClient {
   }
 
   async push(remote = "origin", branch?: string): Promise<GitResult> {
-    return this.must(branch ? ["push", remote, branch] : ["push", remote]);
+    // lowSpeed* aborts a stalled HTTPS push (see fetch) so a dead connection
+    // surfaces as a failed mapping instead of hanging the pass forever.
+    const stall = ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"];
+    return this.must(branch ? [...stall, "push", remote, branch] : [...stall, "push", remote]);
   }
 
   /** Tracked files (index), one per line — the clone-side file list for mirroring.

@@ -37,6 +37,8 @@ export interface DiffQuery {
 export interface DiffResult {
   diffText: string;
   authorsByFile: AuthorsByFile;
+  /** Resolved baseline ref or SHA used for the comparison, when known. */
+  baseRef?: string;
 }
 
 /** Supplies the data the Diff view renders. */

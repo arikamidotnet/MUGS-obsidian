@@ -167,12 +167,22 @@ export class DiffView extends ItemView {
     const conflicts = await getMugsContext().conflicts.getConflicts({ mappingId });
     renderConflicts(conflicts, output, (c, choice) => void this.resolveFile(c, choice));
 
-    const { diffText, authorsByFile } = await getMugsContext().diff.getDiff({ mappingId, ref });
+    const { diffText, authorsByFile, baseRef } = await getMugsContext().diff.getDiff({ mappingId, ref });
     if (!diffText.trim()) {
-      output.createEl("p", {
-        text: "No comparison available for this mapping yet — sync it first so a baseline exists.",
-        cls: "mugs-muted",
-      });
+      // Two distinct empty cases:
+      // 1) No usable baseline at all → tell the user to sync first.
+      // 2) Baseline resolved but no diff (trees identical) → explicit, friendly message.
+      if (baseRef) {
+        output.createEl("p", {
+          text: `No changes since last sync (baseline: ${baseRef}).`,
+          cls: "mugs-muted",
+        });
+      } else {
+        output.createEl("p", {
+          text: "No comparison available for this mapping yet — sync it first so a baseline exists.",
+          cls: "mugs-muted",
+        });
+      }
       return;
     }
     const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);

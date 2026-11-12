@@ -115,7 +115,7 @@ const collectText = (el: any): string => {
 const emptyContext = () =>
   setMugsContext({
     map: { getRows: async () => [] },
-    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {} }) },
+    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined }) },
     conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
   });
 
@@ -123,7 +123,7 @@ const emptyContext = () =>
 const diffNoBaselineContext = () =>
   setMugsContext({
   map: { getRows: async () => [{ mapping: { id: "m1", label: "Notes", remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" }, status: "ok" }] },
-    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {} }) },
+    diff: { getDiff: async () => ({ diffText: "", authorsByFile: {}, baseRef: undefined }) },
     conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
   });
 
