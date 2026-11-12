@@ -1,9 +1,9 @@
 {
   "id": "mugs-obsidian",
   "name": "MUGS — Multi-User Git Sync",
-"version": "0.3.25",
-"minAppVersion": "1.8.0",
+  "version": "0.3.26",
+  "minAppVersion": "1.8.0",
   "description": "Fine-grained, folder-mapped git sync across all git backends (GitLab-first), with per-user credentials stored inside the vault and multi-user collaboration via shared repos.",
   "author": "MUGS",
-"isDesktopOnly": true
+  "isDesktopOnly": true
 }
