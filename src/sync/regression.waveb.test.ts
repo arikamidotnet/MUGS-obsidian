@@ -335,15 +335,26 @@ describe("S03: shared-clone isolation + advisory lock + legacy inventory", () =>
 
 describe("E02: same-size/same-mtime replacement", () => {
   it("is detected when the watcher is uncertain (full re-verify), and the shortcut still skips when certain", async () => {
+    // Native mtimes can contain micro/nanoseconds that lose precision when
+    // round-tripped through JS milliseconds -> utimes seconds. Establish an
+    // exactly representable whole-second time BEFORE recording the baseline.
+    const file = join(f.synced, "F.md");
+    const mtimeSeconds = 1_700_000_000;
+    utimesSync(file, mtimeSeconds, mtimeSeconds);
+    const baselineStat = statSync(file);
+    expect(baselineStat.mtimeMs).toBe(mtimeSeconds * 1000);
     // Push-only steady state: pass 1 records the snapshot.
     await syncAllMappings(f.deps({ mappings: PUSH_ONLY }));
     const snap = f.store.getSettings().lastSync["m"]?.contentSnapshot?.["F.md"];
     expect(snap).toBeDefined();
+    expect(snap).toEqual([baselineStat.mtimeMs, baselineStat.size]);
     const shaV1 = remoteTip();
 
     // Same-size replacement with the mtime forged back to the snapshot pair.
-    writeFileSync(join(f.synced, "F.md"), "V1\n");
-    utimesSync(join(f.synced, "F.md"), snap![0] / 1000, snap![0] / 1000);
+    writeFileSync(file, "V1\n");
+    utimesSync(file, mtimeSeconds, mtimeSeconds);
+    const restoredStat = statSync(file);
+    expect([restoredStat.mtimeMs, restoredStat.size]).toEqual(snap);
 
     // Certain pass: the exact stat pair (predating the pass) skips — shortcut intact.
     f.runner.reset();
