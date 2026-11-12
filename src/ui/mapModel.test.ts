@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { FolderMapping } from "../types";
-import { buildMapGraph, type MapContext } from "./mapModel";
+import { buildMapGraph, describeMapRow, directionHint, type MapContext } from "./mapModel";
 
 function mapping(over: Partial<FolderMapping>): FolderMapping {
   return {
@@ -68,6 +68,68 @@ describe("buildMapGraph — edges", () => {
   it("defaults status to pending when the mapping has no last-sync state", () => {
     const { edges } = buildMapGraph([mapping({ id: "m1" })]);
     expect(edges[0].status).toBe("pending");
+  });
+});
+
+describe("describeMapRow — honest status vocabulary", () => {
+  it("maps ok/up-to-date to \"in sync\" regardless of direction", () => {
+    for (const status of ["ok", "up-to-date"] as const) {
+      expect(describeMapRow({ status, direction: "push-pull" }).label).toBe("in sync");
+    }
+  });
+
+  it("says a conflict mapping \"needs merge\" with the file count in the hover reason", () => {
+    const d = describeMapRow({ status: "conflict", direction: "push-pull", conflictCount: 2 });
+    expect(d.label).toBe("needs merge");
+    expect(d.tone).toBe("error");
+    expect(d.reason).toContain("2 files need a manual merge");
+  });
+
+  it("a conflict mapping without a count still points at the Conflicts panel", () => {
+    const d = describeMapRow({ status: "conflict", direction: "push-pull" });
+    expect(d.reason).toContain("Conflicts panel");
+  });
+
+  it("renders an error mapping as \"failed\" with a retry hint", () => {
+    const d = describeMapRow({ status: "error", direction: "push-pull" });
+    expect(d.label).toBe("failed");
+    expect(d.reason).toContain("last sync failed");
+  });
+
+  it("a skip reason wins over the recorded status — \"skipped\" with the reason on hover", () => {
+    // A mapping whose credential was deleted still says "ok" in lastSync; the row
+    // must not pretend sync is running fine when it can never run at all.
+    const d = describeMapRow({ status: "ok", direction: "push-pull", skipReason: "no credential" });
+    expect(d.label).toBe("skipped");
+    expect(d.reason).toBe("no credential");
+    expect(d.tone).toBe("warning");
+  });
+
+  it("an unknown/pending status reads as \"pending\" with a sync hint", () => {
+    const d = describeMapRow({ status: "pending", direction: "push-pull" });
+    expect(d.label).toBe("pending");
+    expect(d.reason).toContain("not synced yet");
+  });
+
+  it("an in-sync push-only mapping carries the never-pulls hint", () => {
+    const d = describeMapRow({ status: "ok", direction: "push-only" });
+    expect(d.label).toBe("in sync");
+    expect(d.reason).toContain("never downloaded");
+    expect(describeMapRow({ status: "ok", direction: "pull-only" }).reason).toBeUndefined();
+  });
+});
+
+describe("directionHint — what the arrow does NOT do", () => {
+  it("push-only says remote changes are never downloaded", () => {
+    expect(directionHint("push-only")).toContain("never downloaded");
+  });
+
+  it("pull-only says local changes are never uploaded", () => {
+    expect(directionHint("pull-only")).toContain("never uploaded");
+  });
+
+  it("push-pull says both directions", () => {
+    expect(directionHint("push-pull")).toContain("both directions");
   });
 });
 

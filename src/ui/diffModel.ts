@@ -177,6 +177,27 @@ function basename(p: string): string {
 }
 
 /**
+ * Validate a ref typed into the Diff picker BEFORE it reaches git. Returns a
+ * short, jargon-free reason when the text can't be a usable branch/tag/commit
+ * (empty, spaces, a leading dash that git would parse as an option, a range,
+ * control characters, …). Pure — pinned by tests; the view shows the message
+ * inline instead of round-tripping a hopeless ref and reporting a git error.
+ */
+export function validateRef(ref: string): string | undefined {
+  const s = ref.trim();
+  if (!s) return "Enter a branch, tag, or commit to compare — for example main or HEAD.";
+  if (/\s/.test(s)) return "A ref can't contain spaces. Use the branch or tag name, or the commit SHA.";
+  if (s.startsWith("-")) return "A ref can't start with a dash.";
+  if (s.includes("..")) return "Compare one ref at a time — ranges like a..b aren't supported here.";
+  if (/[\u0000-\u001f\u007f]/.test(s)) return "A ref can't contain control characters.";
+  if (s.startsWith("/") || s.endsWith("/")) return "A ref can't start or end with a slash.";
+  if (s.includes("@{")) return "A ref can't contain '@{'.";
+  if (s.endsWith(".lock")) return "A ref can't end with '.lock'.";
+  if (s.endsWith(".")) return "A ref can't end with a period.";
+  return undefined;
+}
+
+/**
  * Parse `git log --name-only -n <limit> --format=%an%x1f%ae%x1e` output into a
  * file → latest-author map. Git prints newest first, so the first author seen
  * for a file is its most recent committer. Fields are separated by US (\x1f)

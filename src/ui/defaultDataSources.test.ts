@@ -125,6 +125,50 @@ describe("StoreMapDataSource.getRows — owner attribution", () => {
   });
 });
 
+describe("StoreMapDataSource.getRows — honest skip reasons + conflict counts", () => {
+  it("marks a mapping with no credential as skipped (with reason) instead of quietly pending", async () => {
+    const store = storeWith([mapping({ providerId: "deleted-cred" })], { m1: { mappingId: "m1", status: "ok" } });
+    const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
+    const rows = await ds.getRows();
+    expect(rows[0].skipReason).toContain("no credential selected");
+    expect(rows[0].status).toBe("ok"); // recorded status kept; the view layers "skipped" on top
+  });
+
+  it("flags a local-provider credential with no repo path", async () => {
+    const store = storeWith([mapping()]);
+    store.upsertCredential({ id: "c1", label: "local", kind: "local", token: "", baseUrl: "" });
+    const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
+    const rows = await ds.getRows();
+    expect(rows[0].skipReason).toContain("repo path");
+  });
+
+  it("sets no skip reason when a usable credential exists", async () => {
+    const store = storeWith([mapping()]);
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "tok", baseUrl: "https://gitlab.example.com/api/v4" });
+    const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
+    const rows = await ds.getRows();
+    expect(rows[0].skipReason).toBeUndefined();
+  });
+
+  it("counts only UNresolved conflicts so the Map card can say \"needs merge (n files)\"", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "conflict" } });
+    store.setConflicts("m1", [
+      conflict({ path: "open.md" }),
+      conflict({ path: "done.md", resolved: true, resolvedContent: "OURS" }),
+    ]);
+    const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
+    const rows = await ds.getRows();
+    expect(rows[0].conflictCount).toBe(1);
+  });
+
+  it("omits the conflict count when nothing is unresolved", async () => {
+    const store = storeWith([mapping()]);
+    const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
+    const rows = await ds.getRows();
+    expect(rows[0].conflictCount).toBeUndefined();
+  });
+});
+
 // --- StoreDiffDataSource ---------------------------------------------------
 
 describe("StoreDiffDataSource.getDiff — graceful degradation", () => {

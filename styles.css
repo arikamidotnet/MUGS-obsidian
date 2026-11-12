@@ -270,6 +270,9 @@
 .mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* "never pulls" chip on push-only cards — a quiet warning that remote content never flows back. */
+.mugs-map-card-never { flex-shrink: 0; }
+
 /* --- Diff view ------------------------------------------------------------- */
 
 .mugs-diff-view { padding: 12px 8px 16px; }
@@ -306,6 +309,12 @@
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
+/* Recent-refs dropdown next to the ref input (hidden until a first ref is applied). */
+.mugs-diff-ref-dropdown { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); font-size: var(--font-ui-smaller); }
+
+/* Inline message under the picker when the typed ref can't be a branch/tag/commit. */
+.mugs-diff-ref-error { color: var(--text-error, #f85149); font-size: var(--font-ui-smaller); margin: 8px 0; }
+
 .mugs-diff-range-label, .mugs-diff-mapping-name, .mugs-diff-range-hint { font-size: var(--font-ui-smaller); }
 .mugs-diff-range-label { color: var(--text-muted); }
 .mugs-diff-range-hint { color: var(--text-faint); margin-left: 6px; }
@@ -326,6 +335,9 @@
 
 /* Conflict row */
 .mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+
+/* Inline error under a row whose resolution failed (e.g. file open with unsaved changes). */
+.mugs-conflict-row-error { margin: 2px 0 6px; font-size: var(--font-ui-smaller); color: var(--text-error, #f85149); }
 .mugs-conflict-path {
   font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;

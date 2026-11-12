@@ -55,6 +55,64 @@ export interface MapContext {
   status?: SyncStatus;
 }
 
+/** The Map view's display state for one row, in status-bar vocabulary. */
+export interface MapRowDisplay {
+  /** Status-bar word: "in sync" | "pending" | "needs merge" | "skipped" | "failed". */
+  label: string;
+  tone: "success" | "warning" | "error";
+  /** Hover explanation — why a mapping was skipped, what needs merging, etc. */
+  reason?: string;
+}
+
+/**
+ * Honest display state for one Map row, using the status bar's vocabulary
+ * ("needs merge" instead of a bare "conflict", "failed" for errors, "skipped"
+ * when sync cannot run at all). A mapping that cannot sync — e.g. its credential
+ * was deleted — reads as skipped with the reason on hover, never as a quiet
+ * "pending" card that implies sync will get to it eventually.
+ */
+export function describeMapRow(input: {
+  status: SyncStatus;
+  direction: SyncDirection;
+  /** Set when sync cannot run for this mapping at all (skip outcome from the driver). */
+  skipReason?: string;
+  /** Unresolved conflict files awaiting manual resolution, when known. */
+  conflictCount?: number;
+}): MapRowDisplay {
+  if (input.skipReason) return { label: "skipped", tone: "warning", reason: input.skipReason };
+  switch (input.status) {
+    case "conflict":
+      return {
+        label: "needs merge",
+        tone: "error",
+        reason: input.conflictCount
+          ? `${input.conflictCount} file${input.conflictCount === 1 ? "" : "s"} need a manual merge — open the Conflicts panel`
+          : "conflicting changes need a manual merge — open the Conflicts panel",
+      };
+    case "error":
+      return { label: "failed", tone: "error", reason: "the last sync failed — run Sync again or check the MUGS notices" };
+    case "ok":
+    case "up-to-date":
+      return input.direction === "push-only"
+        ? { label: "in sync", tone: "success", reason: "push-only: your changes upload, but remote changes are never downloaded" }
+        : { label: "in sync", tone: "success" };
+    default:
+      return { label: "pending", tone: "warning", reason: "not synced yet — run a sync" };
+  }
+}
+
+/** Hover hint for a mapping's sync direction — says what the arrow does NOT do. */
+export function directionHint(direction: SyncDirection): string {
+  switch (direction) {
+    case "push-only":
+      return "Push only: your changes upload to the remote; remote changes are never downloaded.";
+    case "pull-only":
+      return "Pull only: remote changes download to your vault; local changes are never uploaded.";
+    default:
+      return "Push + pull: changes sync in both directions.";
+  }
+}
+
 /** Status-driven colors — take precedence over direction colors. */
 const STATUS_COLOR: Record<SyncStatus, string> = {
   ok: "#3fb950", // green

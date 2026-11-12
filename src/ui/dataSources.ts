@@ -20,6 +20,11 @@ export interface MapRow {
   lastPushAt?: number;
   /** Most recent pull time (ms epoch), if known. */
   lastPullAt?: number;
+  /** Set when sync cannot run for this mapping at all (e.g. its credential was
+   *  deleted) — the Map view renders the row as skipped with this on hover. */
+  skipReason?: string;
+  /** Unresolved conflict files awaiting manual resolution, when > 0. */
+  conflictCount?: number;
 }
 
 /** Supplies the data the Map view renders. */
