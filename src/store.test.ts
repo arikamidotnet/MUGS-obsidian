@@ -719,16 +719,12 @@ describe("MugsStore conflict persistence", () => {
 describe("upsertCredential metadata-edit semantics (masked/cipher re-supply vs real secret)", () => {
   const PASS = "correct horse battery staple";
 
-  // DEFECT PIN (it.fails): the display mask produced by redactToken() keeps the
-  // LAST 4 characters ("•••…dwY="), but isMasked (store.ts) only recognizes an
-  // ALL-bullet token (/^•+$/). A masked re-supply — the exact shape the UI sends
-  // for a metadata-only edit — is therefore classified as a REAL secret and
-  // poisons runtimeTokens: getToken then returns bullets, and sync would hand
-  // them to git. PRODUCTION FIX NEEDED (store wave): recognize the display-mask
-  // form in isMasked/upsertCredential (e.g. treat a token equal to
-  // redactToken(stored) as metadata-only). Convert to a normal test when fixed —
-  // an it.fails that starts passing fails the suite and forces this conversion.
-  test.fails("masked re-supply (metadata-only edit) preserves the runtime plaintext token", async () => {
+  // The display mask produced by redactToken() keeps the LAST 4 characters,
+  // so isMasked (all-bullets) alone cannot recognize it: a masked re-supply —
+  // the exact shape the UI sends for a metadata-only edit — is classified by
+  // comparison with redactToken(stored) instead. (Previously pinned as a
+  // defect with it.fails; production fix landed in the Wave B integration.)
+  it("masked re-supply (metadata-only edit) preserves the runtime plaintext token", async () => {
     const io = new MemoryIO(null);
     const store = new MugsStore(io);
     await store.load();

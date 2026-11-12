@@ -424,21 +424,29 @@ export class MugsStore {
    * durably persisted, and prevents persisting an unusable LOCKED_PERSIST_MASK
    * for a brand-new token.
    *
-   * Re-passing a masked or already-cipher form (e.g., to change label) is allowed.
-   */  upsertCredential(input: Omit<Credential, "token"> & { token: string }): Credential {
-    const isRealSecret = !isMasked(input.token) && !isStoredCipher(input.token);
-    if (isRealSecret && this.isLocked()) {
+   * METADATA-ONLY EDITS: re-passing the credential's masked display form (the UI
+   * only ever sees masked tokens) or its already-cipher stored form updates ONLY
+   * the metadata (label/kind/baseUrl) — the DURABLE token is preserved verbatim
+   * and the runtime plaintext map + any unreadable marker are untouched. A
+   * display mask keeps its last 4 characters, so isMasked (all-bullets) alone
+   * cannot recognize it: a re-supply equal to redactToken(stored) also counts.
+   * Without this, a label rename would poison the token map (sync would hand
+   * the mask/cipher to git as if it were the secret).
+   */
+  upsertCredential(input: Omit<Credential, "token"> & { token: string }): Credential {
+    const prior = this.settings.credentials.find((c) => c.id === input.id);
+    const isStoredRedaction = prior !== undefined && input.token === redactToken(prior.token);
+    const isMetadataOnly =
+      prior !== undefined && (isMasked(input.token) || isStoredCipher(input.token) || isStoredRedaction);
+    if (!isMetadataOnly && this.isLocked()) {
       throw new Error("MUGS: cannot add or replace a real credential secret while the store is locked");
     }
-    const cred = { ...input };
+    // Metadata-only: keep the prior durable token; only the metadata fields change.
+    const cred = isMetadataOnly && prior ? { ...input, token: prior.token } : { ...input };
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
-    if (isRealSecret) {
-      // Only a real secret supersedes the runtime plaintext and clears an
-      // undecryptable marker. A metadata-only edit (masked/cipher re-supply)
-      // must PRESERVE both — overwriting runtimeTokens with the stored
-      // ciphertext/mask would poison the live token map (sync would hand the
-      // mask/cipher to git as if it were the secret).
+    if (!isMetadataOnly) {
+      // A real secret supersedes the runtime plaintext and clears an undecryptable marker.
       this.runtimeTokens.set(cred.id, cred.token);
       this.unreadableTokens.delete(cred.id);
     }
