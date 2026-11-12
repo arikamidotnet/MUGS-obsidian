@@ -29,10 +29,15 @@ import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHel
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
 import { decideRun, debounceFireTimes } from "./sync/schedule";
 import type { VaultMirror, WorkingTreeWriter } from "./sync/cloneManager";
+import { cloneDir } from "./sync/cloneManager";
+import { repoToVaultPath } from "./sync/mirror";
 import { normalizeVaultPath } from "./schema";
 import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
 import { toAdapterPath } from "./sync/adapterPath";
+import { createConflictResolver } from "./runtime/conflictResolver";
+import type { PendingOperation, FileConflict } from "./types";
+import type { ConflictDataSource, ConflictQuery, ConflictResolutionQuery, ConflictResolutionResult } from "./ui/dataSources";
 import { MCP_SERVER_NAME } from "./mcp/server";
 
 // Injected at build time by esbuild (define) from styles.css so the plugin's
@@ -167,18 +172,37 @@ export default class MugsPlugin extends Plugin {
     } catch (err) {
       console.warn("MUGS: could not resolve vault base path — using empty clone root.", err);
     }
+    // S07 (contract §5): the manual-resolution TRANSACTION is owned by app-runtime.
+    // The checkpoint StoreConflictDataSource is wrapped so every resolution routes
+    // through the contract transaction (identity check → op lock → originals-first →
+    // clone → vault → state clear → save). Seam to flag: diff-ui will consume the
+    // resolver directly at integration; until then the panel keeps calling the
+    // context's resolveConflict and sees failures as thrown errors (which it renders).
+    const checkpointConflicts = new StoreConflictDataSource(this.store, cloneRoot, this.workingTreeWriter(), {
+      // Manual resolutions must land in the VAULT too, or the next sync reads the
+      // stale vault copy as "ours" and the conflict resurfaces every pass.
+      vault: this.workingTreeWriter(),
+      vaultRoot: vaultBase,
+      // EditorOpenGuard keys on vault-root-relative paths; translate before checking.
+      writeSafe: (abs) =>
+        this.editorOpen.isWriteSafe(vaultBase !== "" && abs.startsWith(`${vaultBase}/`) ? abs.slice(vaultBase.length + 1) : abs),
+    });
+    const resolverFactory = this.conflictResolverFactory();
+    const conflictsSource: ConflictDataSource = {
+      getConflicts: (q: ConflictQuery) => checkpointConflicts.getConflicts(q),
+      resolveConflict: async (q: ConflictResolutionQuery): Promise<ConflictResolutionResult> => {
+        const stored = this.store.getConflicts(q.mappingId).find((c) => c.path === q.path);
+        if (!stored) return { remaining: 0 };
+        const outcome = await resolverFactory.forMapping(q.mappingId)(stored, q.choice);
+        if (!outcome.ok) throw new Error(outcome.error); // panel renders per-path + Notice
+        const remaining = this.store.getConflicts(q.mappingId).filter((c) => !c.resolved).length;
+        return { remaining };
+      },
+    };
     setMugsContext({
       map: new StoreMapDataSource(this.store, cloneRoot),
       diff: new StoreDiffDataSource(this.store, cloneRoot),
-      conflicts: new StoreConflictDataSource(this.store, cloneRoot, this.workingTreeWriter(), {
-        // Manual resolutions must land in the VAULT too, or the next sync reads the
-        // stale vault copy as "ours" and the conflict resurfaces every pass.
-        vault: this.workingTreeWriter(),
-        vaultRoot: vaultBase,
-        // EditorOpenGuard keys on vault-root-relative paths; translate before checking.
-        writeSafe: (abs) =>
-          this.editorOpen.isWriteSafe(vaultBase !== "" && abs.startsWith(`${vaultBase}/`) ? abs.slice(vaultBase.length + 1) : abs),
-      }),
+      conflicts: conflictsSource,
     });
     this.registerView("mugs-map", (leaf) => new MapView(leaf));
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
@@ -618,6 +642,93 @@ export default class MugsPlugin extends Plugin {
    *  Records each both-sides-deleted file's prior content before it is removed (Area 3). */
   private trashStore(): FileSystemTrashStore {
     return new FileSystemTrashStore(`${this.cloneRoot()}/.mugs-trash`);
+  }
+
+  /** Vault-side WorkingTreeWriter speaking ABSOLUTE paths (resolver transaction input).
+   *  Distinct from workingTreeWriter() (clone-side): routes through the same adapter
+   *  but marks writes as plugin-internal for the E05 feedback guard. */
+  private vaultWriter(): WorkingTreeWriter {
+    const adapter = this.app.vault.adapter as unknown as {
+      read(p: string): Promise<string>;
+      write(p: string, data: string | ArrayBuffer): Promise<void>;
+      remove(p: string): Promise<void>;
+      mkdir(p: string): Promise<void>;
+      getBasePath(): string;
+    };
+    let basePath = "";
+    try { basePath = adapter.getBasePath(); } catch { /* tests: pass-through */ }
+    const rel = (abs: string): string => toAdapterPath(basePath, abs);
+    return {
+      writeFile: async (absPath, content) => {
+        const p = rel(absPath);
+        const parent = p.slice(0, p.lastIndexOf("/"));
+        if (parent) { try { await adapter.mkdir(parent); } catch { /* exists */ } }
+        this.internalWritePaths.add(p);
+        await adapter.write(p, content);
+      },
+      readFile: async (absPath) => {
+        try { return await adapter.read(rel(absPath)); } catch { return undefined; }
+      },
+      deleteFile: async (absPath) => {
+        const p = rel(absPath);
+        if (!this.editorOpen.isWriteSafe(p)) {
+          throw new Error(`${p} is open with unsaved changes — close it and resolve again`);
+        }
+        try {
+          this.internalWritePaths.add(p);
+          await adapter.remove(p);
+        } catch (e) {
+          const s = String(e).toLowerCase();
+          if (s.includes("enoent") || s.includes("not found") || s.includes("missing")) return;
+          throw e;
+        }
+      },
+    };
+  }
+
+  /** Durable retry record (contract §1): failed operations land in the mapping's
+   *  lastSync.pendingOps so they surface in counts and block correspondence advance
+   *  (the sync engine honors pendingOps once sync-core's planner lands — flagged seam). */
+  private recordPendingOp(mappingId: string, op: PendingOperation): void {
+    try {
+      const cur = this.store.getSettings().lastSync[mappingId] ?? { mappingId };
+      const ops = [...(cur.pendingOps ?? []).filter((o) => o.opId !== op.opId), op];
+      this.store.setLastSync({ ...cur, mappingId, pendingOps: ops });
+      void this.store.save().then((r) => {
+        if (!r.ok) new Notice(`MUGS: could not persist the retry record for ${mappingId} — ${r.reason}`, 8000);
+      });
+    } catch (err) {
+      console.warn("MUGS: could not record pending operation", mappingId, err);
+    }
+  }
+
+  /** The S07 resolution transaction factory, bound to the real store/writers/trash.
+   *  Single-flight and ordering live inside runtime/conflictResolver.ts. */
+  private conflictResolverFactory() {
+    return createConflictResolver({
+      getConflicts: (id) => this.store.getConflicts(id),
+      getMapping: (id) => this.store.getSettings().mappings.find((m) => m.id === id),
+      cloneDirFor: (id) => {
+        const m = this.store.getSettings().mappings.find((x) => x.id === id);
+        return cloneDir({ root: this.cloneRoot() }, m?.providerId ?? "", m?.repoRef ?? id);
+      },
+      cloneTree: this.workingTreeWriter(),
+      vaultTree: this.vaultWriter(),
+      vaultAbsPath: (id, relPath) => {
+        const m = this.store.getSettings().mappings.find((x) => x.id === id);
+        if (!m) return undefined;
+        const vrel = repoToVaultPath(m, relPath);
+        if (vrel === null) return undefined;
+        let base = "";
+        try { base = (this.app.vault.adapter as unknown as { getBasePath(): string }).getBasePath(); } catch { /* tests */ }
+        const folder = m.localFolder === "." ? "" : normalizeVaultPath(m.localFolder);
+        return [base, folder, vrel].filter((s) => s.length > 0).join("/");
+      },
+      trash: this.trashStore(),
+      save: () => this.store.save(),
+      setConflicts: (id, list: FileConflict[]) => this.store.setConflicts(id, list),
+      recordRetry: (mappingId, op) => this.recordPendingOp(mappingId, op),
+    });
   }
 
   /** Resolve the agent sub-user acting on a mapping's push (Area 10) via its pinned agentId. */
