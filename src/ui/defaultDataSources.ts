@@ -30,7 +30,7 @@ import type {
   ConflictResolutionQuery,
   ConflictResolutionResult,
 } from "./dataSources";
-import { unresolvedConflicts, resolveConflictFile } from "../sync/conflict";
+import { applyResolution, unresolvedConflicts, resolveConflictFile } from "../sync/conflict";
 
 /** Default on-disk folder (under the vault) holding per-mapping clones. */
 export const DEFAULT_CLONE_DIRNAME = ".mugs-clones";
@@ -97,6 +97,8 @@ export class StoreMapDataSource implements MapDataSource {
     const settings = this.store.getSettings();
     const lastSync = settings.lastSync;
     const rows: MapRow[] = [];
+    // One local history scan per clone per refresh, not one per connected folder.
+    const owners = new Map<string, string | undefined>();
 
     for (const m of settings.mappings) {
       let owner: string | undefined;
@@ -107,9 +109,14 @@ export class StoreMapDataSource implements MapDataSource {
         // Bind EVERY git call to the clone — an unbound client ran rev-parse/log in the
         // plugin process's cwd (the wrong repository), so owner attribution silently
         // failed for every mapping.
-        const client = new GitClient(this.runner).at(dir);
-        if (await isWorkTree(client, dir)) {
-          owner = pickOwner(await client.recentAuthors("HEAD", 100));
+        if (owners.has(dir)) {
+          owner = owners.get(dir);
+        } else {
+          const client = new GitClient(this.runner).at(dir);
+          if (await isWorkTree(client, dir)) {
+            owner = pickOwner(await client.recentAuthors("HEAD", 100));
+          }
+          owners.set(dir, owner);
         }
       } catch {
         owner = undefined; // no clone / git error -> surface without an owner
@@ -298,8 +305,8 @@ export class StoreConflictDataSource implements ConflictDataSource {
     const before = this.store.getConflicts(mapping.id);
     const hit = before.find((c) => c.path === query.path);
     const next = resolveConflictFile(before, query.path, query.choice);
-    // Unknown path — nothing to do (still report the pre-existing count).
-    if (!next) return { remaining: before.length };
+    // Unknown path — nothing to do (still report the pre-existing unresolved count).
+    if (!next) return { remaining: unresolvedConflicts(before).length };
     // BOTH writes happen before the record is dropped — the old code cleared the
     // record after writing only the clone, so the vault kept the conflicting copy and
     // the same conflict resurfaced (or the resolution was overwritten) on the next sync.
@@ -321,12 +328,17 @@ export class StoreConflictDataSource implements ConflictDataSource {
       await this.workingTree?.writeFile(cloneAbs, next.resolvedContent);
       if (vaultAbs) await this.seams.vault?.writeFile(vaultAbs, next.resolvedContent);
     }
-    this.store.setConflicts(mapping.id, next.conflicts);
+    // Keep the record marked resolved (engine evidence) instead of dropping it:
+    // the next pass publishes an "ours"/"both" winner instead of re-conflicting
+    // the same file forever (see mergeSides); a clean pass clears the list.
+    const resolvedList = before.map((c) => (c.path === query.path ? applyResolution(hit!, query.choice) : c));
+    this.store.setConflicts(mapping.id, resolvedList);
     // Clear the mapping's conflict status once every file is resolved.
-    const status = next.conflicts.length > 0 ? "conflict" : "up-to-date";
+    const remaining = unresolvedConflicts(resolvedList).length;
+    const status = remaining > 0 ? "conflict" : "up-to-date";
     const current = this.store.getSettings().lastSync[mapping.id] ?? { mappingId: mapping.id };
     this.store.setLastSync({ ...current, mappingId: mapping.id, status });
     await this.store.save();
-    return { remaining: next.conflicts.length };
+    return { remaining };
   }
 }

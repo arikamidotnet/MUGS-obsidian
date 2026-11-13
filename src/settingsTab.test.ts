@@ -34,6 +34,8 @@ const { document } = vi.hoisted(() => {
     disabled = false;
     innerHTML = "";
     style: Record<string, string> = {};
+    attrs: Record<string, string> = {};
+    setAttribute(key: string, value: string): void { this.attrs[key] = value; }
 
     constructor(tag: string) {
       this.tagName = tag.toLowerCase();
@@ -75,7 +77,7 @@ const { document } = vi.hoisted(() => {
     get classList() {
       const set = this._classes;
       return {
-        toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)),
+        toggle: (c: string) => { if (set.has(c)) { set.delete(c); return false; } set.add(c); return true; },
         contains: (c: string) => set.has(c),
         add: (c: string) => set.add(c),
         remove: (c: string) => set.delete(c),
@@ -128,11 +130,13 @@ const { document } = vi.hoisted(() => {
       disabled = false;
       innerHTML = "";
       style: Record<string, string> = {};
+      attrs: Record<string, string> = {};
+      setAttribute(key: string, value: string): void { this.attrs[key] = value; }
       constructor(tag: string) { this.tagName = tag.toLowerCase(); }
       set className(v: string) { this._classes = new Set(v.split(/\s+/).filter(Boolean)); }
       get classList() {
         const set = this._classes;
-        return { toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)), contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) };
+        return { toggle: (c: string) => { if (set.has(c)) { set.delete(c); return false; } set.add(c); return true; }, contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) };
       }
       remove() {}
       empty() { this.children = []; }
@@ -224,12 +228,12 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 describe("MugsSettingTab — display() renders every section (blank-UI regression guard)", () => {
   const sections = [
     "Getting Started",
-    "Credentials & Providers",
-    "Folder Mappings",
-    "Security & Credentials",
-    "Automatic Conflict Resolution",
-    "Sync Frequency & Maintenance",
-    "Obsidian Config Sync",
+    "Accounts",
+    "Connected folders",
+    "Security",
+    "Conflicts",
+    "Sync",
+    "Obsidian settings",
     "About",
   ];
 
@@ -249,7 +253,7 @@ describe("MugsSettingTab — display() renders every section (blank-UI regressio
     const text = collectText(tab.containerEl);
     expect(text).toContain("Work (local)"); // masked credential row
     expect(text).toContain("Notes"); // mapping label
-    expect(text).toContain("Push + pull"); // directionText for push-pull
+    expect(text).toContain("Both ways"); // directionText for push-pull
     expect(text).toContain(".trash/"); // whole-vault trash toggle appears
   });
 
@@ -293,12 +297,12 @@ function obsidianOpenTab(tab: MugsSettingTab): { path: string; text: string } {
 describe("MugsSettingTab — Obsidian 1.13+ declarative API (blank-settings guard)", () => {
   const sections = [
     "Getting Started",
-    "Credentials & Providers",
-    "Folder Mappings",
-    "Security & Credentials",
-    "Automatic Conflict Resolution",
-    "Sync Frequency & Maintenance",
-    "Obsidian Config Sync",
+    "Accounts",
+    "Connected folders",
+    "Security",
+    "Conflicts",
+    "Sync",
+    "Obsidian settings",
     "About",
   ];
 
@@ -328,6 +332,22 @@ describe("MugsSettingTab — Obsidian 1.13+ declarative API (blank-settings guar
   });
 });
 describe("deferred persistence", () => {
+  it("sections support keyboard collapse and opening file filters does not dirty settings", () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    const header = tab.containerEl.querySelector(".mugs-section-header") as any;
+    expect(header.attrs["aria-expanded"]).toBe("true");
+    expect(header.attrs.role).toBe("button");
+    expect(header.attrs.tabindex).toBe("0");
+    header._handlers.keydown[0]({ key: "Enter", preventDefault() {} });
+    expect(header.attrs["aria-expanded"]).toBe("false");
+    header._handlers.keydown[0]({ key: " ", preventDefault() {} });
+    expect(header.attrs["aria-expanded"]).toBe("true");
+    const manage = tab.containerEl.querySelector(".mugs-manage-btn") as any;
+    manage.handlers.click[0]();
+    expect(manage.attrs["aria-expanded"]).toBe("true");
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+  });
   it("does not persist a setting change until Apply is clicked", async () => {
     const plugin = makePlugin();
     let saveCalls = 0;
@@ -386,7 +406,7 @@ describe("security section — passphrase controls", () => {
     tab.display();
     await flush();
     const sections = Array.from(tab.containerEl.querySelectorAll(".mugs-section") as unknown as any[]).filter((el) =>
-      collectText(el).includes("Security & Credentials"),
+      collectText(el).includes("Security"),
     );
     return collectText(sections[0]);
   };
@@ -394,8 +414,8 @@ describe("security section — passphrase controls", () => {
   it("replaces the hint placeholder with set-passphrase controls and honest copy", async () => {
     const text = await sectionText((plugin) => plugin.store.setSecurity({ encryptCredentials: true }));
     expect(text).toContain("Encryption passphrase");
-    expect(text).toContain("not stored");
-    expect(text).toContain("cannot be recovered");
+    expect(text).toContain("never saves your passphrase");
+    expect(text).toContain("enter your account tokens again");
     expect(text).not.toContain("Encryption key hint");
   });
 
@@ -417,8 +437,8 @@ describe("security section — passphrase controls", () => {
       });
       plugin.store.isLocked = () => true;
     });
-    expect(text).toContain("Credentials locked");
-    expect(text).toContain("missing token");
+    expect(text).toContain("Tokens locked");
+    expect(text).toContain("enable sync for this session");
   });
 });
 
@@ -446,18 +466,18 @@ describe("add-mapping assistant", () => {
     // The matched row for "Notes" must be disabled with a Mapped badge.
     const takenRow = tab.containerEl.querySelector(".mugs-match-taken");
     expect(takenRow).toBeTruthy();
-    expect(collectText(takenRow!)).toContain("Mapped");
+    expect(collectText(takenRow!)).toContain("Connected");
   });
 
-  it("renders the add-mapping form above existing mapping cards", async () => {
+  it("renders existing mapping cards before the add-mapping form", async () => {
     const plugin = makePlugin();
     const tab = new MugsSettingTab(plugin);
     tab.display();
     await flush();
 
-    // The Folder Mappings section contains the add form first, then mapping cards.
+    // Existing connections take priority over adding another connection.
     const section = Array.from(tab.containerEl.querySelectorAll(".mugs-section"))
-      .find((s) => collectText(s).includes("Folder Mappings")) as HTMLElement;
+      .find((s) => collectText(s).includes("Connected folders")) as HTMLElement;
     expect(section).toBeTruthy();
     const all = Array.from(section.querySelectorAll("*"));
     const addFormIdx = all.findIndex((c) => c.classList.contains("mugs-matches"));
@@ -465,6 +485,6 @@ describe("add-mapping assistant", () => {
 
     expect(addFormIdx).toBeGreaterThanOrEqual(0);
     expect(mappingCardIdx).toBeGreaterThanOrEqual(0);
-    expect(addFormIdx).toBeLessThan(mappingCardIdx);
+    expect(mappingCardIdx).toBeLessThan(addFormIdx);
   });
 });

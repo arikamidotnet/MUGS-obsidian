@@ -11,8 +11,10 @@
  */
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { getMugsContext } from "./dataSources";
-import { renderConflictRow, renderRowError } from "./diffRender";
+import { renderConflictRow, renderRowError, renderConflictComparison } from "./diffRender";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
+import { resolutionLabel } from "./labels";
+import { renderNavigation } from "./navigation";
 
 export const MUGS_CONFLICTS_VIEW_TYPE = "mugs-conflicts";
 
@@ -34,6 +36,8 @@ export class MugsConflictsPanel extends ItemView {
    *  guard) — repainted under the matching row on every render until the file
    *  is resolved or disappears, so the inline note survives group refreshes. */
   private resolveErrors: Record<string, string> = {};
+  private selectedKey?: string;
+  private closed = false;
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
@@ -52,10 +56,12 @@ export class MugsConflictsPanel extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.closed = false;
     await this.render();
   }
 
   async onClose(): Promise<void> {
+    this.closed = true;
     this.stopAutoRefresh();
     this.containerEl.empty();
     return Promise.resolve();
@@ -90,7 +96,7 @@ export class MugsConflictsPanel extends ItemView {
     // Never re-enter: a resolve's refresh, a manual click and the auto timer can
     // overlap — two concurrent render()s rebuild the DOM twice and the slower
     // one can attach its callbacks onto elements the faster one already emptied.
-    if (this.renderInFlight) return;
+    if (this.closed || this.renderInFlight) return;
     this.renderInFlight = true;
     try {
       await this.renderOnce();
@@ -102,6 +108,8 @@ export class MugsConflictsPanel extends ItemView {
   private async renderOnce(): Promise<void> {
     this.containerEl.empty();
     this.containerEl.addClass("mugs-conflicts-panel");
+    this.containerEl.addClass("mugs-diff-view");
+    renderNavigation(this.containerEl, "mugs-conflicts");
 
     const header = this.containerEl.createDiv({ cls: "mugs-conflicts-panel-header" });
     header.createEl("h2", { text: "MUGS Conflicts", cls: "mugs-conflicts-panel-title" });
@@ -123,8 +131,10 @@ export class MugsConflictsPanel extends ItemView {
 
     try {
       const groups = await this.loadGroups();
+      if (this.closed) return;
       this.renderBody(groups);
     } catch (err) {
+      if (this.closed) return;
       // Error state — auto-refresh STOPS (re-rendering on a persistent error
       // would loop with a Notice per cycle); the inline message says how to retry.
       this.stopAutoRefresh();
@@ -160,31 +170,49 @@ export class MugsConflictsPanel extends ItemView {
       if (btn) this.setAutoButtonLabel(btn);
 
       this.containerEl.createEl("p", { text: "All conflicts resolved.", cls: "mugs-muted" });
+      this.containerEl.createEl("p", { text: "Separate edits combine automatically during sync. Files only appear here when overlapping edits still need a decision.", cls: "mugs-page-description" });
       return;
     }
 
     // Summary line with conflict count badge.
     const summary = this.containerEl.createDiv({ cls: "mugs-conflicts-summary" });
     summary.createEl("p", {
-      text: `${total} file${total === 1 ? "" : "s"} need${total === 1 ? "s" : ""} manual resolution across ${groups.length} mapping${groups.length === 1 ? "" : "s"}.`,
+      text: `${total} file${total === 1 ? "" : "s"} need${total === 1 ? "s" : ""} your review in ${groups.length} folder${groups.length === 1 ? "" : "s"}.`,
       cls: "mugs-muted",
     });
 
-    const seen = new Set<string>();
-    for (const g of groups) {
-      const section = this.containerEl.createDiv({ cls: "mugs-conflicts-panel-group" });
-      // Group header with conflict count badge.
-      const groupHeader = section.createDiv({ cls: "mugs-conflicts-panel-group-header" });
-      groupHeader.createEl("h3", { text: g.label, cls: "mugs-conflicts-panel-group-title" });
-      groupHeader.createSpan({ text: String(g.conflicts.length), cls: "mugs-chip mugs-chip-error" });
-
-      for (const c of g.conflicts) {
-        const row = renderConflictRow(section, c, (conflict, choice) => void this.resolve(g.mappingId, conflict, choice), this.resolving);
-        seen.add(c.path);
-        const error = this.resolveErrors[c.path];
-        if (error) renderRowError(row, error);
-      }
-    }
+    const browser = this.containerEl.createDiv({ cls: "mugs-diff-browser" });
+    const list = browser.createDiv({ cls: "mugs-diff-file-list" });
+    list.setAttribute("aria-label", "Conflicting files");
+    const focused = browser.createDiv({ cls: "mugs-diff-focused" });
+    const entries = groups.flatMap((group) => group.conflicts.map((conflict) => ({
+      group, conflict, key: JSON.stringify([group.mappingId, conflict.path]),
+    })));
+    if (!entries.some((entry) => entry.key === this.selectedKey)) this.selectedKey = entries[0].key;
+    const buttons: HTMLButtonElement[] = [];
+    const select = (index: number) => {
+      const { group, conflict, key } = entries[index];
+      this.selectedKey = key;
+      buttons.forEach((button, i) => button.setAttribute("aria-pressed", String(i === index)));
+      focused.empty();
+      focused.createEl("h3", { text: group.label, cls: "mugs-conflicts-panel-group-title" });
+      renderConflictComparison(focused, conflict);
+      const row = renderConflictRow(focused, conflict, (c, choice) => {
+        if (!this.closed && !this.resolving.has(c.path)) void this.resolve(group.mappingId, c, choice);
+      }, this.resolving);
+      if (this.resolveErrors[key]) renderRowError(row, this.resolveErrors[key]);
+      focused.createEl("p", { cls: "mugs-page-description", text: "Choices apply to the whole file. Combine both keeps both versions when their edits overlap; it may need cleanup. Sync publishes the recorded choice." });
+    };
+    entries.forEach(({ group, conflict }, index) => {
+      const button = list.createEl("button", { type: "button", cls: "mugs-diff-file-choice", attr: { title: conflict.path } });
+      const slash = conflict.path.lastIndexOf("/");
+      button.createSpan({ text: conflict.path.slice(slash + 1), cls: "mugs-diff-file-path" });
+      button.createSpan({ text: [group.label, conflict.path.slice(0, Math.max(0, slash))].filter(Boolean).join(" · "), cls: "mugs-muted" });
+      button.addEventListener("click", () => { if (!this.closed) select(index); });
+      buttons.push(button);
+    });
+    select(entries.findIndex((entry) => entry.key === this.selectedKey));
+    const seen = new Set(entries.map((entry) => entry.key));
     // Drop notes for paths no longer in conflict (resolved elsewhere or gone).
     for (const path of Object.keys(this.resolveErrors)) {
       if (!seen.has(path)) delete this.resolveErrors[path];
@@ -199,18 +227,20 @@ export class MugsConflictsPanel extends ItemView {
    */
   private async resolve(mappingId: string, c: FileConflict, choice: ResolveChoice): Promise<void> {
     const key = c.path;
+    if (this.closed || this.resolving.has(key)) return;
+    const errorKey = JSON.stringify([mappingId, key]);
     this.resolving.add(key);
     // Immediate re-render to reflect disabled group.
     await this.render();
     try {
       await getMugsContext().conflicts.resolveConflict({ mappingId, path: key, choice });
       this.resolving.delete(key);
-      delete this.resolveErrors[key];
-      new Notice(`MUGS — resolved ${key} (${choice}).`);
+      delete this.resolveErrors[errorKey];
+      new Notice(`MUGS — ${key}: kept ${resolutionLabel(choice)}.`);
     } catch (err) {
       this.resolving.delete(key);
       const message = `Could not resolve ${key}: ${err instanceof Error ? err.message : String(err)}`;
-      this.resolveErrors[key] = message;
+      this.resolveErrors[errorKey] = message;
       new Notice(`MUGS — ${message}`);
     }
     void this.render();

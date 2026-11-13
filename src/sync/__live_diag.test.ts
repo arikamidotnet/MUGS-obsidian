@@ -34,11 +34,12 @@ import {
   readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmSync,
 } from "node:fs";
 import { join } from "node:path";
-import { syncAllMappings } from "./driver";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
+import { MugsStore, MemoryIO } from "../store";
 import { ChildProcessRunner } from "../git/runner";
 import { buildProvider } from "../providers/factory";
 import type { MugsSettings, FolderMapping } from "../types";
-import type { VaultMirror, WorkingTreeWriter, LastSyncAccessor, ConflictStore } from "./cloneManager";
+import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 
 const VAULT = "/home/arikami/Documents/FBR-WRK";
 const DATA = `${VAULT}/.obsidian/plugins/mugs-obsidian/data.json`;
@@ -86,6 +87,11 @@ const vaultMirror: VaultMirror = {
     const root = rootOf(folder);
     return walk(join(VAULT, root));
   },
+  listable: (path) => {
+    if (path.split("/").some((part) => part.startsWith("."))) return false;
+    const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+    return !BINARY_EXTENSIONS.has(ext);
+  },
   read: async (folder, rel) => readFileSync(join(VAULT, rootOf(folder), rel), "utf8"),
   write: async (folder, rel, content) => {
     const p = join(VAULT, rootOf(folder), rel);
@@ -93,7 +99,8 @@ const vaultMirror: VaultMirror = {
     writeFileSync(p, content);
   },
   remove: async (folder, rel) => {
-    try { unlinkSync(join(VAULT, rootOf(folder), rel)); } catch { /* absent */ }
+    try { unlinkSync(join(VAULT, rootOf(folder), rel)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   },
   mtime: async (folder, rel) => {
     try { return statSync(join(VAULT, rootOf(folder), rel)).mtimeMs; } catch { return undefined; }
@@ -126,53 +133,24 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
     "runs the real sync for EVERY mapping (RC mode) and verifies the resulting state",
     async () => {
       if (!existsSync(DATA)) throw new Error(`no vault data at ${DATA}`);
-      const settings: MugsSettings = JSON.parse(readFileSync(DATA, "utf8"));
+      const store = new MugsStore(new MemoryIO(JSON.parse(readFileSync(DATA, "utf8"))));
+      await store.load();
+      if (store.loadError || store.isLocked()) throw new Error("Live settings are unreadable or locked");
+      let settings: MugsSettings = store.getSettings();
 
       // RC mode: every mapping, every pass phase — fetch, merge, push, mirror.
       const targets: FolderMapping[] = settings.mappings;
       console.log(`\n[live-diag] ${targets.length} mappings:`, targets.map((m) => `${m.label}(${m.direction})`).join(", "));
 
-      // In-memory view of the persisted state; records update the in-memory copy
-      // (so later phases in one session see them) but are NEVER written back to
-      // data.json — the running plugin owns that file.
-      const record = (id: string, patch: Record<string, unknown>): void => {
-        const cur = settings.lastSync[id] ?? { mappingId: id, status: "pending" as const };
-        settings.lastSync[id] = { ...cur, mappingId: id, ...patch } as (typeof settings.lastSync)[string];
-      };
-      const lastSync: LastSyncAccessor = {
-        lastRemoteSha: (id) => settings.lastSync[id]?.lastRemoteSha,
-        recordPull: (id, sha) => {
-          console.log(`[record] pull  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`);
-          record(id, { lastRemoteSha: sha, lastPullAt: Date.now(), status: "ok" });
-        },
-        recordPush: (id, sha) => {
-          console.log(`[record] push  ${id.slice(0, 8)} -> ${sha.slice(0, 8)}`);
-          record(id, { lastRemoteSha: sha, lastPushAt: Date.now(), status: "ok" });
-        },
-        recordConflict: (id) => console.log(`[record] conflict ${id.slice(0, 8)}`),
-        vaultPopulated: (id) => settings.lastSync[id]?.vaultPopulated,
-        recordVaultSync: (id) => {
-          console.log(`[record] vault-populated ${id.slice(0, 8)}`);
-          record(id, { vaultPopulated: true });
-        },
-        lastCompletedAt: (id) => {
-          const s = settings.lastSync[id];
-          const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
-          return at > 0 ? at : undefined;
-        },
-        contentSnapshot: (id) => settings.lastSync[id]?.contentSnapshot,
-        recordContentSnapshot: (id, snap) => record(id, { contentSnapshot: snap }),
-      };
-      const conflicts: ConflictStore = {
-        getConflicts: (id) => settings.conflicts[id] ?? [],
-        setConflicts: (id, list) => console.log(`[record] conflicts cleared ${id.slice(0, 8)} (${list.length} left)`),
-      };
+      // Production reconciliation and conflict hooks, with in-memory persistence only.
+      const lastSync = storeWritableAccessor(store);
+      const conflicts = storeConflictAccessor(store);
 
       const started = Date.now();
       const outcomes = await syncAllMappings({
         mappings: targets,
         credentials: settings.credentials,
-        getToken: (id) => settings.credentials.find((c) => c.id === id)?.token,
+        getToken: (id) => store.getToken(id),
         buildProvider,
         cloneRoot: CLONE_ROOT,
         runner: new ChildProcessRunner(),
@@ -183,7 +161,8 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
         obsidianConfig: settings.sync.obsidianConfig,
         vaultMirror,
         rmDir: (dir) => { console.log(`[rmDir] ${dir}`); rmSync(dir, { recursive: true, force: true }); },
-        firstSyncDirection: "push",
+        firstSyncDirection: settings.sync.firstSyncDirection,
+        watcherUncertain: true,
         onStatus: (m) => console.log(`[status] ${m}`),
       });
 
@@ -196,6 +175,7 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
         console.log("\n[live-diag] FAILURES (full reasons above) — investigate before go-live.");
       }
 
+      settings = store.getSettings();
       // --- RC state verification --------------------------------------------
       // 1. Every mapping's recorded baseline must resolve to a real commit in its
       //    clone (the Diff view's exact check).
@@ -205,7 +185,7 @@ describe.skipIf(process.env.MUGS_LIVE_DIAG !== "1")("MUGS live diagnostic (FBR-W
       const { execFileSync } = await import("node:child_process");
       const junk = readdirSync(VAULT).filter((e) => e === "home");
       console.log(`[verify] junk dirs (must be empty): ${JSON.stringify(junk)}`);
-      let problems = junk.length > 0 ? 1 : 0;
+      let problems = bad.length + (junk.length > 0 ? 1 : 0);
       for (const m of targets) {
         const ls = settings.lastSync[m.id];
         const base = ls?.lastRemoteSha;

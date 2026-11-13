@@ -101,6 +101,15 @@ export interface MugsContext {
   map: MapDataSource;
   diff: DiffDataSource;
   conflicts: ConflictDataSource;
+  /** Runtime actions, kept optional for data-only consumers and tests. */
+  actions?: {
+    openView: (view: "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts") => void;
+    syncNow: () => Promise<void>;
+    openReview: () => void;
+    openSettings: () => void;
+    getState: () => { paused: boolean; syncing: boolean; reviewCount: number };
+    subscribe?: (listener: () => void) => () => void;
+  };
 }
 
 let context: MugsContext | null = null;

@@ -8,28 +8,23 @@
 import { ItemView, Notice } from "obsidian";
 import { buildMapGraph, describeMapRow, directionHint, type MapContext, type MapEdge, type MapNode, type MapGraph, type MapRowDisplay } from "./mapModel";
 import { getMugsContext, type MapRow } from "./dataSources";
+import { directionLabel } from "./labels";
+import { renderNavigation } from "./navigation";
 
 /** Status icon glyph per display status (status-bar vocabulary). */
 const STATUS_ICON: Record<MapRowDisplay["label"], string> = {
   "in sync": "✓",
   pending: "⋯",
-  "needs merge": "!",
+  "needs review": "!",
   skipped: "⊘",
   failed: "×",
 };
 
-/** Map a display tone onto the existing status-icon CSS classes. */
-const TONE_ICON_CLASS: Record<MapRowDisplay["tone"], string> = {
-  success: "ok",
-  warning: "pending",
-  error: "conflict",
-};
-
 /** Direction label + icon for a mapping card. */
 const DIRECTION_LABEL: Record<string, string> = {
-  "push-pull": "⇄ Push + pull",
-  "pull-only": "↓ Pull only",
-  "push-only": "↑ Push only",
+  "push-pull": `⇄ ${directionLabel("push-pull")}`,
+  "pull-only": `↓ ${directionLabel("pull-only")}`,
+  "push-only": `↑ ${directionLabel("push-only")}`,
 };
 
 function truncate(s: string, n: number): string {
@@ -37,12 +32,55 @@ function truncate(s: string, n: number): string {
 }
 
 export class MapView extends ItemView {
+  private generation = 0;
+  private closed = false;
+  private unsubscribe?: () => void;
   getViewType(): string {
     return "mugs-map";
   }
 
+  private renderHeader(): void {
+    renderNavigation(this.contentEl, "mugs-map");
+    const header = this.contentEl.createDiv({ cls: "mugs-overview-header" });
+    header.createEl("h2", { text: "Your sync" });
+    const actions = getMugsContext().actions;
+    header.createEl("p", { text: "Check your folders, sync changes, or review files that need attention.", cls: "mugs-muted" });
+    if (!actions) return;
+    const state = actions.getState();
+    if (state.syncing || state.paused) {
+      header.createEl("p", {
+        text: state.syncing ? "Syncing now…" : "Automatic sync is paused. You can still use Sync now.",
+        cls: "mugs-note",
+        attr: { role: "status" },
+      });
+    }
+    const controls = header.createDiv({ cls: "mugs-overview-actions" });
+    const sync = controls.createEl("button", { type: "button", text: state.syncing ? "Syncing…" : "Sync now", cls: "mod-cta" });
+    sync.disabled = state.syncing;
+    sync.addEventListener("click", async () => {
+      if (sync.disabled) return;
+      sync.disabled = true;
+      sync.textContent = "Syncing…";
+      try {
+        await actions.syncNow();
+      } catch (err) {
+        new Notice(`MUGS: sync failed — ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        if (!this.closed && !actions.subscribe) await this.refresh();
+      }
+    });
+    const review = controls.createEl("button", {
+      type: "button",
+      text: state.reviewCount ? `Review files (${state.reviewCount})` : "Review files",
+      attr: { title: "Review repository files kept for safety" },
+    });
+    review.addEventListener("click", () => actions.openReview());
+    const settings = controls.createEl("button", { type: "button", text: "Settings" });
+    settings.addEventListener("click", () => actions.openSettings());
+  }
+
   getDisplayText(): string {
-    return "MUGS Map";
+    return "MUGS Overview";
   }
 
   getIcon(): string {
@@ -50,39 +88,51 @@ export class MapView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.closed = false;
+    this.unsubscribe?.();
+    this.unsubscribe = getMugsContext().actions?.subscribe?.(() => { void this.refresh(); });
     this.contentEl.empty();
     this.contentEl.addClass("mugs-maps-view");
-    this.addAction("refresh", "Refresh map", () => void this.refresh());
+    this.addAction("refresh", "Refresh overview", () => void this.refresh());
     await this.refresh();
   }
 
   onClose(): Promise<void> {
+    this.closed = true;
+    this.generation++;
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
     this.contentEl.empty();
     return Promise.resolve();
   }
 
   private async refresh(): Promise<void> {
+    const generation = ++this.generation;
     try {
       const rows = await getMugsContext().map.getRows();
+      if (this.closed || generation !== this.generation) return;
       const context: Record<string, MapContext> = {};
       for (const r of rows) context[r.mapping.id] = { owner: r.owner, status: r.status };
       const graph = buildMapGraph(rows.map((r) => r.mapping), context);
       this.render(graph, rows);
     } catch (err) {
+      if (this.closed || generation !== this.generation) return;
       this.contentEl.empty();
-      new Notice(`MUGS: could not load map — ${err instanceof Error ? err.message : String(err)}`);
+      this.renderHeader();
+      this.contentEl.createEl("p", { text: "Couldn't load folder status. Use Refresh to try again.", cls: "mugs-muted" });
+      new Notice(`MUGS: could not load overview — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   private render(graph: MapGraph, rows: MapRow[]): void {
     this.contentEl.empty();
-    this.renderLegend();
+    this.renderHeader();
 
     if (rows.length === 0) {
       const empty = this.contentEl.createDiv({ cls: "mugs-empty-state" });
-      empty.createEl("h3", { text: "No folder mappings yet" });
+      empty.createEl("h3", { text: "No folders connected" });
       empty.createEl("p", {
-        text: "Add a credential and create your first folder mapping in the MUGS settings to see it here.",
+        text: "Connect a folder in MUGS settings to see it here.",
         cls: "mugs-muted",
       });
       return;
@@ -90,15 +140,15 @@ export class MapView extends ItemView {
 
     this.renderSummary(rows);
 
-    const grid = this.contentEl.createDiv({ cls: "mugs-map-grid" });
+    const list = this.contentEl.createDiv({ cls: "mugs-sync-list", attr: { role: "list", "aria-label": "Connected folders" } });
     // Build a lookup from mapping id → row for status/last-sync info.
     const rowByMappingId = new Map<string, MapRow>(rows.map((r) => [r.mapping.id, r]));
 
-    // Render one card per mapping edge. Each card shows the folder→repo relationship.
+    // Render one aligned row per mapping edge: folder → direction → repository → times → status.
     for (const edge of graph.edges) {
       const folder = graph.nodes.find((n) => n.id === edge.from)!;
       const repo = graph.nodes.find((n) => n.id === edge.to)!;
-      this.renderCard(grid, edge, folder, repo, rowByMappingId.get(edge.mappingId));
+      this.renderRow(list, edge, folder, repo, rowByMappingId.get(edge.mappingId));
     }
   }
 
@@ -116,18 +166,18 @@ export class MapView extends ItemView {
     }
 
     const summary = this.contentEl.createDiv({ cls: "mugs-map-summary" });
-    const totalChip = summary.createSpan({ cls: "mugs-chip mugs-chip-muted", text: `${rows.length} mapping${rows.length === 1 ? "" : "s"}` });
-    const syncChip = summary.createSpan({
-      cls: `mugs-chip ${inSync === rows.length ? "mugs-chip-success" : "mugs-chip-warning"}`,
+    summary.createSpan({ text: `${rows.length} folder${rows.length === 1 ? "" : "s"}` });
+    summary.createSpan({
+      cls: inSync === rows.length ? "mugs-text-success" : "mugs-text-warning",
       text: `${inSync}/${rows.length} in sync`,
     });
     if (latest) {
-      summary.createSpan({ text: `last sync ${relativeTime(Date.now() - latest)}`, cls: "mugs-chip mugs-chip-muted" });
+      summary.createSpan({ text: `last sync ${relativeTime(Date.now() - latest)}` });
     }
   }
 
-  private renderCard(grid: HTMLElement, edge: MapEdge, folder: MapNode, repo: MapNode, row?: MapRow): void {
-    const card = grid.createDiv({ cls: "mugs-map-card" });
+  private renderRow(list: HTMLElement, edge: MapEdge, folder: MapNode, repo: MapNode, row?: MapRow): void {
+    const card = list.createDiv({ cls: "mugs-sync-row", attr: { role: "listitem" } });
 
     // Honest display status — same vocabulary as the status bar ("needs merge",
     // "skipped", …) with the reason available on hover.
@@ -138,40 +188,33 @@ export class MapView extends ItemView {
       conflictCount: row?.conflictCount,
     });
 
-    // Status accent bar + icon.
-    const header = card.createDiv({ cls: "mugs-map-card-header" });
-    header.createSpan({
-      cls: `mugs-status-icon mugs-status-${TONE_ICON_CLASS[display.tone]}`,
-      text: STATUS_ICON[display.label] ?? "⋯",
-      ...(display.reason ? { attr: { title: display.reason } } : {}),
-    });
-
     // Folder name (left side).
-    const folderCol = header.createDiv({ cls: "mugs-map-card-folder" });
-    folderCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(folder.label, 30) });
+    const folderCol = card.createDiv({ cls: "mugs-map-card-folder" });
+    folderCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(folder.label, 30), attr: { title: folder.label } });
     if (folder.owner) {
-      folderCol.createEl("span", { cls: "mugs-map-card-owner", text: `owned by ${folder.owner}` });
+      folderCol.createEl("span", { cls: "mugs-map-card-owner", text: folder.owner, attr: { title: `Recent author: ${folder.owner}` } });
     }
 
-    // Direction glyph (center) — hover says what the arrow does NOT do.
-    header.createSpan({
+    // Direction (center column) — hover says what the arrow does NOT do.
+    const direction = card.createDiv({ cls: "mugs-sync-direction" });
+    direction.createSpan({
       cls: "mugs-map-card-direction",
       text: DIRECTION_LABEL[edge.direction] ?? edge.direction,
       attr: { title: directionHint(edge.direction) },
     });
-    // Push-only mappings never pull — a distinct muted chip stops the "in sync"
-    // card from implying content ever flows back from the remote.
+    // Push-only mappings never pull — the quiet note stops an "in sync" row
+    // from implying content ever flows back from the repository.
     if (edge.direction === "push-only") {
-      header.createSpan({
-        cls: "mugs-chip mugs-chip-muted mugs-map-card-never",
-        text: "never pulls",
+      direction.createSpan({
+        cls: "mugs-map-card-detail",
+        text: "no downloads",
         attr: { title: directionHint(edge.direction) },
       });
     }
 
     // Repo name (right side) with branch.
-    const repoCol = header.createDiv({ cls: "mugs-map-card-repo" });
-    repoCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(repo.label, 30) });
+    const repoCol = card.createDiv({ cls: "mugs-map-card-repo" });
+    repoCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(repo.label, 30), attr: { title: repo.label } });
     if (edge.branch) {
       repoCol.createEl("span", { cls: "mugs-map-card-branch", text: `branch: ${edge.branch}` });
     } else {
@@ -183,36 +226,20 @@ export class MapView extends ItemView {
     if (row) {
       const footer = card.createDiv({ cls: "mugs-map-card-footer" });
       const parts: string[] = [];
-      if (edge.direction !== "pull-only" && row.lastPushAt) parts.push(`pushed ${relativeTime(Date.now() - row.lastPushAt)}`);
-      if (edge.direction !== "push-only" && row.lastPullAt) parts.push(`pulled ${relativeTime(Date.now() - row.lastPullAt)}`);
+      if (edge.direction !== "pull-only" && row.lastPushAt) parts.push(`uploaded ${relativeTime(Date.now() - row.lastPushAt)}`);
+      if (edge.direction !== "push-only" && row.lastPullAt) parts.push(`downloaded ${relativeTime(Date.now() - row.lastPullAt)}`);
       const never =
-        edge.direction === "push-only" ? "never pushed" : edge.direction === "pull-only" ? "never pulled" : "never synced";
+        edge.direction === "push-only" ? "not uploaded yet" : edge.direction === "pull-only" ? "not downloaded yet" : "not synced yet";
       footer.createEl("span", { cls: "mugs-map-card-sync-times", text: parts.length ? parts.join(" · ") : never });
 
       footer.createSpan({
-        cls: `mugs-chip mugs-chip-${display.tone}`,
-        text: display.label,
+        cls: `mugs-sync-status mugs-text-${display.tone}`,
+        text: `${STATUS_ICON[display.label]} ${display.label}`,
         ...(display.reason ? { attr: { title: display.reason } } : {}),
       });
     }
   }
 
-  private renderLegend(): void {
-    const legend = this.contentEl.createDiv({ cls: "mugs-map-legend" });
-    legend.createEl("span", { text: "Status:", cls: "mugs-map-legend-label" });
-    // Same vocabulary as the cards and the status bar.
-    for (const [label, tone] of [
-      ["in sync", "success"],
-      ["pending", "warning"],
-      ["needs merge", "error"],
-      ["skipped", "warning"],
-      ["failed", "error"],
-    ] as const) {
-      const chip = legend.createDiv({ cls: "mugs-map-legend-item" });
-      chip.createSpan({ cls: "mugs-map-legend-swatch", attr: { style: `background:${statusColor(tone)}` } });
-      chip.createSpan({ text: label });
-    }
-  }
 }
 
 /** Human-friendly relative time, e.g. "2 min ago", "3 hours ago". */
@@ -225,15 +252,4 @@ function relativeTime(ms: number): string {
   if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
   const d = Math.round(h / 24);
   return `${d} day${d === 1 ? "" : "s"} ago`;
-}
-
-function statusColor(tone: MapRowDisplay["tone"]): string {
-  switch (tone) {
-    case "error":
-      return "#e45b3d";
-    case "warning":
-      return "#d29922";
-    default:
-      return "#3fb950";
-  }
 }

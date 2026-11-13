@@ -15,7 +15,8 @@ import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
 import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
-import { ReconciliationModal, type ReconciliationReviewRow } from "./ui/reconciliationModal";
+import { ReconciliationView } from "./ui/reconciliationView";
+import type { ReconciliationReviewDeps, ReconciliationReviewRow } from "./ui/reconciliationReview";
 import { setMugsContext } from "./ui/dataSources";
 import {
   StoreMapDataSource,
@@ -58,6 +59,7 @@ declare module "obsidian" {
      * predate MCP support; guarded by `typeof` at the call site so older builds are fine. */
     registerMcpServer?(definition: { name: string; version: string; tools?: unknown[] }): EventRef;
   }
+
 }
 
 /** How often the gated poll ticks (decideRun enforces the real interval). */
@@ -99,6 +101,7 @@ export default class MugsPlugin extends Plugin {
    *  events and manual Sync clicks from stacking parallel passes (and parallel
    *  clones) on top of each other. */
   private syncInFlight = false;
+  private readonly uiListeners = new Set<() => void>();
   /** Paths we (the plugin) just wrote via adapters. Used to suppress the resulting
    *  vault "modify"/"create" events so plugin-caused writes do not re-trigger sync
    *  (feedback loop guard, E05). Cleared on first observation. */
@@ -147,10 +150,16 @@ export default class MugsPlugin extends Plugin {
     this.lastSyncedAt = newest > 0 ? newest : undefined;
     console.log("MUGS — Multi-User Git Sync loaded");
 
-    // Inject the plugin stylesheet (Map/Diff/settings UI). Prefer
-    // Plugin.addStyleTag when present; otherwise create a <style> tag manually so
-    // initialization can't fail if addStyleTag is absent on this build.
+    // Inject the plugin stylesheet (Map/Diff/settings UI). Hot reloads accumulate
+    // <style> tags from previous builds and same-build reloads — outdated
+    // selectors keep applying and identical duplicates pile up. Remove every
+    // prior MUGS injection before adding exactly one current tag.
     const __css = __MUGS_CSS__;
+    if (typeof document !== "undefined") {
+      for (const tag of Array.from(document.querySelectorAll("style"))) {
+        if ((tag.textContent ?? "").includes(".mugs-")) tag.remove();
+      }
+    }
     const withStyleTag = this as unknown as { addStyleTag?: (css: string) => void };
     if (typeof withStyleTag.addStyleTag === "function") {
       withStyleTag.addStyleTag(__css);
@@ -207,10 +216,26 @@ export default class MugsPlugin extends Plugin {
       map: new StoreMapDataSource(this.store, cloneRoot),
       diff: new StoreDiffDataSource(this.store, cloneRoot),
       conflicts: conflictsSource,
+      actions: {
+        openView: (type) => type === MUGS_CONFLICTS_VIEW_TYPE ? this.openConflictsPanel() : void this.openView(type),
+        syncNow: async () => { this.markManualSyncRun(); await this.runSync(); },
+        subscribe: (listener) => {
+          this.uiListeners.add(listener);
+          return () => { this.uiListeners.delete(listener); };
+        },
+        openReview: () => void this.openView("mugs-reconciliation"),
+        openSettings: () => this.openSettings(),
+        getState: () => ({
+          paused: this.store.getSettings().sync.paused,
+          syncing: this.syncInFlight,
+          reviewCount: this.reconciliationRows().length,
+        }),
+      },
     });
     this.registerView("mugs-map", (leaf) => new MapView(leaf));
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
     this.registerView(MUGS_CONFLICTS_VIEW_TYPE, (leaf) => new MugsConflictsPanel(leaf));
+    this.registerView("mugs-reconciliation", (leaf) => new ReconciliationView(this, leaf));
     this.registerView("mugs-review", (leaf) => new ReviewQueueView(this, leaf));
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
@@ -246,66 +271,63 @@ export default class MugsPlugin extends Plugin {
 
     this.addSettingTab(new MugsSettingTab(this));
 
-    this.addRibbonIcon("git-branch", "MUGS: Sync now", async () => { this.markManualSyncRun(); void this.runSync(); });
-    this.addRibbonIcon("map", "Open MUGS Map", async () => void this.openView("mugs-map"));
-    this.addRibbonIcon("git-commit", "Open MUGS Diff", async () => void this.openView("mugs-diff"));
-    this.addRibbonIcon("pane-right", "Open MUGS Conflicts", () => this.openConflictsPanel());
+    this.addRibbonIcon("git-branch", "MUGS: Overview", () => void this.openView("mugs-map"));
     // NOTE: the Review Queue has no producer yet (nothing ever creates staging
     // entries), so its ribbon/command entry points are hidden until it is wired —
     // an always-empty queue advertised in the UI erodes trust.
     // Reconciliation review IS produced: the engine's path-level verification
     // queues unknown remote-only files per mapping, so its surface is exposed.
-    this.addRibbonIcon("alert-circle", "MUGS: Reconcile remote-only files", () => this.openReconciliationModal());
 
     this.addCommand({
       id: "show-settings",
       name: "Open MUGS settings",
-      callback: () => {
-        // Obsidian exposes the settings registry internally (not in the shipped
-        // typings). Guard it so "Open MUGS settings" never throws on any build.
-        const app = this.app as unknown as { setting?: { openToTab: (id: string) => void } };
-        try {
-          if (app.setting?.openToTab) {
-            app.setting.openToTab(this.manifest.id);
-            return;
-          }
-        } catch {
-          // fall through to the Notice below
-        }
-        new Notice("MUGS: open settings via the gear icon next to MUGS in Community plugins.");
-      },
+      callback: () => this.openSettings(),
     });
 
     this.addCommand({
       id: "sync-now",
-      name: "Run sync (push + pull) for all mappings",
+      name: "Sync now",
       callback: () => { this.markManualSyncRun(); void this.runSync(); },
     });
 
     this.addCommand({
       id: "show-map",
-      name: "Show MUGS Map (folder→repo graph)",
+      name: "Open overview",
       callback: () => void this.openView("mugs-map"),
     });
 
     this.addCommand({
       id: "show-diff",
-      name: "Show MUGS Diff (per-file changes and Git authors)",
+      name: "Show changes",
       callback: () => void this.openView("mugs-diff"),
     });
 
     this.addCommand({
       id: "show-conflicts",
-      name: "Show MUGS Conflicts (right sidebar, with action labels)",
+      name: "Show conflicts",
       callback: () => this.openConflictsPanel(),
     });
 
     this.addCommand({
       id: "reconcile-remote-only",
-      name: "Reconcile remote-only files (explicit review of retained files)",
-      callback: () => this.openReconciliationModal(),
+      name: "Review repository files",
+      callback: () => void this.openView("mugs-reconciliation"),
     });
 
+  }
+
+  private openSettings(): void {
+    const app = this.app as unknown as { setting?: { open?: () => void; openToTab: (id: string) => void } };
+    try {
+      if (app.setting?.openToTab) {
+        app.setting.open?.();
+        app.setting.openToTab(this.manifest.id);
+        return;
+      }
+    } catch {
+      // Fall through when the host does not expose its settings registry.
+    }
+    new Notice("MUGS: open settings via the gear icon next to MUGS in Community plugins.");
   }
 
   /** E02/§8: true until the first sync pass completes after load — the startup
@@ -330,6 +352,7 @@ export default class MugsPlugin extends Plugin {
     }
     if (this.syncInFlight) return;
     this.syncInFlight = true;
+    this.notifyUi();
     this.updateStatusBar("syncing", "syncing…");
 
     const runController = new AbortController();
@@ -418,7 +441,7 @@ export default class MugsPlugin extends Plugin {
       if (!quiet) {
         for (const o of outcomes.filter((o) => o.status === "conflict")) {
           const n = o.conflicts?.length ?? 0;
-          new Notice(`MUGS — ${o.label} needs a manual merge (${n} file${n === 1 ? "" : "s"} diverged). Open the MUGS Conflicts panel to resolve.`, 8000);
+          new Notice(`MUGS — ${o.label}: ${n} file${n === 1 ? "" : "s"} need${n === 1 ? "s" : ""} your review. Open Conflicts to choose what to keep.`, 8000);
         }
         for (const o of outcomes.filter((o) => o.status === "skipped")) {
           const reason = o.reason ? ` — ${o.reason}` : "";
@@ -429,20 +452,20 @@ export default class MugsPlugin extends Plugin {
         // content). Surface them so the reconciliation queue is discoverable.
         for (const o of outcomes.filter((o) => o.status === "ok" && (o.blocked?.length ?? 0) > 0)) {
           const n = o.blocked!.length;
-          new Notice(`MUGS — ${o.label}: ${n} file${n === 1 ? "" : "s"} retained for review (remote-only or unverified). Run "Reconcile remote-only files" to decide.`, 8000);
+          new Notice(`MUGS — ${o.label}: ${n} file${n === 1 ? "" : "s"} left unchanged for safety. Open "Review repository files" to decide.`, 8000);
         }
       } else {
         const skipped = outcomes.filter((o) => o.status === "skipped");
         if (skipped.length > 0) {
           const first = skipped[0];
           const reason = first.reason ? ` (e.g. ${first.label} — ${first.reason})` : "";
-          new Notice(`MUGS: ${skipped.length} mapping${skipped.length === 1 ? "" : "s"} skipped last pass${reason}. Click the MUGS status bar, or run Sync now, for details.`, 10_000);
+          new Notice(`MUGS: ${skipped.length} folder${skipped.length === 1 ? "" : "s"} skipped${reason}. Run Sync now for details.`, 10_000);
         }
       }
       for (const o of outcomes.filter((o) => o.status === "ok")) {
         if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
         if (firstTimers.has(o.mappingId)) {
-          const direction = settings.sync.firstSyncDirection === "push" ? "vault uploaded to remote" : "vault populated from remote";
+          const direction = settings.sync.firstSyncDirection === "push" ? "files uploaded" : "files downloaded";
           new Notice(`MUGS — ${o.label}: first sync complete — ${direction}.`, quiet ? 4000 : 7000);
         }
       }
@@ -473,7 +496,7 @@ export default class MugsPlugin extends Plugin {
           break;
         default: {
           this.updateStatusBar("idle");
-          if (!quiet) new Notice("MUGS: no mappings configured — add one in Settings to start syncing.", 5000);
+          if (!quiet) new Notice("MUGS: no folders connected. Add one in Settings to start syncing.", 5000);
         }
       }
       // One aggregate count-only notice per pass replaces per-mapping spam while
@@ -485,6 +508,13 @@ export default class MugsPlugin extends Plugin {
 
     this.syncInFlight = false;
     this.currentRunController = undefined;
+    this.notifyUi();
+  }
+
+  private notifyUi(): void {
+    for (const listener of this.uiListeners) {
+      try { listener(); } catch (error) { console.warn("MUGS: view refresh failed", error); }
+    }
   }
 
   /** Writes merged file content into a clone's working tree via the vault adapter.
@@ -713,12 +743,13 @@ export default class MugsPlugin extends Plugin {
     return rows;
   }
 
-  /** Open the explicit reconciliation modal over the engine's current review queue.
-   *  Rows are frozen at open; preview reads the reviewed blob from the mapping's
-   *  clone; decide records a revision-bound decision and runs a pass that executes
-   *  it under full preconditions (re-queuing the path when any check fails). */
-  private openReconciliationModal(): void {
-    new ReconciliationModal(this.app, {
+  /** Deps for the repository-file review tab: rows from the engine's current
+   *  review queue (frozen at render); preview reads the reviewed blob from the
+   *  mapping's clone; decide records a revision-bound decision and runs a pass
+   *  that executes it under full preconditions (re-queuing the path when any
+   *  check fails). */
+  reconciliationDeps(): ReconciliationReviewDeps {
+    return {
       rows: this.reconciliationRows(),
       preview: async (row) => {
         const mapping = this.store.getSettings().mappings.find((m) => m.id === row.mappingId);
@@ -755,7 +786,7 @@ export default class MugsPlugin extends Plugin {
           throw new Error("the decision could not be applied (the remote or vault changed) — the file was re-queued for review");
         }
       },
-    }).open();
+    };
   }
 
   /** Vault-side WorkingTreeWriter speaking ABSOLUTE paths (resolver transaction input).
@@ -1002,7 +1033,11 @@ export default class MugsPlugin extends Plugin {
       this.openConflictsPanel();
       return;
     }
-    void this.openView("mugs-diff");
+    if (this.reconciliationRows().length) {
+      void this.openView("mugs-reconciliation");
+      return;
+    }
+    void this.openView("mugs-map");
   }
 
   /** Open the conflicts view in the right sidebar, reusing an open panel. The
@@ -1035,7 +1070,7 @@ export default class MugsPlugin extends Plugin {
           text = `MUGS ✓ synced ${this.lastSyncedAt ? formatClock(this.lastSyncedAt) : ""}`.trimEnd();
           break;
         case "conflict":
-          text = "MUGS ⚠ needs merge";
+          text = "MUGS ⚠ needs review";
           break;
         case "skipped":
           text = "MUGS ✗ sync issues";
@@ -1054,11 +1089,11 @@ export default class MugsPlugin extends Plugin {
       }
     // Tooltip mirrors the click target so hover explains what clicking does.
     const tooltip =
-      state === "conflict" ? "MUGS — conflicts need a manual merge. Click to open the Conflicts panel."
-      : state === "skipped" ? "MUGS — some mappings were skipped last pass. Click for details."
+      state === "conflict" ? "MUGS — conflicts need your review. Click to open Conflicts."
+      : state === "skipped" ? "MUGS — some folders were skipped. Run Sync now for details."
       : state === "error" ? "MUGS — last sync failed. Click for details."
       : state === "syncing" ? `MUGS — syncing now: ${detail ?? "working…"}`
-      : "MUGS sync status — click to view the Diff (last-sync) report.";
+      : "MUGS sync status — click to view saved changes.";
     this.statusEl.empty();
     this.statusEl.setText(text);
     this.statusEl.setAttribute("aria-label", tooltip);

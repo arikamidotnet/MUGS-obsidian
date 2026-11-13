@@ -11,7 +11,7 @@
  * view and the sidebar panel tint the same author identically. Folding + action
  * labels are pure presentation built on describeConflictActions / attributeHunks.
  */
-import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile } from "./diffModel";
+import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile, type DiffLine } from "./diffModel";
 import { describeConflictActions, type ConflictAction } from "../sync/conflictActions";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
@@ -20,6 +20,56 @@ function paleTint(hsl: string): string {
   const m = /^hsl\((\d+), (\d+)%, (\d+)%\)$/.exec(hsl);
   if (!m) return hsl;
   return `hsla(${m[1]}, ${m[2]}%, ${m[3]}%, 0.14)`;
+}
+
+/** Bounded comparison of the captured conflict snapshots, never live or guessed bytes.
+ * Common prefix/suffix stay context; the divergent region is shown in full so a
+ * choice cannot be mistaken for an automatic line-level merge. */
+export function renderConflictComparison(host: HTMLElement, conflict: FileConflict): void {
+  host.createEl("p", { cls: "mugs-page-description", text: "This device → Repository. These are the versions captured when sync found overlapping edits." });
+  const before = conflict.oursAbsent ? [] : conflict.ours.split("\n");
+  const after = conflict.theirsAbsent ? [] : conflict.theirs.split("\n");
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix &&
+      before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+  const start = Math.max(0, prefix - 3);
+  const lines: DiffLine[] = [
+    ...before.slice(start, prefix).map((content) => ({ type: "context" as const, content })),
+    ...before.slice(prefix, before.length - suffix).map((content) => ({ type: "removed" as const, content })),
+    ...after.slice(prefix, after.length - suffix).map((content) => ({ type: "added" as const, content })),
+    ...before.slice(before.length - suffix, before.length - suffix + Math.min(suffix, 3)).map((content) => ({ type: "context" as const, content })),
+  ];
+  if (lines.length > 2000 || conflict.ours.length + conflict.theirs.length > 256 * 1024) {
+    host.createEl("p", { cls: "mugs-note", text: "This file is too large for an inline comparison. Open both copies and review the complete file before choosing a version." });
+    return;
+  }
+  if (conflict.oursAbsent || conflict.theirsAbsent) {
+    host.createEl("p", { cls: "mugs-note", text: `${conflict.oursAbsent ? "This device" : "Repository"} deleted this file. Choosing that side deletes both copies.` });
+  }
+  renderDiff({ files: [{ name: conflict.path, hunks: [{
+    file: conflict.path, oldStart: start + 1, newStart: start + 1,
+    oldCount: lines.filter((line) => line.type !== "added").length,
+    newCount: lines.filter((line) => line.type !== "removed").length,
+    lines,
+  }] }] }, host);
+}
+
+function lineCounts(file: ParsedDiff["files"][number]): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const hunk of file.hunks) for (const line of hunk.lines) {
+    if (line.type === "added") added++;
+    if (line.type === "removed") removed++;
+  }
+  return { added, removed };
+}
+
+function renderCounts(host: HTMLElement, counts: { added: number; removed: number }): void {
+  const summary = host.createSpan({ cls: "mugs-diff-summary" });
+  summary.createSpan({ text: `+${counts.added}`, cls: "mugs-diff-count mugs-diff-count-added" });
+  summary.createSpan({ text: `-${counts.removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
 }
 
 /** Render one unresolved conflict as a labeled row with resolution buttons.
@@ -68,7 +118,7 @@ function relativeTime(ms: number): string {
 /** A single "ours/theirs did X" chip. */
 function renderActionLabel(host: HTMLElement, a: ConflictAction): void {
   const chip = host.createSpan({ cls: `mugs-conflict-action mugs-conflict-action-${a.side}` });
-  chip.createSpan({ text: `${a.side === "ours" ? "Ours" : "Theirs"}:`, cls: "mugs-conflict-action-side" });
+  chip.createSpan({ text: `${a.side === "ours" ? "This device" : "Repository"}: `, cls: "mugs-conflict-action-side" });
   chip.createSpan({ text: a.detail, cls: "mugs-conflict-action-detail" });
 }
 
@@ -89,17 +139,17 @@ class ConflictButtons {
     const deletion = "Delete this file on both sides — your vault copy and the synced repository copy.";
     this.button(
       wrap,
-      this.c.oursAbsent ? "Take ours (delete file)" : "Take ours",
+      this.c.oursAbsent ? "Delete both copies (this device)" : "Keep this device",
       "ours",
-      this.c.oursAbsent ? deletion : "Keep our version of this file",
+      this.c.oursAbsent ? deletion : "Use the version on this device",
     );
     this.button(
       wrap,
-      this.c.theirsAbsent ? "Take theirs (delete file)" : "Take theirs",
+      this.c.theirsAbsent ? "Delete both copies (repository)" : "Keep repository",
       "theirs",
-      this.c.theirsAbsent ? deletion : "Use their version of this file",
+      this.c.theirsAbsent ? deletion : "Use the repository version of this file",
     );
-    this.button(wrap, "Merge both", "both", "Merge both versions where possible");
+    this.button(wrap, "Combine both", "both", "Combine both versions where possible");
   }
 
   private button(wrap: HTMLElement, text: string, choice: ResolveChoice, title: string): void {
@@ -124,6 +174,17 @@ class ConflictButtons {
 
 /** Select one changed file without rerunning git or hiding unresolved conflicts. */
 export function renderFileBrowser(parsed: ParsedDiff, host: HTMLElement, authorsByFile: AuthorsByFile = {}): void {
+  if (!parsed.files.length) {
+    renderDiff(parsed, host);
+    return;
+  }
+  const totals = parsed.files.reduce((sum, file) => {
+    const counts = lineCounts(file);
+    return { added: sum.added + counts.added, removed: sum.removed + counts.removed };
+  }, { added: 0, removed: 0 });
+  const overview = host.createDiv({ cls: "mugs-diff-overview" });
+  overview.createSpan({ text: `${parsed.files.length} changed file${parsed.files.length === 1 ? "" : "s"}` });
+  renderCounts(overview, totals);
   const browser = host.createDiv({ cls: "mugs-diff-browser" });
   const list = browser.createDiv({ cls: "mugs-diff-file-list" });
   list.setAttribute("aria-label", "Changed files");
@@ -135,17 +196,23 @@ export function renderFileBrowser(parsed: ParsedDiff, host: HTMLElement, authors
     focused.empty();
     buttons.forEach((button, i) => button.setAttribute("aria-pressed", String(i === index)));
     const names = authors(parsed.files[index].name);
-    focused.createEl("p", {
-      text: names.length ? `Git file authors in this range: ${names.join(", ")}. Attribution is file-level, not per-line or the current editor.` : "Author unavailable",
-      cls: "mugs-diff-file-authors mugs-muted",
-    });
     renderDiff({ ...parsed, files: [parsed.files[index]] }, focused, palette);
+    if (names.length) {
+      focused.createEl("p", {
+        text: `Authors: ${names.join(", ")}`,
+        cls: "mugs-diff-file-authors",
+        attr: { title: "Git authors for this file in the selected range, not line-by-line attribution." },
+      });
+    }
   };
   parsed.files.forEach((file, index) => {
     const names = authors(file.name);
-    const added = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "added").length;
-    const removed = file.hunks.flatMap((h) => h.lines).filter((line) => line.type === "removed").length;
-    const button = list.createEl("button", { text: `${file.name} · +${added} −${removed} · ${names.length ? names.join(", ") : "Author unavailable"}`, cls: "mugs-diff-file-choice", type: "button" });
+    const counts = lineCounts(file);
+    const button = list.createEl("button", { cls: "mugs-diff-file-choice", type: "button" });
+    button.setAttribute("title", `${file.name}${names.length ? ` · ${names.join(", ")}` : ""}`);
+    button.setAttribute("aria-label", `${file.name}, ${counts.added} added, ${counts.removed} removed`);
+    button.createSpan({ text: file.name, cls: "mugs-diff-file-path" });
+    renderCounts(button, counts);
     buttons.push(button);
     button.addEventListener("click", () => select(index));
   });
@@ -168,7 +235,7 @@ export function renderConflicts(
   if (conflicts.length === 0) return;
   const box = host.createDiv({ cls: "mugs-conflicts" });
   box.createEl("h3", {
-    text: `MUGS — ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "" : "s"} manual resolution`,
+    text: `${conflicts.length} file${conflicts.length === 1 ? "" : "s"} need${conflicts.length === 1 ? "s" : ""} your review`,
     cls: "mugs-conflicts-title",
   });
   for (const c of conflicts) renderConflictRow(box, c, onResolve, busyPaths);
@@ -186,7 +253,7 @@ export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<s
     const card = host.createDiv({ cls: "mugs-empty-state" });
     card.createEl("h3", { text: "No changes in this range" });
     card.createEl("p", {
-      text: "The chosen ref produces no diff against the comparison base. Try a different ref in the picker above (e.g. an older commit like HEAD~1).",
+      text: "Choose an older commit to see earlier changes.",
       cls: "mugs-muted",
     });
     return;
@@ -199,48 +266,29 @@ export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<s
   }
 }
 
-/** Render one file's diff block with a collapsible header showing +/- counts and author badges. */
+/** Render one file's diff block with a collapsible header and +/- counts. */
 function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, palette: Map<string, string>): void {
   const block = host.createDiv({ cls: "mugs-diff-file" });
 
   // File summary row — always visible even when hunks are collapsed.
-  let added = 0;
-  let removed = 0;
-  const authors = new Set<string>();
-  for (const hunk of file.hunks) {
-    for (const line of hunk.lines) {
-      if (line.type === "added") added++;
-      else if (line.type === "removed") removed++;
-    }
-    if (hunk.author) authors.add(hunk.author);
-  }
+  const counts = lineCounts(file);
 
   const header = block.createDiv({ cls: "mugs-diff-file-header" });
   header.setAttribute("role", "button");
   header.setAttribute("tabindex", "0");
   header.setAttribute("aria-expanded", "true");
   header.setAttribute("aria-label", `Toggle changes for ${file.name}`);
+  const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
   header.createEl("span", { text: file.name, cls: "mugs-diff-filename" });
-  const summary = header.createSpan({ cls: "mugs-diff-summary" });
-  summary.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
-  summary.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
-  for (const author of authors) {
-    const color = palette.get(author) ?? authorAccent(author);
-    const badge = header.createSpan({
-      text: author,
-      cls: "mugs-diff-author-badge",
-      attr: { style: `background:${paleTint(color)};color:${color};border-color:${color}` },
-    });
-    if (author) badge.setAttr("title", `@ ${author}`);
-  }
+  header.setAttribute("title", file.name);
+  renderCounts(header, counts);
 
   // File-level collapse toggle.
-  const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
   let fileOpen = true;
   const body = block.createDiv({ cls: "mugs-diff-file-body" });
-  if (file.binary) body.createEl("p", { text: "Binary file changed; textual diff is not available.", cls: "mugs-muted" });
+  if (file.binary) body.createEl("p", { text: "Binary file changed. No text preview.", cls: "mugs-muted" });
   if (file.renamedFrom) body.createEl("p", { text: `Renamed from ${file.renamedFrom}`, cls: "mugs-muted" });
-  if (!file.binary && !file.renamedFrom && file.hunks.length === 0) body.createEl("p", { text: "File metadata changed (no text hunks).", cls: "mugs-muted" });
+  if (!file.binary && !file.renamedFrom && file.hunks.length === 0) body.createEl("p", { text: "File details changed. No text changes.", cls: "mugs-muted" });
   body.style.display = "";
 
   // Click the file header to collapse/expand all hunks.
@@ -270,14 +318,6 @@ function renderFileBlock(file: ParsedDiff["files"][number], host: HTMLElement, p
 
 /** A collapsible hunk: section title + line range, toggling the body below. Returns nothing (appends directly). */
 function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks"][number], authorColor?: string): void {
-  // Per-hunk +/- counts so a collapsed header still tells you the size.
-  let added = 0;
-  let removed = 0;
-  for (const line of hunk.lines) {
-    if (line.type === "added") added++;
-    else if (line.type === "removed") removed++;
-  }
-
   const header = block.createDiv({ cls: "mugs-diff-hunk-header" });
   header.setAttribute("role", "button");
   header.setAttribute("tabindex", "0");
@@ -288,15 +328,17 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
 
   const label = header.createSpan({ cls: "mugs-diff-hunk-label" });
-  label.createSpan({ text: `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`, cls: "mugs-diff-hunk-range" });
+  const start = hunk.newCount === 0 ? hunk.oldStart : hunk.newStart;
+  const count = hunk.newCount === 0 ? hunk.oldCount : hunk.newCount;
+  label.createSpan({
+    text: count > 1 ? `Lines ${start}–${start + count - 1}` : `Line ${start}`,
+    cls: "mugs-diff-hunk-range",
+    attr: { title: `@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@` },
+  });
   if (hunk.section) label.createSpan({ text: hunk.section, cls: "mugs-diff-hunk-section" });
-  if (hunk.author) header.createSpan({ text: hunk.author, cls: "mugs-diff-author-badge" });
-
-  const counts = header.createSpan({ cls: "mugs-diff-hunk-counts" });
-  counts.createSpan({ text: `+${added}`, cls: "mugs-diff-count mugs-diff-count-added" });
-  counts.createSpan({ text: `-${removed}`, cls: "mugs-diff-count mugs-diff-count-removed" });
-
-  const body = block.createEl("table", { cls: "mugs-diff-hunk mugs-diff-hunk-body" });
+  // Each hunk scrolls independently; its gutters never stretch to fill the panel.
+  const scroller = block.createDiv({ cls: "mugs-diff-code-scroll" });
+  const body = scroller.createEl("table", { cls: "mugs-diff-hunk mugs-diff-hunk-body" });
   let open = true;
   const setOpen = (e?: Event) => {
     e?.stopPropagation(); // don't trigger file-level collapse
@@ -323,14 +365,18 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
 
     // Old-side line number (for removed/context lines).
     const oldCell = row.insertCell();
+    oldCell.addClass("mugs-diff-gutter");
     oldCell.createSpan({ text: String(line.type === "added" ? "" : oldNo), cls: "mugs-diff-lineno mugs-diff-lineno-old" });
 
     // New-side line number (for added/context lines).
     const newCell = row.insertCell();
+    newCell.addClass("mugs-diff-gutter");
     newCell.createSpan({ text: String(line.type === "removed" ? "" : newNo), cls: "mugs-diff-lineno mugs-diff-lineno-new" });
 
     // Sign column.
-    const signEl = row.insertCell().createSpan({ text: line.type === "added" ? "+" : line.type === "removed" ? "-" : " ", cls: `mugs-diff-sign mugs-diff-${line.type}` });
+    const signCell = row.insertCell();
+    signCell.addClass("mugs-diff-sign-cell");
+    const signEl = signCell.createSpan({ text: line.type === "added" ? "+" : line.type === "removed" ? "-" : " ", cls: `mugs-diff-sign mugs-diff-${line.type}` });
 
     // Content with author tint for changed lines.
     // Align class on the TD (CSS rules target td.mugs-diff-content) while keeping span for text+tint.

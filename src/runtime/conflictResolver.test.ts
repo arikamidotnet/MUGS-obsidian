@@ -70,7 +70,7 @@ function makeDeps(overrides: Partial<ConflictResolverDeps> = {}, saveResult?: Sa
 
 describe("S07 manual resolution transaction", () => {
   it("applies in contract order: originals first, then clone→vault→state clear→save", async () => {
-    const { deps, log, cloneTree, vaultTree, trash } = makeDeps();
+    const { deps, log, cloneTree, vaultTree, trash, conflicts } = makeDeps();
     const resolver = createConflictResolver(deps).forMapping("m1");
     const outcome = await resolver(storedConflict(), "theirs");
     expect(outcome).toEqual({ ok: true, applied: true });
@@ -91,6 +91,10 @@ describe("S07 manual resolution transaction", () => {
     // Resolved content landed on both trees.
     expect(cloneTree.files.get("/clone/Notes/a.md")).toBe("theirs\n");
     expect(vaultTree.files.get("/vault/Notes/a.md")).toBe("theirs\n");
+    // The record is KEPT as resolved evidence (not dropped) so the next sync pass
+    // can publish an ours/both winner instead of re-conflicting the same file.
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({ path: "Notes/a.md", resolved: true, resolvedContent: "theirs\n" });
   });
 
   it("SaveResult {ok:false} is a FAILURE: conflict stays, retry recorded, no ok", async () => {

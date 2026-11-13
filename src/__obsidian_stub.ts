@@ -103,10 +103,12 @@ class El {
   style: Record<string, string> = {};
   private _handlers: Record<string, ((e: unknown) => void)[]> = {};
   parent: El | null = null;
+  attrs: Record<string, string> = {};
+  setAttribute(key: string, value: string): void { this.attrs[key] = value; }
   constructor(tag: string) { this.tagName = tag.toLowerCase(); }
   get className() { return [...this._classes].join(" "); }
   set className(v: string) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
-  get classList() { const set = this._classes; return { toggle: (c: string) => (set.has(c) ? set.delete(c) : set.add(c)), contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) }; }
+  get classList() { const set = this._classes; return { toggle: (c: string) => { if (set.has(c)) { set.delete(c); return false; } set.add(c); return true; }, contains: (c: string) => set.has(c), add: (c: string) => set.add(c), remove: (c: string) => set.delete(c) }; }
   createDiv(opts?: { cls?: string }) { const e = new El("div"); if (opts?.cls) e.className = opts.cls; this.children.push(e); e.parent = this; return e; }
   createEl(tag: string, opts?: { text?: string; cls?: string; type?: string }) { const e = new El(tag); if (opts?.text != null) e.textContent = opts.text; if (opts?.cls) e.className = opts.cls; if (opts?.type) e.type = opts.type; this.children.push(e); e.parent = this; return e; }
   empty(): void { this.children = []; }

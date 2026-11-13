@@ -83,18 +83,18 @@ export function describeMapRow(input: {
   switch (input.status) {
     case "conflict":
       return {
-        label: "needs merge",
+        label: "needs review",
         tone: "error",
         reason: input.conflictCount
-          ? `${input.conflictCount} file${input.conflictCount === 1 ? "" : "s"} need a manual merge — open the Conflicts panel`
-          : "conflicting changes need a manual merge — open the Conflicts panel",
+          ? `${input.conflictCount} file${input.conflictCount === 1 ? " needs" : "s need"} your review — open Conflicts`
+          : "Choose which changes to keep in Conflicts",
       };
     case "error":
       return { label: "failed", tone: "error", reason: "the last sync failed — run Sync again or check the MUGS notices" };
     case "ok":
     case "up-to-date":
       return input.direction === "push-only"
-        ? { label: "in sync", tone: "success", reason: "push-only: your changes upload, but remote changes are never downloaded" }
+        ? { label: "in sync", tone: "success", reason: "Upload only: repository changes are never downloaded" }
         : { label: "in sync", tone: "success" };
     default:
       return { label: "pending", tone: "warning", reason: "not synced yet — run a sync" };
@@ -105,11 +105,11 @@ export function describeMapRow(input: {
 export function directionHint(direction: SyncDirection): string {
   switch (direction) {
     case "push-only":
-      return "Push only: your changes upload to the remote; remote changes are never downloaded.";
+      return "Upload only: send your changes to the repository. Repository changes are never downloaded.";
     case "pull-only":
-      return "Pull only: remote changes download to your vault; local changes are never uploaded.";
+      return "Download only: get repository changes. Changes on this device are never uploaded.";
     default:
-      return "Push + pull: changes sync in both directions.";
+      return "Both ways: upload your changes and download repository changes.";
   }
 }
 

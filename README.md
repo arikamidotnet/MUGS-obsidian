@@ -7,6 +7,20 @@ Obsidian 1.8.0 or newer.
 Development requires Node 20.19+ (CI pins 20.20.2). Release dependencies are
 locked; use `npm ci` for repeatable installs.
 
+## 0.4.1 highlights
+
+- Consistent Overview, Changes, Review and Conflicts navigation, responsive folder
+  rows, a searchable Review tab, per-file conflict comparisons and clearer settings.
+- Scoped first downloads read the selected repository subtree, including when a
+  file with the same name exists outside that subtree.
+- Proven local deletions stay deleted through pull mirroring and later sync passes;
+  old repository content is not restored and uploaded again.
+- Explicit conflict choices publish on the next sync; newer remote edits still
+  require a fresh decision. Verified idle passes avoid content reads, rewrites,
+  commits and pushes.
+
+Use the upgrade/rollback instructions below and retain a private vault backup.
+
 Fine-grained, folder-mapped git sync across **all** git backends (GitLab-first),
 with per-user credentials stored *inside* the vault and multi-user collaboration
 built on shared repos + backend permissions — no hosted backend, no E2E encryption.
@@ -45,7 +59,7 @@ src/
   sync/               sync driver (syncAllMappings orchestration), clone manager (identity-keyed shared clones), and the merge contract: classifier, rebase policy, exclusion, merge/conflict, reconciliation (path-level ownership proof)
   runtime/            app-runtime transactions: manual conflict resolution, aggregate status reporting
   membership/         multi-user membership merge (roster + local activity -> summary)
-  ui/                 Obsidian views (Map graph, Diff) + pure models + data seams
+  ui/                 Obsidian views (Overview, Changes, Review, Conflicts) + pure models + data seams
 bench/              performance benchmarks (npm run bench)
 ```
 
@@ -66,10 +80,14 @@ Implemented features:
 - **Fine-grained paths.** gitignore-style include/exclude rules decide which files a mapping touches. (`src/sync/exclusion.ts`)
 - **Git-native engine.** A thin `GitClient` over the system `git` binary drives clone/fetch/stage/commit/push per mapping — no `git pull` or `git rebase` runs; divergence is merged file-by-file into the clone's working tree and committed on the remote tip. Clones live under `<vault>/.mugs-clones`, keyed by resolved repository identity (provider, repo, branch, normalized remote) and shared by every mapping pointing at that identity. (`src/git/`, `src/sync/cloneManager.ts`, `src/sync/repoIdentity.ts`)
 - **Multi-user visibility.** A pure data layer merges a backend's member roster with local git activity into a membership summary — access and activity, not enforcement. No view surfaces it yet. (`src/membership/`)
-- **Map view** (`mugs-map`). A folder->repo graph color-coded by sync status and direction, showing owning users. (`src/ui/mapView.ts`)
-- **Per-file Diff view** (`mugs-diff`). Select a mapping and comparison mode, then
+- **Overview** (`mugs-map`, the ribbon default). One aligned row per connected
+  folder — folder, direction, repository, last sync times and honest status —
+  with Sync now, Review files and Settings actions, plus shared
+  Overview / Changes / Review / Conflicts navigation on every page. (`src/ui/mapView.ts`, `src/ui/navigation.ts`)
+- **Changes view** (`mugs-diff`). Select a folder and comparison mode, then
   browse changed files with addition/deletion counts, line numbers, collapsible
-  changes, and file-level Git author names where available.
+  changes, and file-level Git author names where available. Compact cards state
+  plainly that only saved Git history is shown.
 - **Conflict resolution.** Clean three-way changes auto-merge; genuine conflicts
   (overlapping edits, divergent add/add) are recorded and surfaced in the
   **Conflicts panel** for an explicit ours / theirs / both choice — the
@@ -80,10 +98,10 @@ Implemented features:
 - **Reconciliation (path-level ownership).** Neither a filename nor an mtime
   proves a vault received a remote file — a matching Git blob does. Every pass
   verifies vault bytes against the published blob IDs from the remote tree;
-  remote-only paths this vault never received land in a **Reconciliation review**
+  remote-only paths this vault never received land in the **Review tab**
   (never auto-deleted, never blocking the pass from completing), and deletion
   propagation is per-path: a remote file may be deleted only if its path is
-  blob-proven. (`src/sync/reconciliation.ts`, `src/ui/reconciliationModal.ts`)
+  blob-proven. (`src/sync/reconciliation.ts`, `src/ui/reconciliationReview.ts`)
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon, the *Run sync* command, and a gated scheduler. Manual runs report per-mapping synced / needs-merge / skipped Notices (plus first-sync completion); automatic runs report one aggregate. Recoverable stops — a dirty or unpushed legacy clone, a clone locked by another process — return a *blocked* outcome with a reason and are never auto-reset. (`src/providers/factory.ts`, `src/main.ts`)
 - **Settings controls.** Manage credentials and folder mappings, with explicit
   Apply/Cancel drafts and validation of protected configuration scopes.
@@ -93,15 +111,15 @@ cross-process clone locks, event-driven sync (file changes coalesce into a pass
 within ~1.5 s; a gated poll — presets 3600 s / 300 s / 30 s, default 300 s, on a
 15 s tick — covers remote drift), a clickable status bar, opt-in passphrase
 encryption, serialized settings saves, cancellation on plugin unload, and the
-reconciliation review modal (the user surface for reconciliation review rows,
-with explicit per-file decisions).
+repository-file Review tab (the user surface for reconciliation review rows,
+with a file list, preview pane and explicit per-file decisions).
 
 Remaining work (not claiming completeness): mobile support (desktop-only for
 now); per-hunk blame granularity; surfacing blocked and deferred outcomes in
-the status-bar aggregate (manual runs announce review items and the
-reconciliation modal surfaces them, but automatic runs and the status-bar
-report still ignore blocked/deferred counts); agent worktree isolation (pure
-module exists, unwired); a view for the membership data layer.
+the status-bar aggregate (manual runs announce review items and the Review
+tab surfaces them, but automatic runs and the status-bar report still ignore
+blocked/deferred counts); agent worktree isolation (pure module exists,
+unwired); a view for the membership data layer.
 
 ## Sync flow and directions (current behavior)
 
@@ -154,10 +172,10 @@ module exists, unwired); a view for the membership data layer.
 ## Credentials and encryption model (current limits)
 
 - Credentials (provider kind, base URL, token, username, optional repo allow-list) are stored in the vault's `data.json` via the plugin store.
-- **Encryption at rest is opt-in** (Settings → Security & Credentials) and uses a passphrase you provide. The passphrase is **never stored** in the vault and cannot be recovered if lost.
+- **Encryption at rest is opt-in** (Settings → Security) and uses a passphrase you provide. The passphrase is **never stored** in the vault and cannot be recovered if lost.
 - Encryption is **off by default**. Without it, tokens are stored in plaintext inside `data.json`.
 - A passphrase-encrypted vault starts every session locked; unlock it in
-  Settings → Security & Credentials. A wrong passphrase leaves credentials in
+  Settings → Security. A wrong passphrase leaves credentials in
   a visible "missing token" state — nothing is lost or overwritten. Vaults from
   the older hint-based scheme migrate to the passphrase scheme on first unlock.
 - Treat an unencrypted vault with the same care as a password manager.
@@ -181,20 +199,23 @@ module exists, unwired); a view for the membership data layer.
 ## Operator recovery notes (current)
 
 - When a mapping shows "needs merge" / conflict status, open the Conflicts panel (via status bar click or dedicated view) and choose per file: ours / theirs / both.
-- When the **Reconciliation review** lists paths (remote files this vault never
-  received, or a local deletion that raced a remote edit), open the
-  Reconciliation review modal (ribbon icon or command palette → *Reconcile
-  remote-only files*) and decide per file: delete the remote path or recover
+- When the **Review tab** lists paths (remote files this vault never
+  received, or a local deletion that raced a remote edit), open it
+  (navigation → *Review*, status-bar click, or command palette → *Review
+  repository files*) and decide per file: delete the remote path or recover
   it into the vault. Decisions are bound to the exact ref and blob they were
   made against — if any precondition fails at execution (remote moved, path
   out of scope, file back in the vault or open in an editor), the decision is
   dropped with an advisory and the path re-queues for review; a stale decision
   never executes.
 - Resolved choices are written to both the clone's working tree and your vault
-  folder, so a stale vault copy cannot resurface the same conflict. Originals
-  are preserved first (`.mugs-origin` sidecar files plus the trash store), and
-  a resolution is acknowledged only after the state save persists it — a
-  refused save keeps the conflict and records a durable retry.
+  folder, so a stale vault copy cannot resurface the same conflict. The resolved
+  record is kept as engine evidence: the next completed pass publishes your
+  chosen content (bound to the exact remote bytes it was decided against — a
+  remote that moved on re-surfaces the file for a fresh decision) and then
+  clears it. Originals are preserved first (`.mugs-origin` sidecar files plus
+  the trash store), and a resolution is acknowledged only after the state save
+  persists it — a refused save keeps the conflict and records a durable retry.
 - Sync-driven deletions are recorded in the trash store
   (`<vault>/.mugs-clones/.mugs-trash`) before removal, so remotely deleted and
   both-sides-deleted content stays recoverable.
@@ -240,7 +261,7 @@ from the public repo).
 ## Security notes
 
 Credentials are stored in the vault's `data.json`. When you enable **Encrypt credentials at rest**
-(Settings → Security & Credentials), tokens are encrypted at rest with a passphrase you choose; the
+(Settings → Security), tokens are encrypted at rest with a passphrase you choose; the
 passphrase is never stored in the vault and cannot be recovered. Encryption is **off by default** —
 without it tokens are stored as-is, so treat the vault with the same care you would a password
 manager. Git authentication passes tokens through per-invocation environment variables (never argv,
@@ -251,11 +272,12 @@ never credentials.
 
 1. Install: copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/mugs-obsidian/`
 (or add the repo via [BRAT](https://github.com/TfTHacker/obsidian42-brat)). **Desktop Obsidian only.**
-2. Settings → MUGS → Credentials: add your GitLab PAT (needs `api` scope + access to the shared repo),
+2. Settings → MUGS → Accounts: add your GitLab PAT (needs `api` scope + access to the shared repo),
 your username, and optionally restrict the token to that repo.
 3. Folder Mappings: pick your credential → the shared repo → check your folders → choose direction.
 Agree with your team on the **first-sync direction** before the first run (pull populates your
 vault from the remote by default; push uploads the vault onto it, additively).
 4. Watch the status bar: `⟳` while syncing (with live phase text), `✓ synced HH:MM`, `⚠ needs merge`,
 `✗ sync issues` / `✗ failed`, `⏸ paused`, `👁 hidden`. **Clicking it** opens the Conflicts panel when
-something needs a manual merge; otherwise opens the Diff view (baseline comparison).
+something needs a manual merge; the Review tab when repository files need decisions; otherwise the
+Overview. The ribbon icon opens the Overview directly.

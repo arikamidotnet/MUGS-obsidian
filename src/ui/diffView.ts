@@ -11,6 +11,8 @@ import { parseUnifiedDiff, attributeHunks, validateRef } from "./diffModel";
 import { renderConflicts, renderFileBrowser } from "./diffRender";
 import { getMugsContext } from "./dataSources";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
+import { resolutionLabel } from "./labels";
+import { renderNavigation } from "./navigation";
 
 export class DiffView extends ItemView {
   /** Mapping currently shown (kept so a resolution can re-render the same view). */
@@ -28,7 +30,7 @@ export class DiffView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "MUGS Diff";
+    return "MUGS Changes";
   }
 
   getIcon(): string {
@@ -38,8 +40,9 @@ export class DiffView extends ItemView {
   async onOpen(): Promise<void> {
     this.closed = false;
     this.contentEl.empty();
+    renderNavigation(this.contentEl, "mugs-diff");
     this.contentEl.addClass("mugs-diff-view");
-    this.addAction("refresh", "Reload diff", () => void this.render());
+    this.addAction("refresh", "Refresh changes", () => void this.render());
     await this.render();
   }
 
@@ -54,15 +57,18 @@ export class DiffView extends ItemView {
     const generation = ++this.generation;
     // Clear before rebuilding: a resolution re-render used to APPEND a second
     // picker + output under the stale one, so the view grew on every resolve.
+    // The shared navigation lives in this root too, so it is re-created first
+    // (same pattern as MapView's renderHeader).
     this.contentEl.empty();
+    renderNavigation(this.contentEl, "mugs-diff");
     try {
       const rows = await getMugsContext().map.getRows();
       if (this.closed || generation !== this.generation) return;
       if (rows.length === 0) {
         const empty = this.contentEl.createDiv({ cls: "mugs-empty-state" });
-        empty.createEl("h3", { text: "No folder mappings yet" });
+        empty.createEl("h3", { text: "No folders connected" });
         empty.createEl("p", {
-          text: "Add a credential and create your first folder mapping in the MUGS settings to compare changes here.",
+          text: "Connect a folder in MUGS settings to view its changes.",
           cls: "mugs-muted",
         });
         return;
@@ -70,7 +76,6 @@ export class DiffView extends ItemView {
       await this.renderPicker(rows);
     } catch (err) {
       if (this.closed || generation !== this.generation) return;
-      this.contentEl.empty();
       new Notice(`MUGS: could not load diff — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -82,7 +87,7 @@ export class DiffView extends ItemView {
 
     // Mapping selector — always shown for clarity, disabled when only one mapping.
     const header = controls.createDiv({ cls: "mugs-diff-range" });
-    header.createSpan({ text: "Compare", cls: "mugs-diff-range-label" });
+    header.createSpan({ text: "Folder", cls: "mugs-diff-range-label" });
 
     // Keep the picker on the mapping the user chose — a resolution re-render used
     // to snap back to the first mapping (and HEAD) and lose the user's place.
@@ -91,10 +96,11 @@ export class DiffView extends ItemView {
 
     if (rows.length > 1) {
       const select = header.createEl("select", { cls: "mugs-diff-mapping-select" });
+      select.setAttribute("aria-label", "Connected folder");
       for (const r of rows) {
         const opt = select.createEl("option");
         opt.value = r.mapping.id;
-        opt.textContent = `${r.mapping.label || r.mapping.id}${r.status ? ` · ${r.status}` : ""}`;
+        opt.textContent = r.mapping.label || r.mapping.id;
       }
       select.value = this.selectedMappingId;
       select.addEventListener("change", (e) => {
@@ -113,9 +119,9 @@ export class DiffView extends ItemView {
     const mode = header.createEl("select", { cls: "mugs-diff-mode" });
     mode.setAttribute("aria-label", "Comparison mode");
     for (const [value, text] of [
-      ["since-sync", "Since completed sync → HEAD"],
-      ["previous", "Previous commit → HEAD"],
-      ["custom", "Custom older ref → HEAD"],
+      ["since-sync", "Since last completed sync"],
+      ["previous", "Last commit"],
+      ["custom", "Choose older commit…"],
     ]) {
       const option = mode.createEl("option", { text });
       option.value = value;
@@ -126,11 +132,11 @@ export class DiffView extends ItemView {
       refContainer.style.display = mode.value === "custom" ? "" : "none";
       void this.applyRef(refInput, recentDropdown, output);
     });
-    controls.createEl("p", { text: "Unsynced vault edits are not included — committed snapshots only.", cls: "mugs-note" });
+    controls.createEl("p", { text: "Saved Git history only · Unsynced edits aren't shown.", cls: "mugs-diff-history-note" });
     const refContainer = header.createDiv({ cls: "mugs-diff-ref-container" });
     refContainer.style.display = mode.value === "custom" ? "" : "none";
-    const refInput = refContainer.createEl("input", { type: "text", cls: "mugs-diff-ref-input", placeholder: "Older ref (e.g. HEAD~2)" });
-    refInput.setAttribute("aria-label", "Older comparison ref");
+    const refInput = refContainer.createEl("input", { type: "text", cls: "mugs-diff-ref-input", placeholder: "Commit, tag or branch" });
+    refInput.setAttribute("aria-label", "Older commit, tag or branch");
     refInput.value = this.selectedRefs[this.selectedMappingId] ?? "HEAD~1";
     const recentDropdown = refContainer.createEl("select", { cls: "mugs-diff-ref-dropdown" });
     this.rebuildRecentOptions(recentDropdown);
@@ -142,9 +148,6 @@ export class DiffView extends ItemView {
       refInput.value = picked;
       void this.applyRef(refInput, recentDropdown, output);
     });
-
-    // Both endpoints are explicit; resolved labels also accompany the result.
-    header.createSpan({ text: "Target: HEAD (committed snapshot)", cls: "mugs-diff-range-hint" });
 
     // Show this mapping's diff immediately (with its restored ref).
     await this.showDiff(this.selectedMappingId, output, refInput.value.trim() || "HEAD");
@@ -167,7 +170,7 @@ export class DiffView extends ItemView {
       dd._mugsRecentOpts!.push(opt);
     };
 
-    add("", "recent…");
+    add("", "Recent commits…");
     for (const r of this.recentRefs[this.selectedMappingId] ?? []) add(r, r);
     dropdown.style.display = (this.recentRefs[this.selectedMappingId]?.length ?? 0) > 0 ? "" : "none";
   }
@@ -220,20 +223,23 @@ export class DiffView extends ItemView {
       // U03: discard stale responses
       if (!current()) return;
 
-      const { diffText, authorsByFile, baseRef, outcome, detail, fromLabel, toLabel, note, errorKind } = res;
-      if (fromLabel && toLabel) output.createEl("p", { text: `${fromLabel} → ${toLabel}`, cls: "mugs-diff-endpoints" });
+      const { diffText, authorsByFile, baseRef, outcome, detail, fromLabel, toLabel, errorKind } = res;
+      if (fromLabel && toLabel) output.createEl("p", {
+        text: `${comparisonLabel(fromLabel)} → ${comparisonLabel(toLabel)}`,
+        cls: "mugs-diff-endpoints",
+      });
 
       if (outcome === "git-error") {
         // Distinct messages per ReadErrorKind (auth vs timeout vs missing vs other)
         const kindMsg =
-          errorKind === "auth" ? "authentication or permission failure (check credential)"
-          : errorKind === "timeout" ? "network timeout while fetching comparison data"
-          : errorKind === "missing-ref" ? "required commit or object is missing from the local clone"
-          : "git error";
+          errorKind === "auth" ? "Check your account token and repository access"
+          : errorKind === "timeout" ? "The connection timed out. Try again"
+          : errorKind === "missing-ref" ? "This commit isn't available on this device"
+          : "Git couldn't load these changes";
         const card = output.createDiv({ cls: "mugs-empty-state" });
         card.createEl("h3", { text: "Comparison failed" });
         card.createEl("p", {
-          text: `${kindMsg}${detail ? ` — ${detail}` : ""}${fromLabel ? ` (from ${fromLabel})` : ""}.`,
+          text: `${kindMsg}${detail ? ` — ${detail}` : ""}.`,
           cls: "mugs-muted",
         });
         return;
@@ -241,10 +247,10 @@ export class DiffView extends ItemView {
 
       if (outcome === "identical") {
         const card = output.createDiv({ cls: "mugs-empty-state" });
-        const baseLabel = fromLabel ?? (baseRef ? shortSha(baseRef) : "baseline");
-        card.createEl("h3", { text: "Identical snapshots" });
+        const baseLabel = fromLabel ? comparisonLabel(fromLabel) : (baseRef ? shortSha(baseRef) : "the saved sync point");
+        card.createEl("h3", { text: "No changes" });
         card.createEl("p", {
-          text: `No differences between ${baseLabel} and ${toLabel ?? "HEAD (committed snapshot)"}. To review file history, choose Previous commit → HEAD or Custom older ref → HEAD above.`,
+          text: `No changes between ${baseLabel} and ${toLabel ? comparisonLabel(toLabel) : "the latest commit"}. Choose Last commit or an older commit to see earlier changes.`,
           cls: "mugs-muted",
         });
         return;
@@ -252,25 +258,19 @@ export class DiffView extends ItemView {
 
       if (outcome === "no-baseline") {
         const card = output.createDiv({ cls: "mugs-empty-state" });
-        card.createEl("h3", { text: "No baseline yet" });
-        card.createEl("p", { text: "Run a sync first to establish a completed-sync comparison point, or choose Previous commit → HEAD to review history.", cls: "mugs-muted" });
+        card.createEl("h3", { text: "No completed sync yet" });
+        card.createEl("p", { text: "Complete a sync first, or choose Last commit to browse saved changes.", cls: "mugs-muted" });
         return;
       }
 
       if (outcome !== "changed") {
         const why =
-          outcome === "no-clone" ? "the repository has not been cloned yet — run a sync first"
-          : "this mapping no longer exists";
+          outcome === "no-clone" ? "run a sync to download the repository first"
+          : "this folder is no longer connected";
         const card = output.createDiv({ cls: "mugs-empty-state" });
         card.createEl("h3", { text: "No comparison available" });
         card.createEl("p", { text: `${why.charAt(0).toUpperCase()}${why.slice(1)}.`, cls: "mugs-muted" });
         return;
-      }
-
-      // Pending local edits note (committed snapshot only)
-      if (note) {
-        const banner = output.createDiv({ cls: "mugs-note" });
-        banner.createEl("span", { text: note });
       }
 
       const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);
@@ -311,7 +311,7 @@ export class DiffView extends ItemView {
       busy.delete(key);
       const left = res.remaining;
       new Notice(
-        `MUGS — resolved ${key} (${choice}).${
+        `MUGS — ${key}: kept ${resolutionLabel(choice)}.${
           left > 0 ? ` ${left} file${left === 1 ? "" : "s"} still unresolved.` : " No conflicts remain."
         }`,
       );
@@ -342,6 +342,16 @@ export class DiffView extends ItemView {
       }
     }
   }
+}
+
+/** Display-only labels: raw refs and comparison direction remain unchanged. */
+function comparisonLabel(label: string): string {
+  const ref = label.replace(/ \(committed snapshot\)$/, "");
+  if (ref === "HEAD") return "Latest commit";
+  if (ref === "HEAD~1") return "Previous commit";
+  if (ref === "last completed sync") return "Last completed sync";
+  if (ref === "fetched remote tip (not last sync)") return "Downloaded repository version (not last sync)";
+  return shortSha(ref);
 }
 
 /** Short display form of a baseline ref/SHA (full SHAs truncated to 8 chars). */

@@ -228,14 +228,19 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const focused = () => v.contentEl.querySelector(".mugs-diff-focused")!;
     expect(collectText(focused())).toContain("new-a.md");
     expect(collectText(focused())).not.toContain("new-b.md");
-    expect(collectText(focused())).toContain("Git file authors in this range: Ada, Grace");
-    expect(collectText(focused())).toContain("file-level, not per-line");
-    expect(collectText(v.contentEl.querySelector(".mugs-diff-file-list"))).toContain("a.md · +1 −1 · Ada, Grace");
+    expect(collectText(focused())).toContain("Authors: Ada, Grace");
+    expect(allTitles(focused()).join(" ")).toContain("not line-by-line attribution");
+    expect(collectText(v.contentEl.querySelector(".mugs-diff-file-list"))).toContain("a.md+1-1");
     expect(collectText(focused())).toContain("+1");
     expect(collectText(focused())).toContain("-1");
     expect(v.contentEl.querySelector(".mugs-diff-row-added")).not.toBeNull();
     expect(v.contentEl.querySelector(".mugs-diff-row-removed")).not.toBeNull();
     expect(v.contentEl.querySelector(".mugs-diff-lineno-old")).not.toBeNull();
+    expect(v.contentEl.querySelectorAll(".mugs-diff-gutter").length).toBe(4);
+    expect(v.contentEl.querySelectorAll(".mugs-diff-sign-cell").length).toBe(2);
+    expect(v.contentEl.querySelectorAll(".mugs-diff-code-scroll").length).toBe(1);
+    expect(collectText(v.contentEl.querySelector(".mugs-diff-hunk-header"))).toContain("Line 1");
+    expect(collectText(v.contentEl.querySelector(".mugs-diff-hunk-header"))).not.toContain("@@");
     const header = v.contentEl.querySelector(".mugs-diff-file-header") as any;
     fire(header, "click", { stopPropagation() {} });
     expect((v.contentEl.querySelector(".mugs-diff-file-body") as any).style.display).toBe("none");
@@ -251,11 +256,113 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     fire(v.contentEl.querySelectorAll(".mugs-diff-file-choice")[1] as any, "click");
     expect(collectText(focused())).toContain("new-b.md");
     expect(collectText(focused())).not.toContain("new-a.md");
-    expect(collectText(focused())).toContain("Author unavailable");
+    expect(collectText(focused())).not.toContain("Author unavailable");
     expect(v.contentEl.querySelector(".mugs-conflicts")).not.toBeNull();
     expect(getDiff).toHaveBeenCalledTimes(1);
-    expect(collectText(v.contentEl)).toContain("Unsynced vault edits are not included");
+    expect(collectText(v.contentEl)).toContain("Unsynced edits aren't shown");
     expect(walk(v.contentEl).some((el) => el.textContent === "vs")).toBe(false);
+  });
+
+  it("Overview offers clear navigation, review and settings with a single-flight sync action", async () => {
+    let finish!: () => void;
+    const actions = {
+      openView: vi.fn(), openReview: vi.fn(), openSettings: vi.fn(),
+      syncNow: vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })),
+      getState: () => ({ paused: true, syncing: false, reviewCount: 2 }),
+    };
+    let loads = 0;
+    setMugsContext({
+      map: { getRows: async () => { loads++; return diffRows; } },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+      actions,
+    });
+    const v = new MapView({} as any);
+    await v.onOpen();
+    expect(v.getDisplayText()).toBe("MUGS Overview");
+    expect(collectText(v.contentEl)).toContain("Automatic sync is paused");
+    expect(findButtons(v.contentEl).find((b) => b.textContent === "Overview")?.attrs["aria-current"]).toBe("page");
+    fire(findButtons(v.contentEl).find((b) => b.textContent === "Changes")!, "click");
+    expect(actions.openView).toHaveBeenCalledWith("mugs-diff");
+    fire(findButtons(v.contentEl).find((b) => b.textContent === "Review files (2)")!, "click");
+    expect(actions.openReview).toHaveBeenCalledTimes(1);
+    fire(findButtons(v.contentEl).find((b) => b.textContent === "Settings")!, "click");
+    expect(actions.openSettings).toHaveBeenCalledTimes(1);
+    const sync = findButtons(v.contentEl).find((b) => b.textContent === "Sync now")!;
+    fire(sync, "click");
+    fire(sync, "click");
+    expect(actions.syncNow).toHaveBeenCalledTimes(1);
+    expect((sync as any).disabled).toBe(true);
+    finish();
+    await flush();
+    expect(loads).toBe(2);
+    expect(findButtons(v.contentEl).some((b) => b.textContent === "Sync now")).toBe(true);
+    await v.onClose();
+  });
+
+  it("Overview subscribes to sync events, refreshes on change and unsubscribes on close", async () => {
+    let registered: (() => void) | undefined;
+    const subscribe = vi.fn((listener: () => void) => {
+      registered = listener;
+      return () => { registered = undefined; };
+    });
+    let loads = 0;
+    setMugsContext({
+      map: { getRows: async () => { loads++; return diffRows; } },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+      actions: { openView: vi.fn(), openReview: vi.fn(), openSettings: vi.fn(), syncNow: vi.fn(),
+        getState: () => ({ paused: false, syncing: false, reviewCount: 0 }), subscribe },
+    });
+    const v = new MapView({} as any);
+    await v.onOpen();
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect(loads).toBe(1);
+    registered!(); // a sync finished elsewhere — pushed event, no polling
+    await flush();
+    expect(loads).toBe(2);
+    await v.onClose();
+    expect(registered).toBeUndefined(); // unsubscribed
+    expect(loads).toBe(2); // and no further refresh can be triggered
+  });
+
+  it("Overview discards stale loads and never redraws after close", async () => {
+    let release!: (rows: any[]) => void;
+    let calls = 0;
+    setMugsContext({
+      map: { getRows: () => ++calls === 1 ? new Promise((resolve) => { release = resolve; }) : Promise.resolve([]) },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+    });
+    const v = new MapView({} as any);
+    const opening = v.onOpen();
+    await (v as any).refresh();
+    release(diffRows);
+    await opening;
+    expect(collectText(v.contentEl)).toContain("No folders connected");
+    expect(v.contentEl.querySelector(".mugs-sync-list")).toBeNull();
+    calls = 0;
+    const pending = (v as any).refresh();
+    await v.onClose();
+    release(diffRows);
+    await pending;
+    expect(collectText(v.contentEl)).toBe("");
+  });
+
+  it("Overview keeps navigation available when loading folder status fails", async () => {
+    setMugsContext({
+      map: { getRows: async () => { throw new Error("unavailable"); } },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+      actions: { openView: vi.fn(), openReview: vi.fn(), openSettings: vi.fn(), syncNow: vi.fn(),
+        getState: () => ({ paused: false, syncing: true, reviewCount: 0 }) },
+    });
+    const v = new MapView({} as any);
+    await v.onOpen();
+    expect(v.contentEl.querySelector(".mugs-navigation")).not.toBeNull();
+    expect(collectText(v.contentEl)).toContain("Couldn't load folder status");
+    const sync = findButtons(v.contentEl).find((b) => b.textContent === "Syncing…")!;
+    expect((sync as any).disabled).toBe(true);
   });
 
   it("discards earlier mapping responses and responses arriving after close", async () => {
@@ -299,7 +406,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     release(IDENTICAL());
     await flush();
     expect(collectText(v.contentEl)).toContain("one ref at a time");
-    expect(collectText(v.contentEl)).not.toContain("Identical snapshots");
+    expect(collectText(v.contentEl)).not.toContain("No changes");
   });
 
   it("resolves the original mapping even when mapping changes during conflict reload", async () => {
@@ -337,7 +444,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     await (v as any).render();
     release(diffRows);
     await opening;
-    expect(collectText(v.contentEl)).toContain("No folder mappings yet");
+    expect(collectText(v.contentEl)).toContain("No folders connected");
     expect(v.contentEl.querySelector(".mugs-diff-mode")).toBeNull();
   });
 
@@ -345,7 +452,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     emptyContext();
     const v = new DiffView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
-    expect(collectText(v.contentEl)).toContain("No folder mappings yet");
+    expect(collectText(v.contentEl)).toContain("No folders connected");
   });
 
   it("Diff view: single mapping with no baseline shows the sync-first hint", async () => {
@@ -353,7 +460,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new DiffView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
     // U04: distinct truthful state for no-baseline (not lumped into generic "no comparison").
-    expect(collectText(v.contentEl)).toContain("No baseline yet");
+    expect(collectText(v.contentEl)).toContain("No completed sync yet");
   });
 
   it("Diff view: identical trees show the no-changes message with a truncated baseline", async () => {
@@ -362,9 +469,9 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     await expect(v.onOpen()).resolves.toBeUndefined();
     const text = collectText(v.contentEl);
     // Truthful labels per contract: identical uses from/to labels, not legacy copy.
-    expect(text).toContain("Identical snapshots");
+    expect(text).toContain("No changes");
     expect(text).toContain("abc123de");
-    expect(text).toContain("HEAD (committed snapshot)");
+    expect(text).toContain("the latest commit");
     expect(text).not.toContain("abc123def4abc123def4");
   });
 
@@ -483,11 +590,11 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const v = new MapView({} as any);
     await expect(v.onOpen()).resolves.toBeUndefined();
     const text = collectText(v.contentEl);
-    expect(text).toContain("No folder mappings yet");
-    expect(text).toContain("Status:"); // legend rendered before the empty-state branch
+    expect(text).toContain("No folders connected");
+    expect(text).toContain("Your sync"); // legend rendered before the empty-state branch
   });
 
-  it("Map view: renders honest per-mapping statuses — never pulls, needs merge, skipped with hover reasons", async () => {
+  it("Map view: renders honest per-mapping statuses — no downloads, needs review, skipped with hover reasons", async () => {
     const base = { remotePath: "", localFolder: "notes", providerId: "c1" };
     setMugsContext({
       map: {
@@ -505,16 +612,16 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     const text = collectText(v.contentEl);
 
     // Status-bar vocabulary on the cards.
-    expect(text).toContain("never pulls"); // push-only chip
-    expect(text).toContain("needs merge"); // conflict card — not the raw word "conflict"
+    expect(text).toContain("no downloads"); // push-only chip
+    expect(text).toContain("needs review"); // conflict card — not the raw word "conflict"
     expect(text).toContain("skipped"); // skip reason beats the quiet "pending"
     expect(text).toContain("1/3 in sync"); // skipped/conflicted rows never count as synced
-    expect(text).toContain("never pulled"); // pull-only with no pull time — direction-honest footer
+    expect(text).toContain("not downloaded yet"); // pull-only with no pull time — direction-honest footer
 
     // Hover reasons carry the details.
     const titles = allTitles(v.contentEl).join("\n");
     expect(titles).toContain("no credential selected");
-    expect(titles).toContain("2 files need a manual merge");
+    expect(titles).toContain("2 files need your review");
     expect(titles).toContain("never downloaded"); // push-only direction hint
   });
 
@@ -575,8 +682,8 @@ describe("MugsConflictsPanel — resolution errors render inline + groups refres
     expect(collectText(container)).toContain("notes/a.md");
     expect(rowsCalls).toBe(1); // initial load
 
-    // Take ours → the guard throws. (Header buttons come first, so target by label.)
-    fire(findButtons(container).find((b) => b.textContent === "Take ours")!, "click");
+    // Keep this device → the guard throws. (Header buttons come first, so target by label.)
+    fire(findButtons(container).find((b) => b.textContent === "Keep this device")!, "click");
     await flush();
 
     const text = collectText(container);
@@ -584,7 +691,7 @@ describe("MugsConflictsPanel — resolution errors render inline + groups refres
     expect(text).toContain("Could not resolve notes/a.md");
     expect(text).toContain("open with unsaved changes");
     // The row is still there and groups were refreshed after the failure.
-    expect(text).toContain("Take ours");
+    expect(text).toContain("Keep this device");
     expect(rowsCalls).toBeGreaterThanOrEqual(2);
   });
 
@@ -604,11 +711,11 @@ describe("MugsConflictsPanel — resolution errors render inline + groups refres
     const container = (p as any).containerEl;
     expect(collectText(container)).toContain("1 file needs"); // singular verb in the summary
 
-    fire(findButtons(container).find((b) => b.textContent === "Take ours")!, "click");
+    fire(findButtons(container).find((b) => b.textContent === "Keep this device")!, "click");
     await flush();
 
     const text = collectText(container);
-    expect(text).not.toContain("Take ours"); // row gone
+    expect(text).not.toContain("Keep this device"); // row gone
     expect(text).toContain("All conflicts resolved");
   });
 

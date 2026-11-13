@@ -1,10 +1,14 @@
 .mugs-diff-view { container-type: inline-size; }
 .mugs-diff-browser {
   display: grid;
-  grid-template-columns: minmax(150px, 28%) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
 }
+.mugs-recon-file-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.mugs-recon-file-location { display: block; color: var(--text-muted); font-size: var(--font-ui-smaller); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.mugs-diff-file-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mugs-diff-file-choice:hover { background: var(--background-modifier-hover); }
 .mugs-diff-file-list {
   display: flex;
   flex-direction: column;
@@ -13,17 +17,35 @@
   overflow: auto;
 }
 .mugs-diff-file-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
   text-align: left;
   height: auto;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
 }
+.mugs-diff-file-choice > .mugs-muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mugs-diff-file-choice[aria-pressed="true"] {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  background: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border);
+  color: var(--text-normal);
 }
-.mugs-diff-focused { min-width: 0; overflow-x: auto; }
-.mugs-diff-endpoints { overflow-wrap: anywhere; }
+.mugs-diff-focused { min-width: 0; }
+.mugs-diff-endpoints { overflow-wrap: anywhere; font-size: var(--font-ui-smaller); color: var(--text-muted); margin: 0 0 8px; }
+.mugs-diff-overview { display: flex; align-items: center; gap: 12px; font-size: var(--font-ui-small); font-weight: 600; margin: 0 0 12px; }
+.mugs-diff-history-note, .mugs-diff-file-authors { margin: 0; color: var(--text-muted); font-size: var(--font-ui-smaller); line-height: 1.4; }
+.mugs-diff-history-note { flex-basis: 100%; }
+.mugs-diff-file-authors { margin: 6px 0 12px; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .mugs-diff-browser { grid-template-columns: minmax(0, 1fr); }
   .mugs-diff-file-list { max-height: 180px; }
@@ -52,7 +74,6 @@
 
 .mugs-muted {
   color: var(--text-muted);
-  font-style: italic;
 }
 
 .mugs-text-success { color: var(--text-success, #3fb950); }
@@ -67,13 +88,15 @@
   padding: 2px 8px;
   border-radius: 10px;
   font-size: var(--font-ui-smaller);
+  height: 30px;
+  max-width: 100%;
   font-weight: 500;
 }
 
 .mugs-chip-muted    { background: var(--background-modifier-form-field); color: var(--text-muted); }
-.mugs-chip-success  { background: hsl(134, 40%, 87%); color: var(--text-success, #3fb950); }
-.mugs-chip-warning  { background: hsl(42, 90%, 85%); color: var(--text-warning, #d29922); }
-.mugs-chip-error    { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
+.mugs-chip-success  { background: color-mix(in srgb, var(--text-success, #3fb950) 12%, transparent); color: var(--text-success, #3fb950); }
+.mugs-chip-warning  { background: color-mix(in srgb, var(--text-warning, #d29922) 12%, transparent); color: var(--text-warning, #d29922); }
+.mugs-chip-error    { background: color-mix(in srgb, var(--text-error, #f85149) 12%, transparent); color: var(--text-error, #f85149); }
 
 /* Status icon — circular badge with a glyph. */
 .mugs-status-icon {
@@ -262,7 +285,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   padding: 8px 14px;
   border: 1px solid var(--interactive-accent);
   border-left-width: 4px;
@@ -296,16 +319,19 @@
   border: 1px solid var(--background-modifier-border);
 }
 
-/* Card-based map grid */
-.mugs-map-grid {
+/* Folder sync rows — one full-width line per connected folder. */
+.mugs-sync-list { display: flex; flex-direction: column; gap: 8px; }
+
+.mugs-sync-row {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  grid-template-columns: minmax(9em, 1.2fr) auto minmax(9em, 1.2fr) minmax(10em, 1.4fr);
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
 }
-
-.mugs-map-card { border-radius: 10px; padding: 12px 16px; }
-
-.mugs-map-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 
 .mugs-map-card-folder, .mugs-map-card-repo {
   display: flex;
@@ -315,21 +341,31 @@
 
 .mugs-map-card-folder { flex: 1; }
 .mugs-map-card-title { font-size: var(--font-ui-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mugs-map-card-owner, .mugs-map-card-branch, .mugs-map-card-detail { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.mugs-map-card-owner, .mugs-map-card-branch, .mugs-map-card-detail { font-size: var(--font-ui-smaller); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.mugs-sync-direction {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
 
 .mugs-map-card-direction {
   flex-shrink: 0;
   text-align: center;
   font-weight: 600;
   color: var(--interactive-accent);
-  min-width: 120px;
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
 }
 
-.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.mugs-map-card-footer { display: flex; gap: 8px; align-items: center; justify-content: flex-end; min-width: 0; }
 .mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* "never pulls" chip on push-only cards — a quiet warning that remote content never flows back. */
-.mugs-map-card-never { flex-shrink: 0; }
+.mugs-sync-status { font-size: var(--font-ui-smaller); font-weight: 500; white-space: nowrap; }
+.mugs-text-success { color: var(--text-success, #3fb950); }
+.mugs-text-warning { color: var(--text-warning, #d29922); }
+.mugs-text-error { color: var(--text-error, #f85149); }
 
 /* --- Diff view ------------------------------------------------------------- */
 
@@ -340,9 +376,9 @@
 .mugs-diff-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 12px;
+  gap: 6px 12px;
   align-items: center;
-  padding: 2px 0 12px;
+  padding: 0 0 12px;
   border-bottom: 1px solid var(--background-modifier-border);
   margin-bottom: 14px;
 }
@@ -364,7 +400,7 @@
 }
 
 /* Match the ref input's height/radius so the picker row reads as one control. */
-.mugs-diff-mapping-select {
+.mugs-diff-mapping-select, .mugs-diff-mode {
   padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid var(--background-modifier-border);
@@ -422,32 +458,32 @@
 }
 
 /* Conflict row */
-.mugs-conflict-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.mugs-conflict-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
 .mugs-conflict-row + .mugs-conflict-row { border-top: 1px solid var(--background-modifier-border); }
 
 /* Inline error under a row whose resolution failed (e.g. file open with unsaved changes). */
 .mugs-conflict-row-error { margin: 2px 0 6px; font-size: var(--font-ui-smaller); color: var(--text-error, #f85149); }
 .mugs-conflict-path {
   font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-normal);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+  overflow-wrap: anywhere; flex-basis: 100%; min-width: 0;
 }
 
 /* Diff file blocks */
-.mugs-diff-file { border: 1px solid var(--background-modifier-border); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
+.mugs-diff-file { border: 1px solid var(--background-modifier-border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; min-width: 0; }
 
 .mugs-diff-file-header {
-  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px;
   font-size: var(--font-ui-small); font-weight: 600; background: var(--background-secondary);
-  border-bottom: 1px solid var(--background-modifier-border); overflow: hidden;
+  border-bottom: 1px solid var(--background-modifier-border); overflow: hidden; cursor: pointer;
 }
 
 .mugs-diff-filename { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 
-.mugs-diff-summary { display: inline-flex; gap: 6px; align-items: center; }
+.mugs-diff-summary { display: inline-flex; gap: 4px; align-items: center; flex-shrink: 0; }
 
 .mugs-diff-count { font-size: var(--font-ui-smaller); font-weight: 600; padding: 1px 6px; border-radius: 4px; }
-.mugs-diff-count-added   { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
-.mugs-diff-count-removed { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
+.mugs-diff-count-added   { background: var(--background-modifier-success-hover, #3fb95020); color: var(--text-success, #3fb950); }
+.mugs-diff-count-removed { background: var(--background-modifier-error-hover, #f8514920); color: var(--text-error, #f85149); }
 
 /* Author badges */
 .mugs-diff-author-badge, .mugs-conflict-action { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: var(--font-ui-smaller); font-weight: 500; }
@@ -458,28 +494,32 @@
 .mugs-diff-author-badge[data-email]:hover, .mugs-conflict-action:hover { opacity: 0.85; }
 
 /* Diff hunk table */
-.mugs-diff-hunk { width: 100%; border-collapse: collapse; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
-
-.mugs-diff-hunk td { padding: 2px 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
-.mugs-diff-sign     { width: 1%; min-width: 26px; text-align: center; user-select: none; color: var(--text-muted); }
-
-.mugs-diff-lineno    { width: 1%; min-width: 42px; text-align: right; user-select: none; color: var(--text-faint); padding-right: 10px; }
+.mugs-diff-code-scroll { overflow-x: auto; }
+.mugs-diff-view .mugs-diff-hunk { width: 100%; margin: 0; border-collapse: collapse; border-spacing: 0; table-layout: auto; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
+.mugs-diff-view .mugs-diff-hunk td { padding: 0; border: 0; vertical-align: top; white-space: pre; line-height: 1.65; }
+/* Widths belong on cells, not the spans inside them. The content cell takes
+   remaining space, keeping numbers and +/- signs together even on short lines. */
+.mugs-diff-view td.mugs-diff-gutter { width: 4ch; min-width: 4ch; padding: 0 6px; text-align: right; user-select: none; color: var(--text-faint); }
+.mugs-diff-view td.mugs-diff-sign-cell { width: 2ch; min-width: 2ch; padding: 0 4px; text-align: center; user-select: none; }
+.mugs-diff-view td.mugs-diff-content { width: auto; padding: 0 10px 0 6px; }
+.mugs-diff-sign { user-select: none; color: var(--text-muted); }
+.mugs-diff-lineno { user-select: none; color: var(--text-faint); }
 .mugs-diff-row-added   td.mugs-diff-content { background: var(--background-modifier-success-hover); }
 .mugs-diff-row-removed td.mugs-diff-content { background: var(--background-modifier-error-hover); }
 
 .mugs-diff-added   { color: var(--text-on-emphasis, #3fb950); }
 .mugs-diff-removed { color: var(--text-error, #f85149); }
-.mugs-diff-content { padding-left: 6px; }
+.mugs-diff-content { tab-size: 4; }
 
 /* Collapsible hunk header */
-.mugs-diff-hunk-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; margin: 8px 0 4px; border-radius: 6px; background: var(--background-secondary); cursor: pointer; user-select: none; }
+.mugs-diff-hunk-header { display: flex; align-items: center; gap: 8px; padding: 4px 12px; margin: 0; border-bottom: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-muted); font-size: var(--font-ui-smaller); cursor: pointer; user-select: none; }
 .mugs-diff-hunk-header:hover { background: var(--background-modifier-hover); }
-.mugs-diff-chevron { width: 1ch; transition: transform 0.1s ease; }
+.mugs-diff-chevron { width: 1ch; flex-shrink: 0; color: var(--text-muted); transition: transform 0.1s ease; }
 
 /* Per-hunk label row (range + optional section + author) gets a little more room */
 .mugs-diff-hunk-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.mugs-diff-hunk-range { font-family: var(--font-monospace); }
-.mugs-diff-hunk-section { color: var(--text-muted); }
+.mugs-diff-hunk-range { flex-shrink: 0; }
+.mugs-diff-hunk-section { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .mugs-diff-hunk-counts { display: inline-flex; gap: 4px; margin-left: auto; }
 
@@ -490,7 +530,7 @@
 .mugs-conflict-action-detail { color: var(--text-normal); }
 
 /* Conflict resolution buttons */
-.mugs-conflict-buttons { display: inline-flex; gap: 5px; }
+.mugs-conflict-buttons { display: inline-flex; flex-wrap: wrap; gap: 5px; }
 .mugs-conflict-btn     { padding: 2px 9px; font-size: var(--font-ui-smaller); border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
 .mugs-conflict-btn:hover { opacity: 0.85; }
 
@@ -537,7 +577,7 @@
 .mugs-mapping-name   { font-weight: 600; font-size: var(--font-ui-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 
 /* Sync-status dot */
-.mugs-dot, .mugs-status-none, .mugs-status-ok, .mugs-status-warning, .mugs-status-error { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.mugs-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 
 .mugs-dot.mugs-status-none   { background: var(--text-faint); }
 .mugs-dot.mugs-status-ok      { background: var(--text-success, #3fb950); }
@@ -582,8 +622,8 @@
 .mugs-match-arrow    { color: var(--text-muted); font-size: var(--font-ui-smaller); user-select: none; }
 .mugs-match-local    { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 45%; }
 
-.mugs-match-taken        { opacity: 0.5; }
-.mugs-match-taken .mugs-match-label { text-decoration: line-through; }
+.mugs-match-taken { opacity: 1; }
+.mugs-match-taken .mugs-match-label { text-decoration: none; }
 .mugs-match-badge       { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; background: var(--background-modifier-form-field); color: var(--text-muted); font-size: var(--font-ui-smaller); font-weight: 500; }
 
 .mugs-match-whole, .mugs-match-trash { display: flex; align-items: center; gap: 8px; padding: 5px 0; color: var(--text-normal); font-size: var(--font-ui-smaller); }
@@ -626,3 +666,176 @@
 /* --- Status bar ------------------------------------------------------------ */
 
 .mugs-status-bar { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+
+/* --- Overview and navigation --------------------------------------------- */
+.mugs-navigation { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--background-modifier-border); }
+.mugs-navigation button { box-shadow: none; background: transparent; border: 1px solid transparent; color: var(--text-muted); padding: 5px 10px; border-radius: 6px; }
+.mugs-navigation button[aria-current="page"] { color: var(--text-normal); background: var(--background-modifier-hover); border-color: var(--background-modifier-border); }
+.mugs-navigation button:hover { background: var(--background-modifier-hover); }
+.mugs-overview-header h2 { margin: 0 0 6px; font-size: var(--font-ui-large); }
+.mugs-overview-header > p { margin: 0 0 12px; line-height: 1.5; font-size: var(--font-ui-small); }
+.mugs-map-summary { font-size: var(--font-ui-small); line-height: 1.5; gap: 6px 16px; }
+.mugs-overview-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.mugs-maps-view { container-type: inline-size; }
+
+/* Scoped settings keep native controls while giving each group room to breathe. */
+.mugs-settings { container-type: inline-size; }
+.mugs-settings.vertical-tab-content { padding: 20px 24px; }
+.mugs-settings .mugs-section { padding: 12px 16px; margin-bottom: 14px; background: var(--background-primary); border-radius: 8px; }
+.mugs-settings .mugs-section-header { padding: 4px 0 10px; }
+.mugs-settings .mugs-section.is-collapsed .mugs-section-header { padding-bottom: 4px; }
+.mugs-settings .mugs-section-body > .setting-item { padding: 12px 0; gap: 16px; }
+.mugs-settings .setting-item-info { min-width: 0; }
+.mugs-settings .setting-item-description { line-height: 1.45; overflow-wrap: anywhere; }
+.mugs-settings .setting-item-control { min-width: 0; flex-wrap: wrap; gap: 8px; }
+.mugs-settings .setting-item-control input:not([type="checkbox"]),
+.mugs-settings .setting-item-control select,
+.mugs-settings .setting-item-control textarea { max-width: 100%; min-width: 0; }
+.mugs-settings .mugs-mapping { border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 12px; margin: 10px 0; background: var(--background-secondary); }
+.mugs-settings .mugs-mapping-header .setting-item { border: 0; padding: 0; }
+.mugs-settings .mugs-mapping-header .setting-item-info { display: none; }
+.mugs-settings .mugs-getting-started { border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); padding: 14px 16px; }
+.mugs-settings .mugs-unsaved-banner { position: sticky; top: 0; z-index: 2; flex-wrap: wrap; background: var(--background-primary); box-shadow: 0 2px 8px #0001; }
+.mugs-settings .mugs-unsaved-note { flex: 1; }
+.mugs-settings .mugs-actions { flex-wrap: wrap; margin-top: 12px; }
+.mugs-section-header:focus-visible,
+.mugs-navigation button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+@container (max-width: 520px) {
+  .mugs-settings .setting-item { align-items: stretch; flex-direction: column; gap: 8px; }
+  .mugs-settings .setting-item-control { justify-content: flex-start; }
+  .mugs-settings .mugs-section { padding: 10px 12px; }
+}
+
+/* Explicit file review keeps warnings close to the actions they describe. */
+.mugs-page-title { margin: 0 0 8px; font-size: var(--font-ui-large); line-height: 1.3; }
+.mugs-page-description { margin: 0 0 20px; color: var(--text-muted); font-size: var(--font-ui-small); line-height: 1.5; max-width: 80ch; }
+.mugs-reconciliation { font-size: var(--font-ui-small); line-height: 1.5; }
+.mugs-reconciliation p { margin: 8px 0; line-height: 1.5; }
+.mugs-reconciliation > .mugs-page-description { margin: 0 0 20px; }
+.mugs-reconciliation label { display: flex; align-items: start; gap: 8px; margin: 12px 0; }
+.mugs-reconciliation summary { cursor: pointer; }
+.mugs-reconciliation [role="alert"] { color: var(--text-error); }
+.mugs-reconciliation input[type="checkbox"] { flex-shrink: 0; margin-top: 3px; }
+.mugs-reconciliation button { font-size: var(--font-ui-small); }
+.mugs-reconciliation button[hidden] { display: none; }
+
+/* Review tab: file list beside the preview, matching the shared page rhythm. */
+.mugs-review-view { padding: 12px 16px 24px; container-type: inline-size; }
+.mugs-recon-layout { display: grid; grid-template-columns: minmax(220px, 30%) minmax(0, 1fr); gap: 20px; align-items: start; }
+.mugs-recon-sidebar { min-width: 0; }
+.mugs-recon-tools { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.mugs-file-count { font-size: var(--font-ui-small); font-weight: 600; }
+.mugs-recon-search { width: 100%; min-width: 0; font-size: var(--font-ui-small); }
+.mugs-recon-files { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-height: 65vh; overflow: auto; padding: 2px 6px 2px 2px; }
+.mugs-recon-files .mugs-recon-file {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 100%;
+  height: auto;
+  min-height: 60px;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  margin: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.4;
+  box-shadow: none;
+  overflow: hidden;
+  white-space: normal;
+}
+.mugs-recon-file:hover { background: var(--background-modifier-hover); }
+.mugs-recon-file[aria-current="true"] { color: var(--text-normal); background: var(--background-modifier-hover); border-color: var(--background-modifier-border); }
+.mugs-recon-file:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.mugs-recon-detail { min-width: 0; }
+.mugs-recon-heading { padding-bottom: 14px; border-bottom: 1px solid var(--background-modifier-border); }
+.mugs-recon-title { margin: 0 0 6px; font-size: var(--font-ui-medium); line-height: 1.4; overflow-wrap: anywhere; }
+.mugs-recon-heading .mugs-recon-path { margin: 0 0 6px; overflow-wrap: anywhere; color: var(--text-muted); }
+.mugs-recon-heading .mugs-recon-context { margin: 0 0 8px; color: var(--text-muted); }
+.mugs-recon-version { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.mugs-recon-version p { overflow-wrap: anywhere; }
+.mugs-recon-preview-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px 0 8px; }
+.mugs-recon-preview-status { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.mugs-recon-preview { margin: 0; min-height: 160px; max-height: 45vh; padding: 14px 16px; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-secondary); color: var(--text-normal); font-size: var(--font-ui-small); line-height: 1.6; }
+.mugs-recon-error:empty { display: none; }
+.mugs-recon-primary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px 0; }
+.mugs-recon-primary p { flex: 1 1 180px; margin: 0; }
+.mugs-recon-deletion { border-top: 1px solid var(--background-modifier-border); padding-top: 12px; }
+.mugs-recon-deletion summary { color: var(--text-muted); }
+@container (max-width: 700px) {
+  .mugs-recon-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .mugs-recon-files { max-height: 220px; }
+}
+@container (max-width: 760px) {
+  .mugs-sync-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+  .mugs-map-card-folder { grid-area: auto; }
+  .mugs-sync-direction { grid-area: auto; align-items: flex-end; }
+  .mugs-map-card-repo { grid-area: auto; }
+  .mugs-map-card-footer { grid-area: auto; flex-direction: column; align-items: flex-end; gap: 4px; }
+}
+@container (max-width: 380px) {
+  .mugs-sync-row { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px; }
+  .mugs-sync-direction { align-items: flex-start; flex-direction: row; flex-wrap: wrap; gap: 4px 8px; }
+  .mugs-map-card-footer { align-items: flex-start; flex-direction: column; }
+  .mugs-map-card-title, .mugs-map-card-owner, .mugs-map-card-branch, .mugs-map-card-detail, .mugs-map-card-sync-times { white-space: normal; overflow-wrap: anywhere; }
+  .mugs-navigation { gap: 4px; }
+  .mugs-navigation button { padding: 5px 8px; }
+}
+
+/* Conflicts group header count — plain text, consistent with Overview rows. */
+.mugs-conflicts-panel-count { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+
+/* Compact, full-row change shading inspired by the supplied diff reference. */
+.mugs-diff-view .mugs-diff-hunk td { line-height: 1.55; }
+.mugs-diff-row-added { background: color-mix(in srgb, var(--text-success, #3fb950) 10%, transparent); }
+.mugs-diff-row-removed { background: color-mix(in srgb, var(--text-error, #f85149) 10%, transparent); }
+.mugs-diff-row-added td.mugs-diff-content,
+.mugs-diff-row-removed td.mugs-diff-content { background: transparent; }
+.mugs-diff-added { color: var(--text-success, #3fb950); }
+.mugs-diff-controls select { max-width: 100%; }
+.mugs-diff-controls > *, .mugs-diff-range > * { max-width: 100%; }
+
+/* Keep theme-specific settings decoration from turning forms into crowded pills. */
+.mugs-settings .setting-item {
+  padding: 14px 0;
+  margin: 0;
+  gap: 20px;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  border: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  align-items: center;
+}
+.mugs-settings .setting-item:last-child { border-bottom: 0; }
+.mugs-settings .setting-item-info { min-width: 0; flex: 1 1 50%; margin: 0; }
+.mugs-settings .setting-item-name { font-size: var(--font-ui-small); line-height: 1.5; overflow-wrap: anywhere; }
+.mugs-settings .setting-item-description { font-size: var(--font-ui-small); line-height: 1.5; overflow-wrap: anywhere; margin-top: 4px; color: var(--text-muted); }
+.mugs-settings .setting-item-control { min-width: 0; flex: 0 1 45%; flex-wrap: wrap; gap: 8px; margin: 0; }
+.mugs-settings .mugs-mapping-header .setting-item { flex: 0 0 auto; border: 0; padding: 0; }
+.mugs-settings .mugs-mapping-name { white-space: normal; overflow-wrap: anywhere; }
+.mugs-settings .mugs-mapping-route { font-size: var(--font-ui-small); line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; margin: 4px 0 8px; }
+.mugs-settings .mugs-settings-add { margin-top: 16px; border-top: 1px solid var(--background-modifier-border); padding-top: 14px; }
+.mugs-settings .mugs-settings-add > summary { cursor: pointer; font-size: var(--font-ui-small); font-weight: 600; line-height: 1.5; }
+.mugs-settings .mugs-settings-form { margin-top: 12px; }
+.mugs-settings .mugs-settings-form .setting-item-control { flex-basis: 50%; }
+.mugs-settings .mugs-settings-form input:not([type="checkbox"]), .mugs-settings .mugs-settings-form textarea { width: 100%; }
+.mugs-settings .mugs-matches { margin: 12px 0; background: var(--background-primary); padding: 12px; }
+.mugs-settings .mugs-match-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto minmax(0, 1fr); gap: 10px; padding: 10px 0; }
+.mugs-settings .mugs-match-row:not(.mugs-match-taken) { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); }
+.mugs-settings .mugs-match-label, .mugs-settings .mugs-match-local { font-family: inherit; font-size: var(--font-ui-small); white-space: normal; overflow-wrap: anywhere; max-width: none; }
+.mugs-settings .mugs-match-badge { margin: 0; padding: 0; background: transparent; color: var(--text-muted); }
+@container (max-width: 520px) {
+  .mugs-settings .setting-item { align-items: stretch; flex-direction: column; gap: 8px; }
+  .mugs-settings .setting-item-control { justify-content: flex-start; flex-basis: auto; }
+  .mugs-settings .mugs-match-row, .mugs-settings .mugs-match-row:not(.mugs-match-taken) { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .mugs-settings .mugs-match-arrow, .mugs-settings .mugs-match-local { display: none; }
+  .mugs-settings .mugs-mapping-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+  .mugs-settings .mugs-mapping-header > .setting-item { grid-column: 2; justify-self: start; }
+}

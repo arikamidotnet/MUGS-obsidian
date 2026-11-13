@@ -246,6 +246,8 @@ export class CloneManager {
     private layout: CloneLayout,
     private syncs: LastSyncAccessor,
     private readonly seams: {
+      /** Owned by one syncAllMappings call; absent for reusable standalone managers. */
+      fetchedDirs?: Set<string>;
       workingTree?: WorkingTreeWriter;
       conflicts?: ConflictStore;
       /** Automatic-first resolution policy; when present + autoMerge, genuine conflicts
@@ -742,7 +744,10 @@ export class CloneManager {
           ? "checking remote tip"
           : "fetching remote changes",
     );
-    await c.fetch();
+    if (!this.seams.fetchedDirs?.has(dir)) {
+      await c.fetch();
+      this.seams.fetchedDirs?.add(dir);
+    }
     const localSha = await c.currentHead();
     const remoteRef = `origin/${branch}`;
     let remoteSha: string;
@@ -863,7 +868,7 @@ export class CloneManager {
       const verifiedIdle = decision.pull === "none" && alreadyPopulated && merged.applied.length === 0 && merged.autoResolvedPaths.length === 0;
       let deferred: PendingOperation[] = [];
       if (!verifiedIdle) {
-        deferred = await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status, opts.signal, new Set(merged.blocked.map((b) => b.path)));
+        deferred = await this.mirrorPull(mapping, dir, c, baseSha, remoteRef, status, opts.signal, new Set(merged.blocked.map((b) => b.path)), merged.unchanged, merged.deleted);
       }
       // S01: deferred vault operations (editor-open guard) become DURABLE pendingOps.
       // They ride in persisted state until applied+verified; correspondence never
@@ -1082,7 +1087,18 @@ export class CloneManager {
     remoteSha: string,
     status?: (m: string) => void,
     o?: { uncertain?: boolean; signal?: AbortSignal; reconciliation?: ReconciliationState; approvedDeletes?: Set<string> },
-  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]>; blocked: BlockedFile[]; unchanged?: Set<string> }> {
+  ): Promise<{ applied: AppliedChange[]; conflicts: FileConflict[]; renames: Rename[]; autoResolvedPaths: string[]; fingerprints: Record<string, [number, number]>; blocked: BlockedFile[]; unchanged?: Set<string>; deleted?: Set<string> }> {
+    // S07 follow-through: a conflict the user explicitly resolved stays on record
+    // (resolved:true + resolvedContent) as engine evidence. While the remote side
+    // is byte-identical to the reviewed one, the file is an ours-only change
+    // (base := theirs) and the local content publishes on THIS pass — including
+    // later local edits, which are simply the newest local intent. A remote that
+    // moved on does not match and takes the normal conflict path: the decision is
+    // bound to the reviewed remote bytes, so a stale decision never wins silently.
+    const resolvedEvidence = new Map<string, FileConflict>();
+    for (const cf of this.conflicts?.getConflicts(mapping.id) ?? []) {
+      if (cf.resolved === true && cf.resolvedContent !== undefined) resolvedEvidence.set(cf.path, cf);
+    }
     // Steady-state shortcut (ALL directions, contract §8/E01): when the remote tip
     // equals the recorded baseline and a vault file's (mtime, size) pair matches the
     // snapshot recorded at the last completed pass (mtime predating it), ours ==
@@ -1111,8 +1127,9 @@ export class CloneManager {
     const prevSnap = remoteUnchanged && !o?.uncertain ? (this.syncs.contentSnapshot?.(mapping.id) ?? {}) : {};
     const staleRels = new Set<string>();
     const fingerprints: Record<string, [number, number]> = {};
+    const listedVaultNames = this.vaultMirror ? await this.vaultMirror.list(mapping.localFolder) : [];
     if (steadyState) {
-      for (const rel of await this.vaultMirror!.list(mapping.localFolder)) {
+      for (const rel of listedVaultNames) {
         const repoPath = vaultToRepoPath(mapping, rel);
         if (!this.inScope(mapping, repoPath) || !this.mirrorListable(repoPath)) continue;
         let fp: [number, number] | undefined;
@@ -1131,7 +1148,7 @@ export class CloneManager {
     // resolve to ours = base == theirs (act-as-unchanged), so the per-file shows are
     // pure waste. (When deletions ARE enabled the empty-vault guard below still
     // refuses the pass — that protection runs first.)
-    const vaultNamesEarly = this.vaultMirror ? new Set(await this.vaultMirror.list(mapping.localFolder)) : new Set<string>();
+    const vaultNamesEarly = new Set(listedVaultNames);
     if (
       remoteUnchanged &&
       this.vaultMirror &&
@@ -1151,7 +1168,7 @@ export class CloneManager {
     // content here, then held base+ours+theirs for the whole tree simultaneously —
     // a 900-file folder ran the process out of heap during a full pass. Content is
     // now read per bounded batch (see below) and released after each batch applies.
-    const vaultNames = this.vaultMirror ? new Set(await this.vaultMirror.list(mapping.localFolder)) : new Set<string>();
+    const vaultNames = vaultNamesEarly;
     // Without a mirror the vault side is absent, so the changed-path diffs are the
     // merge universe (legacy clone↔remote semantics: ours = the clone's HEAD).
     const diffPaths = this.vaultMirror
@@ -1217,6 +1234,7 @@ export class CloneManager {
     const MERGE_BATCH = 32;
     const paths = [...allPaths];
     const appliedPaths: string[] = [];
+    const deleted = new Set<string>();
     const autoResolvedPaths: string[] = [];
     const surfacedConflicts: FileConflict[] = [];
     const blocked: BlockedFile[] = [];
@@ -1298,6 +1316,15 @@ export class CloneManager {
           continue;
         }
         if (o?.approvedDeletes?.has(path)) base = theirs;
+        else {
+          // Manual-resolution evidence (S07): an explicit ours/both winner against
+          // the SAME remote bytes the decision was made on publishes instead of
+          // re-conflicting (the local side is whatever the vault holds now).
+          const marker = resolvedEvidence.get(path);
+          if (marker && theirs !== undefined && ours !== undefined && marker.theirs === theirs) {
+            base = theirs;
+          }
+        }
         // S06: binary content must never enter text concatenation — a NUL byte in
         // any side marks the file binary; blocked with a distinct reason.
         if ([base, ours, theirs].some((s) => s !== undefined && s.includes("\0"))) {
@@ -1362,12 +1389,14 @@ export class CloneManager {
 
       // Safe applier ordering: writes before deletes, parents before children.
       await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id);
+      for (const op of toApply) if (op.kind === "delete") deleted.add(op.path);
       for (const a of applied) appliedPaths.push(a.path);
       surfacedConflicts.push(...batchSurfaced);
       // Batch contents are unreachable from here — memory stays bounded.
     }
     return {
       applied: appliedPaths.map((path) => ({ path } as AppliedChange)),
+      deleted,
       conflicts: surfacedConflicts,
       renames,
       autoResolvedPaths,
@@ -1549,6 +1578,8 @@ export class CloneManager {
     status?: (m: string) => void,
     signal?: AbortSignal,
     blockedPaths: Set<string> = new Set(),
+    unchangedPaths: ReadonlySet<string> = new Set(),
+    mergedDeletes: ReadonlySet<string> = new Set(),
   ): Promise<PendingOperation[]> {
     if (!this.vaultMirror) return [];
     const passOpId = Date.now().toString(36);
@@ -1572,6 +1603,10 @@ export class CloneManager {
     for (const op of plan.ops) {
       if (signal?.aborted) throw new Error("sync cancelled");
       const repoPath = vaultToRepoPath(mapping, op.path);
+      // The index still names merge-deleted files until staging. Never fall back
+      // to their old remote blob and recreate them in the vault before publishing.
+      if (op.kind === "write" && mergedDeletes.has(repoPath)) continue;
+      if (op.kind === "write" && unchangedPaths.has(repoPath)) continue;
       if (blockedPaths.has(repoPath) || this.heldPaths?.(mapping.id)?.has(repoPath)) {
         if (op.kind === "write") {
           deferred.push({
@@ -1615,12 +1650,12 @@ export class CloneManager {
       // Prefer the working-tree content (it carries uncommitted merged results);
       // fall back to the committed tip for files not yet materialized on disk —
       // e.g. fetched-since-last-checkout files (a mixed reset never writes them).
-      let content = await this.readCloneFile(dir, op.path);
+      let content = await this.readCloneFile(dir, repoPath);
       if (content === undefined) {
         // S02 typed read: an ERROR blocks the file (per-file blocked outcome) —
         // it must never read as absence (which would skip the write and strand
         // the vault stale while correspondence advanced).
-        const res = await c.showTyped(remoteRef, op.path);
+        const res = await c.showTyped(remoteRef, repoPath);
         if (res.kind === "content") content = res.content;
         else if (res.kind === "error") {
           deferred.push({

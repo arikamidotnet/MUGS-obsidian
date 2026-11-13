@@ -17,6 +17,7 @@ import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
 import { matchFolderPairs, matchFolderPairsFuzzy, type FolderMatch } from "./sync/folderMatch";
 import { SettingsDraft, type SettingsDraftTarget } from "./runtime/settingsDraft";
+import { directionLabel } from "./ui/labels";
 
 // The shipped obsidian typings (pinned "latest" at an older snapshot) omit
 // addSelect/addField from Setting even though both are real runtime APIs.
@@ -110,7 +111,7 @@ export class MugsSettingTab extends PluginSettingTab {
     if (this.unsavedBannerEl) return;
     const el = this.containerEl.createDiv({ cls: "mugs-unsaved-banner" });
     el.style.display = "none"; // hidden until there are unsaved changes
-    el.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved changes — not yet applied." });
+    el.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved settings" });
     const applyBtn = el.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
     applyBtn.addEventListener("click", () => void this.applySettings());
     const cancelBtn = el.createEl("button", { cls: "mugs-unsaved-cancel", text: "Cancel" });
@@ -183,23 +184,35 @@ export class MugsSettingTab extends PluginSettingTab {
     // Reuse a single unsaved-changes banner across renders so toggling it never
     // rebuilds text inputs (which would steal focus). Insert at the top after empty().
     containerEl.empty();
+    containerEl.classList.add("mugs-settings");
     if (this.unsavedBannerEl) containerEl.appendChild(this.unsavedBannerEl);
 
     // --- Getting Started (startup documentation) ----------------------------
     this.gettingStarted(containerEl);
 
+    this.section(containerEl, "Connected folders", (card) => {
+      card.createEl("p", { cls: "mugs-desc", text: "Manage the folders connected to this vault." });
+      const mappings = this.view().mappings;
+      if (mappings.length) this.renderMappings(card, mappings);
+      else card.createEl("p", { cls: "mugs-muted", text: "No folders connected." });
+      const add = card.createEl("details", { cls: "mugs-settings-add" });
+      add.open = mappings.length === 0;
+      add.createEl("summary", { text: "Connect another folder" });
+      void this.addMappingForm(add.createDiv({ cls: "mugs-settings-form" }));
+    });
+
     // --- Credentials / providers -------------------------------------------
-    this.section(containerEl, "Credentials & Providers", (card) => {
+    this.section(containerEl, "Accounts", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "Store per-user tokens inside this vault. Tokens are never shown in full and can be encrypted at rest.",
+        text: "Connect your Git account. Tokens stay in this vault and can be encrypted.",
       });
 
       // Draft view: tokens are masked HERE at render time only (the draft carries
       // the real values so Apply can commit them; nothing raw is ever shown).
       const creds = this.view().credentials;
       if (creds.length === 0) {
-        card.createEl("p", { cls: "mugs-muted", text: "No credentials yet." });
+        card.createEl("p", { cls: "mugs-muted", text: "No accounts connected." });
       } else {
         for (const c of creds) {
           const descParts = [`token: ${maskToken(c.token)}`];
@@ -217,42 +230,21 @@ export class MugsSettingTab extends PluginSettingTab {
         }
       }
 
-      card.createEl("div", { cls: "mugs-divider" });
-      this.addCredentialForm(card);
-    });
-
-    // --- Folder mappings ----------------------------------------------------
-    // Reordered so the add-mapping form ("Available to map") sits above the existing
-    // mapping cards ("Mapped folders"): users see what they can link first.
-    this.section(containerEl, "Folder Mappings", (card) => {
-      card.createEl("p", {
-        cls: "mugs-desc",
-        text: "Map remote paths to vault folders for fine-grained, per-user sync.",
-      });
-
-      // Available to map — the add-mapping assistant.
-      this.addMappingForm(card);
-
-      card.createEl("div", { cls: "mugs-divider" });
-
-      // Mapped folders — existing mapping cards with status dots + controls (draft view).
-      const mappings = this.view().mappings;
-      if (mappings.length === 0) {
-        card.createEl("p", { cls: "mugs-muted", text: "No mappings yet." });
-      } else {
-        this.renderMappings(card, mappings);
-      }
+      const add = card.createEl("details", { cls: "mugs-settings-add" });
+      add.open = creds.length === 0;
+      add.createEl("summary", { text: "Add another account" });
+      this.addCredentialForm(add.createDiv({ cls: "mugs-settings-form" }));
     });
 
     // --- Security -----------------------------------------------------------
-    this.section(containerEl, "Security & Credentials", (card) => {
+    this.section(containerEl, "Security", (card) => {
       // The hand-written MugsSettings.security in types.ts does not carry `kdf` yet
       // (schema.ts is the source of truth) — widen here for the render path.
       const sec = this.view().security as MugsSettings["security"] & { kdf?: KdfParams };
 
       new Setting(card)
-        .setName("Encrypt credentials at rest")
-        .setDesc("When on, stored tokens are encrypted in data.json instead of saved as-is. Set a passphrase below — encryption without a passphrase does not protect anything.")
+        .setName("Encrypt saved tokens")
+        .setDesc("Protect tokens in data.json with a passphrase. Set a passphrase below before enabling.")
         .addToggle((t) =>
           t
             .setValue(sec.encryptCredentials)
@@ -282,16 +274,16 @@ export class MugsSettingTab extends PluginSettingTab {
       card.createEl("p", {
         cls: "mugs-desc",
         text:
-          "Tokens are encrypted with a passphrase that MUGS never stores: data.json keeps only the ciphertext, a random per-vault salt and the key-derivation parameters. The passphrase cannot be recovered — if you forget it, encrypted tokens stop working and must be re-entered. You are asked for it once per Obsidian session.",
+          "MUGS never saves your passphrase. Unlock once per session. If you forget it, you'll need to enter your account tokens again.",
       });
 
       if (this.plugin.store.isLocked()) {
         // Locked: passphrase-encrypted tokens are unreadable until unlocked.
         let passphrase = "";
         new Setting(card)
-          .setName("Credentials locked")
+          .setName("Tokens locked")
           .setDesc(
-            "Enter your passphrase to decrypt tokens for this session. A wrong passphrase leaves credentials showing 'missing token' — nothing is lost or overwritten; unlock again with the correct one. If the pane already shows unlocked, submitting the passphrase here just VERIFIES it.",
+            "Enter your passphrase to enable sync for this session. An incorrect passphrase won't change your saved tokens.",
           )
           .addText((txt) => {
             txt.setPlaceholder("Passphrase");
@@ -348,16 +340,16 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     // --- Automatic conflict resolution (Area 3/4) -------------------------
-    this.section(containerEl, "Automatic Conflict Resolution", (card) => {
+    this.section(containerEl, "Conflicts", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "When both sides edited the same lines, decide how MUGS merges them automatically.",
+        text: "Separate edits can combine automatically. If the same lines change in both places, you choose what to keep.",
       });
 
       const sync = this.view().sync;
       new Setting(card)
-        .setName("Auto-merge when no conflict")
-        .setDesc("Combine edits from both sides into one file whenever they don't touch the same lines. Genuine conflicts always need a human — no tie-break is applied silently.")
+        .setName("Combine non-conflicting edits")
+        .setDesc("Combine edits to different lines. Conflicting edits always need your review.")
         .addToggle((t) => {
           t.setValue(sync.autoMerge).onChange(async (v) => {
             this.edit((d) => d.setSync({ autoMerge: v }));
@@ -365,20 +357,20 @@ export class MugsSettingTab extends PluginSettingTab {
         });
 
       new Setting(card)
-        .setName("Tie-break for unresolved hunks")
-        .setDesc('SUGGESTED action for a human resolver when both sides edited the same lines — never applied silently.')
+        .setName("Preferred conflict choice")
+        .setDesc("A preference only. MUGS won't choose for you.")
         .addDropdown((d) => {
           d.setValue(sync.defaultResolution).onChange(async (v) => {
             this.edit((d) => d.setSync({ defaultResolution: v as "both" | "theirs" | "ours" }));
           });
-          for (const [value, text] of [["both", "Both"], ["theirs", "Theirs"], ["ours", "Ours"]]) {
+          for (const [value, text] of [["both", "Both versions"], ["theirs", "Repository"], ["ours", "This device"]]) {
             d.addOption(value, text);
           }
         });
 
       new Setting(card)
-        .setName("Resolve by recency")
-        .setDesc("SUGGESTED one-click action when a file was edited on both sides at different times — applied only when you click it.")
+        .setName("Prefer newer edits")
+        .setDesc("A preference only. Conflicting edits still need your review.")
         .addToggle((t) => {
           t.setValue(sync.recencyWins).onChange(async (v) => {
             this.edit((d) => d.setSync({ recencyWins: v }));
@@ -387,15 +379,15 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     // --- Sync frequency + maintenance (Area 5/8) --------------------------
-    this.section(containerEl, "Sync Frequency & Maintenance", (card) => {
+    this.section(containerEl, "Sync", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "How often MUGS polls for remote changes while idle, and a global pause for bulk edits.",
+        text: "Choose when to check for changes, or pause automatic sync.",
       });
 
       const sync = this.view().sync;
       new Setting(card)
-        .setName("Polling interval")
+        .setName("Check for changes")
         .addDropdown((d) => {
           d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ intervalSeconds: resolveIntervalSeconds(v) }));
@@ -406,8 +398,8 @@ export class MugsSettingTab extends PluginSettingTab {
         });
 
       new Setting(card)
-        .setName("Pause vault sync")
-        .setDesc("While paused, MUGS stops all automatic push/pull and event triggers. Use it to make bulk edits safely; resuming runs one catch-up pass. Takes effect on Apply.")
+        .setName("Pause automatic sync")
+        .setDesc("Stop scheduled sync and file-change triggers. Apply to activate. Sync now remains available; resuming checks on the next timer tick.")
         .addToggle((t) => {
           t.setValue(sync.paused).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ paused: v }));
@@ -416,16 +408,16 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
       new Setting(card)
-        .setName("First sync direction")
+        .setName("Start new connections with")
         .setDesc(
-          "When a mapping syncs for the first time: pull fills your vault folder from the remote (default); push uploads your vault onto the remote without downloading its history — pick push when this device already has the up-to-date content.",
+          "Download starts with repository files. Upload starts with this device's files. Back up both copies before the first sync.",
         )
         .addDropdown((d) => {
           d.setValue(sync.firstSyncDirection).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ firstSyncDirection: v as "pull" | "push" }));
           });
-          d.addOption("pull", "Pull — remote populates the vault (default)");
-          d.addOption("push", "Push — vault uploads to the remote");
+          d.addOption("pull", "Download from repository (default)");
+          d.addOption("push", "Upload from this device");
         });
 
       // Whole-vault mappings expose a per-mapping .trash/ toggle (draft view).
@@ -434,7 +426,7 @@ export class MugsSettingTab extends PluginSettingTab {
         if (m.remotePath === "" && m.localFolder === ".") {
           new Setting(card)
             .setName("Sync the repository's .trash/ folder")
-            .setDesc("Shared across all users via the single git path, like Obsidian's trash. Turn off to keep deletions local to this device.")
+            .setDesc("Share files in .trash with other users. Turning this off excludes that folder; it does not disable deletion sync elsewhere.")
             .addToggle((t) =>
               t.setValue(m.syncTrashFolder !== false).onChange(async (v) => {
                 this.edit((d2) => d2.upsertMapping({ ...m, syncTrashFolder: v ? undefined : false }));
@@ -445,7 +437,7 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     // --- Obsidian config sync (Area 9) ------------------------------------
-    this.section(containerEl, "Obsidian Config Sync", (card) => {
+    this.section(containerEl, "Obsidian settings", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
         text: "Share selected Obsidian settings files with your team through the same sync system.",
@@ -453,7 +445,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
       const obs = this.view().sync.obsidianConfig;
       new Setting(card)
-        .setName("Enable Obsidian config sync")
+        .setName("Sync selected settings")
         .setDesc("When on, selected .obsidian/ files are synced alongside your vault folders.")
         .addToggle((t) => {
           t.setValue(obs.enabled).onChange(async (v) => {
@@ -475,7 +467,7 @@ export class MugsSettingTab extends PluginSettingTab {
       cls: "mugs-muted",
     });
     containerEl.createEl("p", {
-      text: "Add a credential, then map a remote path to a vault folder. Use the ribbon icons or the 'MUGS' commands to sync and view changes.",
+      text: "Connect an account and choose folders. Use MUGS commands to sync, view changes, and review files.",
     });
   }
 
@@ -487,17 +479,17 @@ export class MugsSettingTab extends PluginSettingTab {
     card.createEl("h3", { text: "Getting Started" });
     card.createEl("p", {
       cls: "mugs-gs-intro",
-      text: "MUGS syncs Obsidian folders with git remotes (GitLab, GitHub, Bitbucket, Gitea/Forgejo or a local repo) using an automatic-first, fully git-reversible model. Set it up in three steps:",
+      text: "Sync your folders with GitLab, GitHub, Bitbucket, Gitea/Forgejo, or a local repository.",
     });
 
     const steps = card.createEl("ol", { cls: "mugs-gs-steps" });
-    steps.createEl("li", { text: "Add a credential — under Credentials & Providers, add your provider and token. For GitLab paste the base URL (include /api/v4 if self-hosted)." });
-    steps.createEl("li", { text: "Create a folder mapping — under Folder Mappings, map a remote path (or the repo root) to a vault folder such as Notes, then pick push+pull, pull-only, or push-only and an optional branch." });
-    steps.createEl("li", { text: "Sync — open the MUGS Map view to see each mapping's status. Edits sync automatically; use the Review Queue to stage/hold specific files and Diff to compare against the last-synced baseline." });
+    steps.createEl("li", { text: "Add your account and access token under Accounts." });
+    steps.createEl("li", { text: "Connect folders and choose Both ways, Upload only, or Download only." });
+    steps.createEl("li", { text: "Open MUGS Overview and run Sync now. Check folder status, view Changes, or Review files that need a decision." });
 
     card.createDiv({
       cls: "mugs-note",
-      text: "Local provider tip: a local mapping clones its repo into .mugs-clones/ inside the vault and treats that clone as the synced copy (your vault's own folders are not written to). Every sync is reversible via git history and the .mugs-trash. Open these settings via the gear icon next to MUGS in Community plugins.",
+      text: "Back up your vault and plugin settings before first sync. Git history and MUGS recovery backups help recover changes, but don't replace a backup.",
     });
   }
 
@@ -511,12 +503,22 @@ export class MugsSettingTab extends PluginSettingTab {
     // element does not reliably inherit those helpers, which left every section blank.
     const card = containerEl.createDiv({ cls: "mugs-section" });
     const header = card.createEl("div", { cls: "mugs-section-header" });
-    const chevron = header.createEl("span", { cls: "mugs-section-chevron", text: "▸" });
+    const chevron = header.createEl("span", { cls: "mugs-section-chevron", text: "▾" });
     header.createEl("h3", { text: title });
     const content = card.createDiv({ cls: "mugs-section-body" });
-    header.addEventListener("click", () => {
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
+    header.setAttribute("aria-expanded", "true");
+    const toggle = () => {
       const collapsed = card.classList.toggle("is-collapsed");
       chevron.textContent = collapsed ? "▸" : "▾";
+      header.setAttribute("aria-expanded", String(!collapsed));
+    };
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggle();
     });
     body(content);
     return;
@@ -524,7 +526,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
   /** Human-readable direction label for a mapping. */
   private directionText(d: SyncDirection): string {
-    return d === "push-pull" ? "Push + pull" : d === "pull-only" ? "Pull only" : "Push only";
+    return directionLabel(d);
   }
 
   /** CSS class name for a sync-status dot, or "" when no status is recorded.
@@ -561,31 +563,36 @@ export class MugsSettingTab extends PluginSettingTab {
         }),
       );
 
+      block.createEl("p", {
+        cls: "mugs-mapping-route",
+        text: `${m.localFolder === "." ? "Vault root" : m.localFolder} → ${m.remotePath || "Repository root"}${m.branch ? ` · ${m.branch}` : ""}`,
+      });
+
       // Editable direction for every card (scoped links and whole-repo alike).
       new Setting(block)
         .setName("Direction")
-        .setDesc("Which way changes flow between the remote and your vault.")
+        .setDesc("Upload, download, or sync both ways.")
         .addDropdown((d) => {
           d.setValue(m.direction).onChange(async (v) => {
             const direction = v as SyncDirection;
             this.edit((d2) => d2.upsertMapping({ ...m, direction }));
           });
-          for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
-            d.addOption(value, text);
+          for (const value of ["push-pull", "pull-only", "push-only"] as const) {
+            d.addOption(value, directionLabel(value));
           }
         });
 
       block.appendChild(this.managePanel(
-        "Includes",
+        "Only sync matching files",
         (m.includes ?? []).join("\n"),
         (v) => this.saveMappingScope(m.id, { includes: parseGlobList(v) }),
-        "Only these globs sync within the scope (optional). Leave empty for everything.",
+        "Optional patterns, one per line (e.g. *.md). Leave empty for all files.",
       ));
       block.appendChild(this.managePanel(
-        "Excludes",
+        "Skip matching files",
         (m.excludes ?? []).join("\n"),
         (v) => this.saveMappingScope(m.id, { excludes: parseGlobList(v) }),
-        "These globs never sync (gitignore-style; '!' re-includes).",
+        "Patterns to skip, one per line (e.g. drafts/**). Uses .gitignore syntax.",
       ));
 
     }
@@ -605,6 +612,8 @@ export class MugsSettingTab extends PluginSettingTab {
     btn.type = "button";
     btn.className = "mugs-manage-btn";
     btn.textContent = "Manage";
+    btn.setAttribute("aria-expanded", "false");
+    btn.setAttribute("aria-label", `Manage ${title.toLowerCase()}`);
 
     const panel = document.createElement("div");
     panel.className = "mugs-manage-panel is-collapsed";
@@ -613,13 +622,13 @@ export class MugsSettingTab extends PluginSettingTab {
     ta.style.width = "100%";
     ta.className = "mugs-textarea";
     ta.placeholder = placeholder;
+    ta.setAttribute("aria-label", title);
     ta.value = initialText;
     ta.addEventListener("change", (e: Event) => onChange((e.target as HTMLTextAreaElement).value));
 
     btn.addEventListener("click", () => {
-      panel.classList.toggle("is-collapsed");
-      // Persist the current value whenever the panel is opened so edits are not lost.
-      if (!panel.classList.contains("is-collapsed")) onChange(ta.value);
+      const collapsed = panel.classList.toggle("is-collapsed");
+      btn.setAttribute("aria-expanded", String(!collapsed));
     });
 
     head.appendChild(lbl);
@@ -715,7 +724,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     new Setting(card)
       .setName("Provider")
-      .setDesc("The backend this token authenticates against.")
+      .setDesc("Where your repositories are hosted.")
       .addDropdown((d) => {
         d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
@@ -736,7 +745,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     new Setting(card)
       .setName("Label")
-      .setDesc("A friendly name for this credential.")
+      .setDesc("A name for this account.")
       .addText((t) => t.setPlaceholder("Label").onChange((v) => { label = v.trim(); }));
 
     new Setting(card)
@@ -767,7 +776,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     card.appendChild(this.actions([
       {
-        text: "Add credential",
+        text: "Add account",
         cta: true,
         onClick: async () => {
           if (!label) { new Notice("MUGS: enter a label for the credential."); return; }
@@ -782,7 +791,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               baseUrl: baseUrl || undefined,
               repos: repos.length ? repos : undefined,
             }));
-            new Notice(`MUGS: credential "${label}" added to the draft — Apply settings to activate and persist.`);
+            new Notice(`MUGS: account "${label}" added. Apply settings to save.`);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
@@ -831,7 +840,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     // --- Credential selector -------------------------------------------------
     new Setting(card)
       .setName("Provider")
-      .setDesc("The backend this mapping authenticates against.")
+      .setDesc("Choose the account for these folders.")
       .addDropdown((d) => {
         d.setValue(providerId).onChange(async (v) => {
           providerId = v; // CRITICAL: the assistant used to keep listing repos for —
@@ -853,6 +862,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     loadingEl.createEl("span", { text: "Loading repositories…" });
     loadingEl.style.display = "none";
     const repoSel = card.createEl("select", { cls: "mugs-repo-select" });
+    repoSel.setAttribute("aria-label", "Repository");
 
     const refreshRepos = async (): Promise<void> => {
       loadingEl.style.display = "";
@@ -953,7 +963,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       matchesEl.empty();
       if (isRest() && repoKey) {
         // Whole-repo toggle: map the entire repository root to the vault root ('.').
-        const wholeRow = matchesEl.createDiv({ cls: "mugs-match-whole" });
+        const wholeRow = matchesEl.createEl("label", { cls: "mugs-match-whole" });
         const wholeInput = document.createElement("input");
         wholeInput.type = "checkbox";
         wholeInput.checked = wholeRepo;
@@ -962,7 +972,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         // invisible ghost row you could not check. Insert it before the label.
         wholeRow.appendChild(wholeInput);
         wholeRow.createEl("span", { text: "Sync the entire repository to the vault root" });
-        const trashRow = matchesEl.createDiv({ cls: "mugs-match-trash" });
+        const trashRow = matchesEl.createEl("label", { cls: "mugs-match-trash" });
         trashRow.style.marginLeft = "24px";
         const trashInput = document.createElement("input");
         trashInput.type = "checkbox";
@@ -974,15 +984,16 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       // --- Exact matches (checkboxes) -------------------------------------------
       if (matches.length > 0) {
         const head = matchesEl.createEl("div", { cls: "mugs-matches-head" });
-        head.textContent = wholeRepo ? "Or link individual folders:" : "Matched folders — check to link each as its own mapping";
+        head.textContent = wholeRepo ? "Or connect individual folders:" : "Choose folders to connect";
         for (const m of matches) {
           const row = matchesEl.createDiv({ cls: "mugs-match-row" });
           const taken = usedLocalFolders.has(m.localFolder);
           if (taken) row.classList.add("mugs-match-taken");
           const cb = document.createElement("input");
           cb.type = "checkbox";
-          cb.checked = !taken && selectedFolders.has(m.remotePath);
+          cb.checked = taken || selectedFolders.has(m.remotePath);
           cb.disabled = taken;
+          cb.setAttribute("aria-label", `${m.remotePath} → ${m.localFolder}${taken ? " (already connected)" : ""}`);
           cb.addEventListener("change", (e: Event) => {
             if ((e.target as HTMLInputElement).checked) selectedFolders.add(m.remotePath);
             else selectedFolders.delete(m.remotePath);
@@ -991,7 +1002,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           const label = row.createEl("span", { cls: "mugs-match-label" });
           label.textContent = m.remotePath;
           label.title = taken ? `${m.localFolder} is already mapped` : `${m.remotePath} → ${m.localFolder}`;
-          if (taken) label.createEl("span", { cls: "mugs-match-badge", text: "Mapped" });
+          if (taken) row.createEl("span", { cls: "mugs-match-badge", text: "Connected" });
           row.createEl("span", { cls: "mugs-match-arrow", text: "→" });
           row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
           matchesEl.appendChild(row);
@@ -1024,11 +1035,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     // --- Direction + branch + include/exclude --------------------------------
     new Setting(card)
       .setName("Direction")
-      .setDesc("Which way changes flow between the remote and your vault.")
+      .setDesc("Upload, download, or sync both ways.")
       .addDropdown((d) => {
         d.setValue(direction).onChange((v) => { direction = v as SyncDirection; });
-        for (const [value, text] of [["push-pull", "Push + pull"], ["pull-only", "Pull only"], ["push-only", "Push only"]]) {
-          d.addOption(value, text);
+        for (const value of ["push-pull", "pull-only", "push-only"] as const) {
+          d.addOption(value, directionLabel(value));
         }
       });
 
@@ -1037,13 +1048,13 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setDesc("Optional branch to sync. Leave empty for the default branch.")
       .addText((t) => t.setPlaceholder("Branch (optional)").onChange((v) => { branch = v.trim(); }));
 
-    card.appendChild(this.managePanel("Includes", includesText, (v) => { includesText = v; }, "Only these globs sync within the scope (optional). Leave empty for everything."));
-    card.appendChild(this.managePanel("Excludes", excludesText, (v) => { excludesText = v; }, "These globs never sync (gitignore-style; '!' re-includes)."));
+    card.appendChild(this.managePanel("Only sync matching files", includesText, (v) => { includesText = v; }, "Optional patterns, one per line (e.g. *.md). Leave empty for all files."));
+    card.appendChild(this.managePanel("Skip matching files", excludesText, (v) => { excludesText = v; }, "Patterns to skip, one per line (e.g. drafts/**). Uses .gitignore syntax."));
 
     // --- Save ----------------------------------------------------------------
     card.appendChild(this.actions([
       {
-        text: wholeRepo ? "Add whole-repo mapping" : "Add selected mappings",
+        text: "Connect selected folders",
         cta: true,
         disabled: creds.length === 0,
         onClick: async () => {
@@ -1059,7 +1070,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
                 branch: branch || undefined, direction, ...scope,
                 syncTrashFolder: syncTrash ? undefined : false,
               }));
-              new Notice(`MUGS: whole-repo mapping for "${repoKey}" added to the draft — Apply settings to activate.`);
+              new Notice(`MUGS: "${repoKey}" connected. Apply settings to save.`);
             } else if (selectedFolders.size === 0) {
               new Notice("MUGS: check at least one folder to link."); return;
             } else {
@@ -1078,15 +1089,15 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
                 }));
                 count += 1;
               }
-              new Notice(`MUGS: ${count} mapping${count === 1 ? "" : "s"} added to the draft — Apply settings to activate.`);
+              new Notice(`MUGS: ${count} folder${count === 1 ? "" : "s"} connected. Apply settings to save.`);
             }
             // U04: surface the direction/first-sync consequences BEFORE activation
             // (the next successful Apply will make them real).
             const consequence = direction === "pull-only"
-              ? "pull-only: remote files will overwrite/add into your vault folders; local edits there are NOT uploaded."
+              ? "Download only: repository files update this vault; your edits aren't uploaded."
               : direction === "push-only"
-                ? "push-only: your vault files are uploaded; remote changes are NOT pulled into the vault."
-                : "push+pull: local edits upload and remote changes download (conflicts surface in the MUGS Conflicts panel).";
+                ? "Upload only: your files update the repository; repository changes aren't downloaded."
+                : "Both ways: upload and download changes. Conflicts need your review.";
             const first = this.view().sync.firstSyncDirection === "push"
               ? "first sync will UPLOAD your vault folder to the remote (overwrites the remote path's content)."
               : "first sync will DOWNLOAD the remote path into your vault folder (vault files there are replaced).";

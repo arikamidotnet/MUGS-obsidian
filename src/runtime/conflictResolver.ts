@@ -21,7 +21,7 @@ import type { ResolveChoice } from "../sync/conflict";
 import type { SaveResult } from "../store";
 import type { WorkingTreeWriter } from "../sync/cloneManager";
 import type { TrashStore } from "../sync/trash";
-import { resolveConflictFile } from "../sync/conflict";
+import { applyResolution, resolveConflictFile } from "../sync/conflict";
 import { checkRelPath } from "../git/safePath";
 
 /** Everything the transaction needs — inject fakes in tests, concrete in main.ts. */
@@ -161,7 +161,14 @@ async function runTransaction(
     }
 
     // --- State clear → save(): a refused save is a FAILURE (contract §10). ---
-    deps.setConflicts(mappingId, next.conflicts);
+    // The record is KEPT, marked resolved with its chosen content, instead of
+    // dropped: it is the engine evidence that lets the NEXT pass publish an
+    // "ours"/"both" winner (see mergeSides) rather than re-conflicting the
+    // same file forever. Every UI surface filters resolved entries already.
+    deps.setConflicts(
+      mappingId,
+      beforeList.map((c) => (c.path === conflict.path ? applyResolution(c, choice) : c)),
+    );
     const saveResult = await deps.save();
     if (!saveResult.ok) {
       // The conflict STAYS (contract §5): restore the exact pre-transaction list so

@@ -90,6 +90,19 @@ function storeWith(mappings: FolderMapping[], lastSync?: Record<string, Paramete
 // --- StoreMapDataSource ----------------------------------------------------
 
 describe("StoreMapDataSource.getRows — owner attribution", () => {
+  it("scans shared clone history once per refresh and does not fetch or sync", async () => {
+    const store = storeWith([mapping(), mapping({ id: "m2", localFolder: "other" })], {
+      m1: { mappingId: "m1", cloneDir: "/shared", status: "ok" },
+      m2: { mappingId: "m2", cloneDir: "/shared", status: "ok" },
+    });
+    const runner = makeRunner();
+    const ds = new StoreMapDataSource(store, ".mugs-clones", runner);
+    expect((await ds.getRows()).map((row) => row.owner)).toEqual(["Ada Lovelace", "Ada Lovelace"]);
+    expect(runner.calls.filter((call) => call.args[0] === "log")).toHaveLength(1);
+    expect(runner.calls.some((call) => ["fetch", "push", "commit"].includes(call.args[0]))).toBe(false);
+    await ds.getRows();
+    expect(runner.calls.filter((call) => call.args[0] === "log")).toHaveLength(2);
+  });
   it("attributes the most-recently-active collaborator as the owner", async () => {
     const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "ok" } });
     const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
@@ -313,7 +326,10 @@ describe("StoreConflictDataSource", () => {
     expect(res).toEqual({ remaining: 0 });
     // Written to <cloneRoot>/<providerId>/<id>/<path>.
     expect(wt.writes).toEqual([[".mugs-clones/c1/m1/a.md", "THEIRS"]]);
-    expect(store.getConflicts("m1")).toEqual([]); // entry dropped when the list is empty
+    // The record is kept marked resolved (engine evidence for the next pass), and
+    // the unresolved surface is empty.
+    expect(store.getConflicts("m1")).toEqual([expect.objectContaining({ path: "a.md", resolved: true, resolvedContent: "THEIRS" })]);
+    expect((await ds.getConflicts({ mappingId: "m1" }))).toEqual([]);
     expect(store.getSettings().lastSync.m1.status).toBe("up-to-date"); // conflict status cleared
   });
 
@@ -343,7 +359,7 @@ describe("StoreConflictDataSource", () => {
     // Vault path: root + localFolder + repo→vault-mapped path — without this write
     // the next sync read the stale vault copy as "ours" and the conflict resurfaced.
     expect(vault.writes).toEqual([["/vault/notes/a.md", "THEIRS"]]);
-    expect(store.getConflicts("m1")).toEqual([]);
+    expect(store.getConflicts("m1")).toEqual([expect.objectContaining({ resolved: true, resolvedContent: "THEIRS" })]);
   });
 
   it("keeps the conflict record when the vault write fails (no half-applied resolution)", async () => {
@@ -382,7 +398,7 @@ describe("StoreConflictDataSource", () => {
 
     expect(wt.deletes).toEqual([".mugs-clones/c1/m1/a.md"]);
     expect(vault.deletes).toEqual(["/vault/notes/a.md"]);
-    expect(store.getConflicts("m1")).toEqual([]);
+    expect(store.getConflicts("m1")).toEqual([expect.objectContaining({ resolved: true })]);
   });
 
   it("treats an unknown path as a no-op and reports the pre-existing count", async () => {
@@ -401,6 +417,6 @@ describe("StoreConflictDataSource", () => {
     const res = await ds.resolveConflict({ mappingId: "m1", path: "a.md", choice: "both" });
 
     expect(res.remaining).toBe(0);
-    expect(store.getConflicts("m1")).toEqual([]);
+    expect(store.getConflicts("m1")).toEqual([expect.objectContaining({ resolved: true })]);
   });
 });

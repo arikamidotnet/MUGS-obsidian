@@ -150,6 +150,7 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
   const client = new GitClient(deps.runner);
   const layout = { root: deps.cloneRoot };
   const manager = new CloneManager(client, layout, deps.lastSync, {
+    fetchedDirs: new Set(),
     workingTree: deps.workingTree,
     conflicts: deps.conflicts,
     policy: deps.policy,
@@ -162,6 +163,7 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
     rmDir: deps.rmDir,
   });
   const providerCache = new Map<string, Provider>();
+  const repoCache = new Map<string, RepoSummary[]>();
   const results: SyncOutcome[] = [];
 
   const outcome = (mapping: FolderMapping, status: SyncOutcome["status"], extra: Partial<SyncOutcome> = {}): SyncOutcome => ({
@@ -216,7 +218,9 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
       }
 
       try {
-        repos = await provider.listRepos();
+        const cached = repoCache.get(credential.id);
+        repos = cached ?? await provider.listRepos();
+        if (!cached) repoCache.set(credential.id, repos);
       } catch {
         skip(mapping, "could not reach provider"); continue;
       }

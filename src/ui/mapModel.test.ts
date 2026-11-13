@@ -78,16 +78,16 @@ describe("describeMapRow — honest status vocabulary", () => {
     }
   });
 
-  it("says a conflict mapping \"needs merge\" with the file count in the hover reason", () => {
+  it("says a conflict mapping \"needs review\" with the file count in the hover reason", () => {
     const d = describeMapRow({ status: "conflict", direction: "push-pull", conflictCount: 2 });
-    expect(d.label).toBe("needs merge");
+    expect(d.label).toBe("needs review");
     expect(d.tone).toBe("error");
-    expect(d.reason).toContain("2 files need a manual merge");
+    expect(d.reason).toContain("2 files need your review");
   });
 
-  it("a conflict mapping without a count still points at the Conflicts panel", () => {
+  it("a conflict mapping without a count still points at the Conflicts", () => {
     const d = describeMapRow({ status: "conflict", direction: "push-pull" });
-    expect(d.reason).toContain("Conflicts panel");
+    expect(d.reason).toContain("Conflicts");
   });
 
   it("renders an error mapping as \"failed\" with a retry hint", () => {
@@ -128,8 +128,8 @@ describe("directionHint — what the arrow does NOT do", () => {
     expect(directionHint("pull-only")).toContain("never uploaded");
   });
 
-  it("push-pull says both directions", () => {
-    expect(directionHint("push-pull")).toContain("both directions");
+  it("push-pull says Both ways", () => {
+    expect(directionHint("push-pull")).toContain("Both ways");
   });
 });
 

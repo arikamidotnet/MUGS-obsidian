@@ -20,7 +20,7 @@ import { MugsStore, MemoryIO } from "../store";
 import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 import { resolveConflictFile } from "./conflict";
 import type { FolderMapping, Credential } from "../types";
-import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir } from "./testkit";
+import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir, CountingRunner } from "./testkit";
 
 installHermeticGitIdentity();
 
@@ -137,6 +137,52 @@ function makeFixture(name: string) {
 }
 
 describe("release readiness — real git end-to-end", () => {
+  it.each(["push-only", "pull-only", "push-pull"] as const)(
+    "%s: a 250-file idle pass reads no content and does not rewrite, commit or push",
+    async (direction) => {
+      const f = makeFixture(`idle-${direction}`);
+      try {
+        const files = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`note-${i}.md`, `note ${i}\n`]));
+        f.seedRemote(files);
+        const deps = f.deps({ direction });
+        const mirror = deps.vaultMirror;
+        const runner = new CountingRunner();
+        let reads = 0, writes = 0;
+        const measured = {
+          ...deps, runner,
+          vaultMirror: { ...mirror,
+            read: async (folder: string, path: string) => { reads++; return mirror.read(folder, path); },
+            write: async (folder: string, path: string, text: string) => { writes++; return mirror.write(folder, path, text); },
+          },
+        };
+        // Push-only never imports repository content automatically.
+        if (direction === "push-only") {
+          for (const [path, text] of Object.entries(files)) writeFileSync(join(f.syncedVault, path), text);
+        }
+        await syncAllMappings(measured);
+        await syncAllMappings(measured); // record post-import stat pairs
+        runner.reset(); reads = writes = 0;
+        const start = Date.now();
+        const idle = await syncAllMappings(measured);
+        expect(idle[0].status).toBe("ok");
+        expect(reads).toBe(0);
+        expect(writes).toBe(0);
+        for (const verb of ["show", "add", "commit", "commit-tree", "push"]) expect(runner.counts[verb] ?? 0).toBe(0);
+        console.log(`[idle-${direction}] files=250 reads=${reads} writes=${writes} elapsed=${Date.now() - start}ms`);
+        if (direction !== "pull-only") {
+          writeFileSync(join(f.syncedVault, "note-0.md"), "one changed note\n");
+          runner.reset(); reads = writes = 0;
+          const edited = await syncAllMappings(measured);
+          expect(edited[0].status).toBe("ok");
+          expect(edited[0].push).toBe(true);
+          expect(reads).toBeLessThanOrEqual(5);
+          expect(writes).toBe(0); // local content is already in the vault
+          expect(f.remoteHas("note-0.md")).toBe("one changed note\n");
+          console.log(`[one-edit-${direction}] files=250 reads=${reads} writes=${writes}`);
+        }
+      } finally { f.cleanup(); }
+    }, 120_000,
+  );
   it("converges two devices through the vault mirror without content loss", async () => {
     const f = makeFixture("two-device");
     f.seedRemote({ "Notes/diary.md": "# Diary\n\nbase\n" });
@@ -156,6 +202,25 @@ describe("release readiness — real git end-to-end", () => {
     expect(readFileSync(join(f.syncedVault, "Notes", "from-b.md"), "utf8")).toBe("added on device B\n");
     expect(f.remoteHas("Notes/diary.md")).toContain("EDIT from device A");
     f.cleanup();
+  });
+
+  it("requires a fresh decision when the remote changes after manual resolution", async () => {
+    const f = makeFixture("stale-resolution");
+    try {
+      f.seedRemote({ "note.md": "base\n" });
+      await syncAllMappings(f.deps());
+      f.secondDevice({ "note.md": "remote reviewed\n" }, "reviewed edit");
+      writeFileSync(join(f.syncedVault, "note.md"), "local winner\n");
+      expect((await syncAllMappings(f.deps()))[0].status).toBe("conflict");
+      f.store.setConflicts("map-rc", f.store.getConflicts("map-rc").map(c => ({
+        ...c, resolved: true, resolvedContent: "local winner\n",
+      })));
+      f.secondDevice({ "note.md": "new remote edit\n" }, "remote moved after review");
+      expect((await syncAllMappings(f.deps()))[0].status).toBe("conflict");
+      expect(f.remoteHas("note.md")).toBe("new remote edit\n");
+      expect(readFileSync(join(f.syncedVault, "note.md"), "utf8")).toBe("local winner\n");
+      expect(f.store.getConflicts("map-rc")[0].resolved).not.toBe(true);
+    } finally { f.cleanup(); }
   });
 
   it("manual conflict resolution converges: vault + clone written, next sync does not resurface it", async () => {
@@ -191,6 +256,48 @@ describe("release readiness — real git end-to-end", () => {
     f.cleanup();
   });
 
+  it.each(["ours", "both"] as const)("an explicit %s resolution publishes the chosen winner and converges", async (choice) => {
+    const f = makeFixture(`resolve-${choice}`);
+    f.seedRemote({ "Notes/diary.md": "# Diary\n\nbase line\n" });
+    await syncAllMappings(f.deps());
+
+    // Both sides edit the SAME line differently -> genuine conflict.
+    f.secondDevice({ "Notes/diary.md": "# Diary\n\nREMOTE EDIT\n" }, "remote edit");
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), "# Diary\n\nLOCAL EDIT\n");
+    const outConflict = await syncAllMappings(f.deps());
+    expect(outConflict[0].status).toBe("conflict");
+
+    // Resolve the choice the way the production transaction does: write the winner
+    // into vault + clone AND keep the record marked resolved as engine evidence —
+    // dropping it left the winner unpublishable (the pass re-conflicted forever).
+    const conflicts = f.store.getConflicts("map-rc");
+    expect(conflicts.map((c) => c.path)).toContain("Notes/diary.md");
+    const winner = choice === "ours" ? "# Diary\n\nLOCAL EDIT\n" : "# Diary\n\nLOCAL EDIT\n\n# Diary\n\nREMOTE EDIT\n";
+    const cp = recordedCloneDir(f.store, "map-rc") ?? expectedIdentityCloneDir(f.cloneRoot, { providerId: "cred-rc", repoId: "map-rc", remoteUrl: f.remotePlain });
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), winner);
+    writeFileSync(join(cp, "Notes", "diary.md"), winner);
+    f.store.setConflicts(
+      "map-rc",
+      conflicts.map((c) => (c.path === "Notes/diary.md" ? { ...c, resolved: true, resolvedContent: winner } : c)),
+    );
+    // A further local edit AFTER the decision is the newest local intent: the
+    // evidence binds the reviewed remote bytes, not the exact local bytes (a
+    // stamping/linter plugin may rewrite the file right after the resolution).
+    const newest = winner + "plus a later edit\n";
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), newest);
+
+    // The next pass publishes the local content instead of re-conflicting it.
+    const outOk = await syncAllMappings(f.deps());
+    expect(outOk[0].status).toBe("ok");
+    expect(outOk[0].push).toBe(true);
+    expect(f.remoteHas("Notes/diary.md")).toBe(newest);
+    // A follow-up pass stays clean and the evidence record is gone.
+    const outAgain = await syncAllMappings(f.deps());
+    expect(outAgain[0].status).toBe("ok");
+    expect(f.store.getConflicts("map-rc")).toEqual([]);
+    f.cleanup();
+  });
+
   it("propagates a vault deletion to the remote once correspondence is proven", async () => {
     const f = makeFixture("delete-propagation");
     f.seedRemote({ "Notes/keep.md": "keep\n", "Notes/gone.md": "this file gets deleted\n" });
@@ -206,6 +313,11 @@ describe("release readiness — real git end-to-end", () => {
     expect(out[0].status).toBe("ok");
     expect(f.remoteHas("Notes/gone.md")).toBe(""); // deleted on the remote
     expect(f.remoteHas("Notes/keep.md")).toBe("keep\n"); // untouched file survives
+    expect(existsSync(join(f.syncedVault, "Notes", "gone.md"))).toBe(false);
+    const again = await syncAllMappings(f.deps());
+    expect(again[0].status).toBe("ok");
+    expect(f.remoteHas("Notes/gone.md")).toBe("");
+    expect(existsSync(join(f.syncedVault, "Notes", "gone.md"))).toBe(false);
     f.cleanup();
   });
 

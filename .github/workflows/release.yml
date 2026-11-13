@@ -110,9 +110,13 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Per-file Diff browsing with explicit comparison modes, line counts, and file-level Git authors.
+          - Simpler UI: one Overview page with aligned folder rows, shared Overview/Changes/Review/Conflicts navigation, compact per-file change cards, and polished settings sections.
+          - Repository-file review moved from a popup to a full tab with a file list, preview pane and unchanged per-file deletion safeguards.
+          - Idle sync does no content reads, writes, commits or pushes; a one-file edit stays bounded. Repository discovery and fetches are deduplicated per pass for folders sharing a repository.
           - Direction-safe sync, editor-aware deferred operations, scoped commits, and recoverable conflicts.
-          - Serialized settings persistence and safer credential migration and metadata edits.
+          - Scoped first downloads read the correct subtree, even when filenames collide outside it.
+          - Local deletions stay deleted across pull mirroring and later sync passes; old remote blobs cannot resurrect them.
+          - Explicit conflict choices publish on the next sync while newer remote edits require a fresh decision.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -122,7 +126,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — reliable sync and per-file Diff" \
+            --title "${VERSION} — simpler UI, Review tab, faster idle sync" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

@@ -722,6 +722,64 @@ describe("syncAllMappings — sync outcomes", () => {
   });
 });
 
+describe("syncAllMappings — pass-scoped shared-work deduplication", () => {
+  it("lists repos once per credential and fetches a shared identity clone once per pass", async () => {
+    // Battery/performance: several folder mappings over the same repository must
+    // not multiply provider REST calls or git fetches within one pass.
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    let listReposCalls = 0;
+    let builds = 0;
+    const provider: Provider = {
+      ...fakeProvider(undefined),
+      async listRepos() { listReposCalls++; return [fakeRepo("m1")]; },
+    };
+    const outcomes = await syncAllMappings({
+      mappings: [
+        mapping({ id: "a", label: "Alpha", repoRef: "m1", remotePath: "alpha" }),
+        mapping({ id: "b", label: "Beta", repoRef: "m1", remotePath: "beta" }),
+      ],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => { builds++; return provider; },
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor, // clean fast-forward for both
+    });
+    expect(outcomes.map((o) => o.status)).toEqual(["ok", "ok"]);
+    expect(builds).toBe(1); // provider built once per credential
+    expect(listReposCalls).toBe(1); // repo list fetched once per credential
+    const cmd = (c: string[]): string => { let i = 0; while (c[i] === "-c") i += 2; return c[i] ?? ""; };
+    expect(calls.filter((c) => cmd(c) === "fetch")).toHaveLength(1); // shared clone fetched once
+  });
+
+  it("still fetches each distinct repository clone within the same pass", async () => {
+    // The dedup must be identity-scoped: two different repos sharing one
+    // credential still each get their own fetch.
+    const { runner, calls } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    let listReposCalls = 0;
+    const provider: Provider = {
+      ...fakeProvider(undefined),
+      async listRepos() { listReposCalls++; return [fakeRepo("m1"), fakeRepo("m2")]; },
+    };
+    const outcomes = await syncAllMappings({
+      mappings: [
+        mapping({ id: "a", label: "Alpha", repoRef: "m1", remotePath: "alpha" }),
+        mapping({ id: "b", label: "Beta", repoRef: "m2", remotePath: "beta" }),
+      ],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => provider,
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor,
+    });
+    expect(outcomes.map((o) => o.status)).toEqual(["ok", "ok"]);
+    expect(listReposCalls).toBe(1); // same credential: still one listing
+    const cmd = (c: string[]): string => { let i = 0; while (c[i] === "-c") i += 2; return c[i] ?? ""; };
+    expect(calls.filter((c) => cmd(c) === "fetch")).toHaveLength(2); // one fetch per clone
+  });
+});
+
 describe("syncAllMappings — local provider (existing local clone)", () => {
   it("fast-forwards a pull-only local mapping without pushing", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
