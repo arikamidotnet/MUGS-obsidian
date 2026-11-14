@@ -25,7 +25,10 @@ import {
   DEFAULT_CLONE_DIRNAME,
   resolveCloneDir,
 } from "./ui/defaultDataSources";
-import type { MugsSettings, FolderMapping, Agent, ReconciliationState } from "./types";
+import type { MugsSettings, FolderMapping, Agent } from "./types";
+import { analyzeReview, decideReviewBatch, reviewConfig } from "./runtime/reconciliationBulk";
+import { gitBlobId } from "./sync/reconciliation";
+import { checkRelPath } from "./git/safePath";
 import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
 import { GitClient } from "./git/client";
@@ -101,6 +104,8 @@ export default class MugsPlugin extends Plugin {
    *  events and manual Sync clicks from stacking parallel passes (and parallel
    *  clones) on top of each other. */
   private syncInFlight = false;
+  private reviewInFlight = false;
+  private unloaded = false;
   private readonly uiListeners = new Set<() => void>();
   /** Paths we (the plugin) just wrote via adapters. Used to suppress the resulting
    *  vault "modify"/"create" events so plugin-caused writes do not re-trigger sync
@@ -117,6 +122,7 @@ export default class MugsPlugin extends Plugin {
   private lastTerminalBarState?: BarState;
 
   async onload(): Promise<void> {
+    this.unloaded = false;
     // In Obsidian, IO is backed by loadData/saveData; MemoryIO covers tests.
     this.store = new MugsStore({
       read: () => this.loadData(),
@@ -344,14 +350,29 @@ export default class MugsPlugin extends Plugin {
    *  NEVER show "synced" after a refused/failed save.
    */
   async runSync(quiet = false): Promise<void> {
+    await this.executeSync(quiet);
+  }
+
+  private async executeSync(quiet = false, mappingId?: string, reviewOwned = false): Promise<boolean> {
+    if (this.unloaded) return false;
     if (this.store.loadError) {
       // Unreadable data.json: never sync (nothing would be persistable) — the
       // corrupt-file Notice from onload explains why.
       this.updateStatusBar("error");
-      return;
+      return false;
     }
-    if (this.syncInFlight) return;
+    if (this.syncInFlight || (this.reviewInFlight && !reviewOwned)) return false;
     this.syncInFlight = true;
+    try {
+      return await this.performSync(quiet, mappingId);
+    } finally {
+      this.syncInFlight = false;
+      this.currentRunController = undefined;
+      this.notifyUi();
+    }
+  }
+
+  private async performSync(quiet: boolean, mappingId?: string): Promise<boolean> {
     this.notifyUi();
     this.updateStatusBar("syncing", "syncing…");
 
@@ -368,7 +389,7 @@ export default class MugsPlugin extends Plugin {
 
     try {
       outcomes = await syncAllMappings({
-        mappings: settings.mappings,
+        mappings: mappingId ? settings.mappings.filter(m => m.id === mappingId) : settings.mappings,
         credentials: settings.credentials,
         getToken: (id) => this.store.getToken(id),
         buildProvider,
@@ -410,7 +431,7 @@ export default class MugsPlugin extends Plugin {
     }
     // A completed (non-thrown) pass has re-verified content: the startup
     // uncertainty window is over for subsequent passes.
-    if (!syncThrown) this.startupUncertain = false;
+    if (!syncThrown && !mappingId) this.startupUncertain = false;
 
     // Persist under ownership. Contract: syncInFlight releases only after save resolves.
     // Consume SaveResult: {ok:false} is failure — do not let status become "synced".
@@ -506,9 +527,7 @@ export default class MugsPlugin extends Plugin {
       }
     }
 
-    this.syncInFlight = false;
-    this.currentRunController = undefined;
-    this.notifyUi();
+    return saveResult.ok && !syncThrown;
   }
 
   private notifyUi(): void {
@@ -601,6 +620,7 @@ export default class MugsPlugin extends Plugin {
       remove(p: string): Promise<void>;
       mkdir(p: string): Promise<void>;
       stat(p: string): Promise<{ mtime: number; size: number } | null>;
+      exists(p: string): Promise<boolean>;
     };
     const rootOf = (folder: string): string => (folder === "." ? "" : normalizeVaultPath(folder));
     const vaultPath = (folder: string, rel: string): string => {
@@ -627,6 +647,7 @@ export default class MugsPlugin extends Plugin {
           .map((f) => (root === "" ? f.path : f.path.slice(root.length + 1)));
       },
       read: async (folder, rel) => adapter.read(vaultPath(folder, rel)),
+      exists: async (folder, rel) => adapter.exists(vaultPath(folder, rel)),
       write: async (folder, rel, content) => {
         const p = vaultPath(folder, rel);
         const parent = p.slice(0, p.lastIndexOf("/"));
@@ -749,8 +770,76 @@ export default class MugsPlugin extends Plugin {
    *  that executes it under full preconditions (re-queuing the path when any
    *  check fails). */
   reconciliationDeps(): ReconciliationReviewDeps {
+    const snapshot = this.store.getSettings();
+    const configs = new Map(snapshot.mappings.map(m => [m.id, reviewConfig(snapshot, m.id)]));
+    const decideBatch: NonNullable<ReconciliationReviewDeps["decideBatch"]> = (rows, action) =>
+      decideReviewBatch({
+        getSettings: () => this.store.getSettings(),
+        setLastSync: state => this.store.setLastSync(state),
+        save: () => this.store.save(),
+        acquire: () => {
+          if (this.unloaded || this.store.loadError) throw new Error("plugin is unloaded or settings could not be loaded");
+          if (this.syncInFlight || this.reviewInFlight) throw new Error("another sync or review is running — wait and retry");
+          this.reviewInFlight = true;
+          return () => { this.reviewInFlight = false; this.notifyUi(); };
+        },
+        sync: id => this.executeSync(true, id, true),
+        verify: async (rows, action) => {
+          const settings = this.store.getSettings();
+          const mapping = settings.mappings.find(m => m.id === rows[0].mappingId);
+          const ref = settings.lastSync[rows[0].mappingId]?.lastRemoteSha;
+          if (!mapping || !ref) return new Set();
+          if (action === "delete") {
+            const dir = resolveCloneDir(this.store, this.cloneRoot(), mapping);
+            const tree = await new GitClient(new ChildProcessRunner()).at(dir).run(["ls-tree", "-r", "--name-only", "-z", "--full-tree", ref, "--"]);
+            if (tree.code !== 0) return new Set();
+            const paths = new Set(tree.stdout.split("\0").filter(Boolean));
+            return new Set(rows.filter(row => !paths.has(row.path)).map(row => row.path));
+          }
+          const verified = new Set<string>();
+          const mirror = this.vaultMirror();
+          for (const row of rows) {
+            const rel = repoToVaultPath(mapping, row.path);
+            if (rel === null) continue;
+            try {
+              if (gitBlobId(await mirror.read(mapping.localFolder, rel), row.blob.length) === row.blob) verified.add(row.path);
+            } catch { /* Missing/unreadable is not an applied recovery. */ }
+          }
+          return verified;
+        },
+      }, rows, action, configs.get(rows[0]?.mappingId) ?? "");
     return {
       rows: this.reconciliationRows(),
+      analyze: async (signal) => {
+        const mirror = this.vaultMirror();
+        const files = this.app.vault.getFiles()
+          .filter(file => mirror.listable?.(file.path))
+          .map(file => ({ path: file.path, size: file.stat.size }));
+        return analyzeReview(this.reconciliationRows(), files, path => this.app.vault.adapter.read(path), signal);
+      },
+      compare: async (row, vaultPath) => {
+        const current = this.reconciliationRows().find(item => item.mappingId === row.mappingId && item.path === row.path);
+        if (!current || current.ref !== row.ref || current.blob !== row.blob || current.fingerprint !== row.fingerprint) {
+          throw new Error("review entry changed; refresh and analyze again");
+        }
+        if (!checkRelPath(vaultPath).ok || !this.vaultMirror().listable?.(vaultPath) ||
+            !this.app.vault.getFiles().some(file => file.path === vaultPath)) {
+          throw new Error("vault candidate is no longer available");
+        }
+        const mapping = this.store.getSettings().mappings.find(m => m.id === row.mappingId);
+        if (!mapping) throw new Error("the mapping no longer exists");
+        const dir = resolveCloneDir(this.store, this.cloneRoot(), mapping);
+        const [remote, local] = await Promise.all([
+          new GitClient(new ChildProcessRunner()).at(dir).showTyped(row.ref, row.path),
+          this.app.vault.adapter.read(vaultPath),
+        ]);
+        if (remote.kind !== "content") throw new Error("repository preview is no longer available");
+        if (gitBlobId(remote.content, row.blob.length) !== row.blob) {
+          throw new Error("repository content no longer matches the reviewed blob");
+        }
+        return { remote: remote.content, local };
+      },
+      decideBatch,
       preview: async (row) => {
         const mapping = this.store.getSettings().mappings.find((m) => m.id === row.mappingId);
         if (!mapping) throw new Error("the mapping no longer exists");
@@ -761,30 +850,9 @@ export default class MugsPlugin extends Plugin {
         throw new Error(read.error.message);
       },
       decide: async (row, action) => {
-        const ls = this.store.getSettings().lastSync[row.mappingId];
-        const state: ReconciliationState | undefined = ls?.reconciliation;
-        const entry = state?.review[row.path];
-        if (!ls || !state || !entry) throw new Error("this file is no longer in the review queue — reopen reconciliation");
-        if (entry.ref !== row.ref || entry.blob !== row.blob) {
-          throw new Error("the review queue changed since it opened — reopen reconciliation");
-        }
-        // Revision-bound intent: the next pass executes it under full preconditions
-        // (scope, ref, blob, editor guard, recoverable backup before deletion) and
-        // re-queues the path when any check fails — a stale decision never deletes.
-        this.store.setLastSync({
-          ...ls,
-          reconciliation: { ...state, decisions: { ...state.decisions, [row.path]: { ref: row.ref, blob: row.blob, action } } },
-        });
-        const saved = await this.store.save();
-        if (!saved.ok) throw new Error("could not persist the decision — nothing was applied yet");
-        await this.runSync(true);
-        const after = this.store.getSettings().lastSync[row.mappingId]?.reconciliation;
-        if (after?.decisions[row.path]) {
-          throw new Error("the decision is recorded and applies on the next completed sync pass");
-        }
-        if (after?.review[row.path]) {
-          throw new Error("the decision could not be applied (the remote or vault changed) — the file was re-queued for review");
-        }
+        const result = await decideBatch([row], action);
+        if (!result.persisted) throw new Error("sync state was not persisted — refresh review before retrying");
+        if (result.rows[0].status !== "applied") throw new Error(`decision ${result.rows[0].status} — refresh review after sync`);
       },
     };
   }
@@ -1100,6 +1168,7 @@ export default class MugsPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
     if (this.eventDebounceTimer) clearTimeout(this.eventDebounceTimer);
     if (this.pollTimer) {
       try { window.clearInterval(this.pollTimer); } catch {}

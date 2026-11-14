@@ -142,6 +142,8 @@ export interface WorkingTreeWriter {
 export interface VaultMirror {
   /** List syncable text files under the folder (folder-relative paths). */
   list(localFolder: string): Promise<string[]>;
+  /** Live target check for review batches; errors must propagate, never mean absent. */
+  exists?(localFolder: string, relPath: string): Promise<boolean>;
   /** Read one file (folder-relative). */
   read(localFolder: string, relPath: string): Promise<string>;
   /** Write one file (folder-relative), creating parent folders as needed. */
@@ -405,6 +407,7 @@ export class CloneManager {
     c: GitClient,
     remoteSha: string,
     state: ReconciliationState,
+    signal?: AbortSignal,
   ): Promise<{ deletes: Set<string>; blocked: BlockedFile[] }> {
     const deletes = new Set<string>();
     const blocked: BlockedFile[] = [];
@@ -413,6 +416,7 @@ export class CloneManager {
       blocked.push({ path, reason });
     };
     for (const [path, decision] of Object.entries(state.decisions)) {
+      signal?.throwIfAborted();
       if (!checkRelPath(path).ok || !this.inScope(mapping, path) || !this.mirrorListable(path)) {
         drop(path, "reviewed path left the mapping's scope — reopen reconciliation");
         continue;
@@ -430,8 +434,10 @@ export class CloneManager {
         drop(path, "reviewed path is outside the mapping — reopen reconciliation");
         continue;
       }
-      const listed = await this.vaultMirror!.list(mapping.localFolder);
-      if (listed.includes(rel)) {
+      const exists = this.vaultMirror!.exists
+        ? await this.vaultMirror!.exists(mapping.localFolder, rel)
+        : (await this.vaultMirror!.list(mapping.localFolder)).includes(rel);
+      if (exists) {
         drop(path, "vault file appeared since review — reopen reconciliation");
         continue;
       }
@@ -449,6 +455,7 @@ export class CloneManager {
         drop(path, "reviewed remote content cannot be verified — reopen reconciliation");
         continue;
       }
+      signal?.throwIfAborted();
       if (decision.action === "delete") {
         if (mapping.direction === "pull-only") {
           drop(path, "pull-only mappings cannot delete remote files");
@@ -812,7 +819,7 @@ export class CloneManager {
     let approvedDeletes = new Set<string>();
     let decisionBlocked: BlockedFile[] = [];
     if (reconciliation) {
-      const decisions = await this.applyReconciliationDecisions(mapping, c, remoteSha, reconciliation);
+      const decisions = await this.applyReconciliationDecisions(mapping, c, remoteSha, reconciliation, opts.signal);
       approvedDeletes = decisions.deletes;
       decisionBlocked = decisions.blocked;
     }

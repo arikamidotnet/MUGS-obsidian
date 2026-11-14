@@ -768,6 +768,28 @@
 .mugs-recon-primary p { flex: 1 1 180px; margin: 0; }
 .mugs-recon-deletion { border-top: 1px solid var(--background-modifier-border); padding-top: 12px; }
 .mugs-recon-deletion summary { color: var(--text-muted); }
+.mugs-bulk-review { margin-bottom: 20px; padding: 14px 16px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); min-width: 0; }
+.mugs-bulk-review > h3 { margin: 0 0 6px; font-size: var(--font-ui-medium); }
+.mugs-bulk-review button { margin: 4px 8px 4px 0; white-space: normal; height: auto; }
+.mugs-bulk-categories { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin: 12px 0; }
+.mugs-bulk-category { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-primary); }
+.mugs-bulk-count { font-size: var(--font-ui-large); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.mugs-bulk-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; margin: 14px 0; }
+.mugs-reconciliation .mugs-bulk-controls label { display: flex; flex: 1 1 180px; flex-direction: column; align-items: stretch; gap: 4px; margin: 0; color: var(--text-muted); }
+.mugs-bulk-controls select { width: 100%; max-width: 100%; min-width: 0; color: var(--text-normal); }
+.mugs-bulk-title { margin: 16px 0 8px; font-size: var(--font-ui-medium); }
+.mugs-bulk-preview { max-height: 38vh; overflow: auto; padding: 2px 6px 2px 2px; min-width: 0; }
+.mugs-bulk-file { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 10px 12px; margin: 4px 0; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-primary); min-width: 0; }
+.mugs-bulk-file-path { flex: 1 1 100%; font-weight: 600; overflow-wrap: anywhere; }
+.mugs-bulk-identity { flex: 1 1 100%; overflow-wrap: anywhere; font-size: var(--font-ui-smaller); }
+.mugs-bulk-file .mugs-bulk-compare { margin: 2px 0; font-size: var(--font-ui-smaller); }
+.mugs-bulk-comparison { min-width: 0; margin: 12px 0; overflow: auto; }
+.mugs-bulk-comparison:empty { display: none; }
+.mugs-bulk-comparison .mugs-diff-file { max-width: 100%; }
+@container (max-width: 520px) {
+  .mugs-bulk-review { padding: 10px 12px; }
+  .mugs-bulk-controls { flex-direction: column; align-items: stretch; }
+}
 @container (max-width: 700px) {
   .mugs-recon-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .mugs-recon-files { max-height: 220px; }

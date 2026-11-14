@@ -26,9 +26,30 @@ function paleTint(hsl: string): string {
  * Common prefix/suffix stay context; the divergent region is shown in full so a
  * choice cannot be mistaken for an automatic line-level merge. */
 export function renderConflictComparison(host: HTMLElement, conflict: FileConflict): void {
-  host.createEl("p", { cls: "mugs-page-description", text: "This device → Repository. These are the versions captured when sync found overlapping edits." });
-  const before = conflict.oursAbsent ? [] : conflict.ours.split("\n");
-  const after = conflict.theirsAbsent ? [] : conflict.theirs.split("\n");
+  if (conflict.oursAbsent || conflict.theirsAbsent) {
+    host.createEl("p", { cls: "mugs-note", text: `${conflict.oursAbsent ? "This device" : "Repository"} deleted this file. Choosing that side deletes both copies.` });
+  }
+  renderTextComparison(host, {
+    path: conflict.path,
+    local: conflict.oursAbsent ? undefined : conflict.ours,
+    remote: conflict.theirsAbsent ? undefined : conflict.theirs,
+    description: "This device → Repository. These are the versions captured when sync found overlapping edits.",
+  });
+}
+
+/** Reuse the Conflicts/Changes diff presentation for a live, selected review candidate.
+ *  Text is bounded before the line table is constructed; no HTML sinks are used. */
+export function renderTextComparison(
+  host: HTMLElement,
+  input: { path: string; local?: string; remote?: string; description: string },
+): void {
+  host.createEl("p", { cls: "mugs-page-description", text: input.description });
+  if ((input.local?.length ?? 0) + (input.remote?.length ?? 0) > 256 * 1024) {
+    host.createEl("p", { cls: "mugs-note", text: "This file is too large for an inline comparison. Open both copies and review the complete file before choosing." });
+    return;
+  }
+  const before = input.local === undefined ? [] : input.local.split("\n");
+  const after = input.remote === undefined ? [] : input.remote.split("\n");
   let prefix = 0;
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
   let suffix = 0;
@@ -41,15 +62,15 @@ export function renderConflictComparison(host: HTMLElement, conflict: FileConfli
     ...after.slice(prefix, after.length - suffix).map((content) => ({ type: "added" as const, content })),
     ...before.slice(before.length - suffix, before.length - suffix + Math.min(suffix, 3)).map((content) => ({ type: "context" as const, content })),
   ];
-  if (lines.length > 2000 || conflict.ours.length + conflict.theirs.length > 256 * 1024) {
+  if (lines.length > 2000) {
     host.createEl("p", { cls: "mugs-note", text: "This file is too large for an inline comparison. Open both copies and review the complete file before choosing a version." });
     return;
   }
-  if (conflict.oursAbsent || conflict.theirsAbsent) {
-    host.createEl("p", { cls: "mugs-note", text: `${conflict.oursAbsent ? "This device" : "Repository"} deleted this file. Choosing that side deletes both copies.` });
+  if (input.local === undefined || input.remote === undefined) {
+    host.createEl("p", { cls: "mugs-note", text: `${input.local === undefined ? "This device" : "Repository"} has no copy at the compared path.` });
   }
-  renderDiff({ files: [{ name: conflict.path, hunks: [{
-    file: conflict.path, oldStart: start + 1, newStart: start + 1,
+  renderDiff({ files: [{ name: input.path, hunks: [{
+    file: input.path, oldStart: start + 1, newStart: start + 1,
     oldCount: lines.filter((line) => line.type !== "added").length,
     newCount: lines.filter((line) => line.type !== "removed").length,
     lines,

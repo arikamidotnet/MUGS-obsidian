@@ -21,6 +21,8 @@ import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 import { resolveConflictFile } from "./conflict";
 import type { FolderMapping, Credential } from "../types";
 import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir, CountingRunner } from "./testkit";
+import { decideReviewBatch, reviewConfig } from "../runtime/reconciliationBulk";
+import { MemoryTrashStore } from "./trash";
 
 installHermeticGitIdentity();
 
@@ -137,6 +139,60 @@ function makeFixture(name: string) {
 }
 
 describe("release readiness — real git end-to-end", () => {
+  it.each(["delete", "recover"] as const)("bulk %s processes 30 reviewed paths in one engine pass", async action => {
+    const f = makeFixture(`bulk-${action}`);
+    try {
+      const files = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`remote-${i}.md`, `remote text ${i}\n`]));
+      f.seedRemote({ ...files, "keep.md": "local proof\n" });
+      writeFileSync(join(f.syncedVault, "keep.md"), "local proof\n");
+      const mapping = f.mapping({ direction: "push-only" });
+      f.store.upsertCredential(f.cred);
+      f.store.upsertMapping(mapping);
+      const runner = new CountingRunner();
+      const trash = new MemoryTrashStore();
+      const deps = { ...f.deps({ direction: "push-only" }), runner, trash };
+      deps.vaultMirror.exists = async (_folder, rel) => existsSync(join(f.syncedVault, rel));
+      await syncAllMappings(deps);
+      const state = f.store.getSettings().lastSync[mapping.id].reconciliation!;
+      const rows = Object.entries(state.review).map(([path, entry]) => ({
+        ...entry, path, fingerprint: state.fingerprint, direction: mapping.direction,
+        mappingId: mapping.id, mappingLabel: mapping.label,
+      }));
+      expect(rows).toHaveLength(30);
+      runner.reset();
+      let passes = 0;
+      const result = await decideReviewBatch({
+        getSettings: () => f.store.getSettings(),
+        setLastSync: state => f.store.setLastSync(state),
+        save: () => f.store.save(),
+        acquire: () => () => {},
+        sync: async () => {
+          passes++;
+          const outcomes = await syncAllMappings(deps);
+          expect(outcomes[0].status).toBe("ok");
+          return (await f.store.save()).ok;
+        },
+        verify: async () => new Set(rows.filter(row => action === "recover"
+          ? readFileSync(join(f.syncedVault, row.path), "utf8") === files[row.path]
+          : hermeticExecSync(`git --git-dir="${f.remotePlain}" ls-tree --name-only HEAD -- "${row.path}"`).toString().trim() === "").map(row => row.path)),
+      }, rows, action, reviewConfig(f.store.getSettings(), mapping.id));
+      expect(passes).toBe(1);
+      expect(result.persisted).toBe(true);
+      expect(result.rows.every(row => row.status === "applied")).toBe(true);
+      expect(runner.counts.fetch).toBe(1);
+      expect(runner.counts.push ?? 0).toBe(action === "delete" ? 1 : 0);
+      expect(trash.size).toBe(action === "delete" ? 30 : 0);
+      for (const [path, content] of Object.entries(files)) {
+        if (action === "delete") expect(trash.get(mapping.id, path)).toBe(content);
+        else expect(readFileSync(join(f.syncedVault, path), "utf8")).toBe(content);
+      }
+      expect(f.store.getSettings().lastSync[mapping.id].reconciliation!.review).toEqual({});
+      await syncAllMappings(deps);
+      expect(f.remoteHas("keep.md")).toBe("local proof\n");
+      expect(f.remoteHas("remote-0.md")).toBe(action === "delete" ? "" : files["remote-0.md"]);
+    } finally { f.cleanup(); }
+  }, 120_000);
+
   it.each(["push-only", "pull-only", "push-pull"] as const)(
     "%s: a 250-file idle pass reads no content and does not rewrite, commit or push",
     async (direction) => {

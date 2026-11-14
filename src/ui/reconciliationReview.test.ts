@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ReconciliationReview, type ReconciliationReviewRow } from "./reconciliationReview";
+import { BulkReview } from "./reconciliationBulk";
+import type { ReviewAnalysis, BulkResult } from "../runtime/reconciliationBulk";
 
 // Test-local fake DOM follows views.test.ts without changing the shared
 // Obsidian stub or adding a browser dependency. HTML sinks deliberately throw.
@@ -83,6 +85,117 @@ const confirm = (root: FakeEl): void => {
 const select = (root: FakeEl, index: number): void => {
   fileButtons(root)[index]!.fire("click");
 };
+
+const makeBulk = (direction: ReconciliationReviewRow["direction"] = "push-only") => {
+  const rows = [row({ direction }), row({ direction, path: "<script>.md" })];
+  const analysis: ReviewAnalysis = { scanned: 2, skipped: 0, entries: rows.map(row => ({
+    row, category: "exact", matches: ["renamed/local.md"], matchCount: 1,
+  })) };
+  const root = new El("div");
+  const analyze = vi.fn(async (_signal: AbortSignal) => analysis);
+  const decide = vi.fn(async (rows: ReconciliationReviewRow[], _action: "delete" | "recover"): Promise<BulkResult> => ({
+    persisted: true, rows: rows.map(row => ({ row, status: "applied" })),
+  }));
+  const bulk = new BulkReview({ analyze, decide, blocked: () => false });
+  bulk.render(root as unknown as HTMLElement);
+  return { root, bulk, analyze, decide };
+};
+
+describe("bulk review UI", () => {
+  it("analyzes only on demand and requires preview and explicit confirmation", async () => {
+    const f = makeBulk();
+    expect(f.analyze).not.toHaveBeenCalled();
+    button(f.root, "Analyze review items").fire("click");
+    await flush();
+    expect(text(f.root)).toContain("2\nExact-content duplicate / move candidates");
+    button(f.root, "Preview batch").fire("click");
+    expect(text(f.root)).toContain("<script>.md");
+    expect(text(f.root)).toContain("renamed/local.md");
+    const apply = button(f.root, "Apply confirmed batch");
+    expect(apply.disabled).toBe(true);
+    apply.fire("click");
+    expect(f.decide).not.toHaveBeenCalled();
+    confirm(f.root);
+    apply.fire("click");
+    apply.fire("click");
+    await flush();
+    expect(f.decide).toHaveBeenCalledTimes(1);
+    expect(f.decide.mock.calls[0][0]).toHaveLength(2);
+    expect(f.decide.mock.calls[0][1]).toBe("recover");
+    expect(text(f.root)).toContain("2 applied; 0 re-queued; 0 pending");
+  });
+
+  it("loads a comparison only when the candidate is selected and never treats it as consent", async () => {
+    const f = makeBulk();
+    const compare = vi.fn(async () => ({ local: "same bytes", remote: "same bytes" }));
+    const bulk = new BulkReview({ analyze: f.analyze, compare, decide: f.decide, blocked: () => false });
+    const root = new El("div");
+    bulk.render(root as unknown as HTMLElement);
+    button(root, "Analyze review items").fire("click");
+    await flush();
+    button(root, "Preview batch").fire("click");
+    expect(compare).not.toHaveBeenCalled();
+    button(root, "Compare with renamed/local.md").fire("click");
+    await flush();
+    expect(compare).toHaveBeenCalledTimes(1);
+    expect(text(root)).toContain("Saved vault bytes and reviewed repository bytes are identical");
+    expect(f.decide).not.toHaveBeenCalled();
+    expect(button(root, "Apply confirmed batch").disabled).toBe(true);
+  });
+
+  it.each(["cancel", "replace", "change", "detach", "reanalyze"])("rejects old confirmed controls after %s", async reason => {
+    const f = makeBulk();
+    button(f.root, "Analyze review items").fire("click");
+    await flush();
+    button(f.root, "Preview batch").fire("click");
+    confirm(f.root);
+    const old = button(f.root, "Apply confirmed batch");
+    if (reason === "cancel") button(f.root, "Cancel batch").fire("click");
+    if (reason === "replace") button(f.root, "Preview batch").fire("click");
+    if (reason === "change") tag(f.root, "select").fire("change");
+    if (reason === "detach") f.bulk.detach();
+    if (reason === "reanalyze") { button(f.root, "Analyze review items").fire("click"); await flush(); }
+    old.fire("click");
+    expect(f.decide).not.toHaveBeenCalled();
+  });
+
+  it("blocks pull-only deletion, and cancellation records no intent", async () => {
+    const f = makeBulk("pull-only");
+    button(f.root, "Analyze review items").fire("click");
+    await flush();
+    const selects = walk(f.root).filter(el => el.tagName === "select");
+    selects[2].value = "delete";
+    selects[2].fire("change");
+    button(f.root, "Preview batch").fire("click");
+    expect(text(f.root)).toContain("deleting repository files isn't allowed");
+    expect(walk(f.root).some(el => el.textContent === "Apply confirmed batch")).toBe(false);
+    const pending = deferred<ReviewAnalysis>();
+    f.analyze.mockImplementation(() => pending.promise);
+    button(f.root, "Analyze review items").fire("click");
+    const signal = f.analyze.mock.calls.at(-1)![0];
+    button(f.root, "Cancel analysis").fire("click");
+    expect(signal.aborted).toBe(true);
+    pending.reject(new Error("aborted"));
+    await flush();
+    expect(text(f.root)).toContain("Analysis cancelled");
+    expect(f.decide).not.toHaveBeenCalled();
+  });
+
+  it("keeps failure/partial results visible without permitting replay", async () => {
+    const f = makeBulk();
+    f.decide.mockResolvedValue({ persisted: false, rows: [] });
+    button(f.root, "Analyze review items").fire("click");
+    await flush();
+    button(f.root, "Preview batch").fire("click");
+    confirm(f.root);
+    const apply = button(f.root, "Apply confirmed batch");
+    apply.fire("click");
+    await flush();
+    expect(text(f.root)).toContain("Effects may be partial");
+    apply.fire("click");
+    expect(f.decide).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("ReconciliationReview (Review tab)", () => {
   it("explains empty discovery without calling the backend", () => {

@@ -1,4 +1,6 @@
 import { directionLabel } from "./labels";
+import { BulkReview } from "./reconciliationBulk";
+import type { ReviewAnalysis, BulkResult } from "../runtime/reconciliationBulk";
 
 export interface ReconciliationReviewRow {
   mappingId: string;
@@ -15,6 +17,9 @@ export interface ReconciliationReviewDeps {
   rows: ReconciliationReviewRow[];
   preview: (row: ReconciliationReviewRow) => Promise<string>;
   decide: (row: ReconciliationReviewRow, action: "delete" | "recover") => Promise<void>;
+  analyze?: (signal: AbortSignal) => Promise<ReviewAnalysis>;
+  compare?: (row: ReconciliationReviewRow, vaultPath: string) => Promise<{ local: string; remote: string }>;
+  decideBatch?: (rows: ReconciliationReviewRow[], action: "delete" | "recover") => Promise<BulkResult>;
 }
 
 const PREVIEW_LIMIT = 32 * 1024;
@@ -33,6 +38,7 @@ export class ReconciliationReview {
   private selected = 0;
   private query = "";
   private fileButtons: HTMLButtonElement[] = [];
+  private bulk?: BulkReview;
 
   constructor(private readonly deps: ReconciliationReviewDeps) {
     // Keep exactly the reviewed identity even if the caller refreshes its rows.
@@ -41,17 +47,19 @@ export class ReconciliationReview {
 
   /** True while a decision is executing — callers use this to skip refreshes. */
   isBusy(): boolean {
-    return this.deciding;
+    return this.deciding || (this.bulk?.isBusy() ?? false);
   }
 
   /** Stop accepting async results; the host is closing or replacing us. */
   detach(): void {
     this.closed = true;
     this.generation++;
+    this.bulk?.detach();
   }
 
   render(root: HTMLElement): void {
     this.root = root;
+    this.bulk?.detach();
     this.closed = false;
     root.empty();
     root.style.maxWidth = "100%";
@@ -68,6 +76,15 @@ export class ReconciliationReview {
       return;
     }
     this.selected = Math.min(this.selected, Math.max(0, this.rows.length - 1));
+    if (this.deps.analyze && this.deps.decideBatch) {
+      this.bulk = new BulkReview({
+        analyze: this.deps.analyze,
+        compare: this.deps.compare,
+        decide: this.deps.decideBatch,
+        blocked: () => this.deciding,
+      });
+      this.bulk.render(root.createDiv({ cls: "mugs-bulk-review" }));
+    }
 
     const layout = root.createDiv({ cls: "mugs-recon-layout" });
     const sidebar = layout.createDiv({ cls: "mugs-recon-sidebar" });
@@ -101,7 +118,7 @@ export class ReconciliationReview {
         file.createSpan({ cls: "mugs-recon-file-location", text: [row.mappingLabel || row.mappingId, parent].filter(Boolean).join(" · ") });
         this.fileButtons.push(file);
         file.addEventListener("click", () => {
-          if (this.closed || this.deciding || index === this.selected) return;
+          if (this.closed || this.isBusy() || index === this.selected) return;
           this.selected = index;
           // Keep the list mounted: selecting a file must not lose scroll or focus.
           for (const button of this.fileButtons) {
@@ -115,7 +132,7 @@ export class ReconciliationReview {
       if (!visible) list.createEl("p", { cls: "mugs-muted", text: "No matching files." });
     };
     search.addEventListener("input", () => {
-      if (this.closed || this.deciding) return;
+      if (this.closed || this.isBusy()) return;
       this.query = search.value;
       renderFiles();
     });
@@ -152,7 +169,7 @@ export class ReconciliationReview {
     const error = detail.createEl("p", { cls: "mugs-recon-error" });
     error.setAttribute("role", "alert");
     retry.addEventListener("click", () => {
-      if (current() && !this.deciding && !retry.disabled) this.render(this.root!);
+      if (current() && !this.isBusy() && !retry.disabled) this.render(this.root!);
     });
     const actions = detail.createDiv({ cls: "mugs-recon-primary" });
     const recover = actions.createEl("button", { text: "Add to vault", type: "button", cls: "mod-cta" });
@@ -184,7 +201,7 @@ export class ReconciliationReview {
     };
     confirmation.addEventListener("change", update);
     const decide = async (action: "delete" | "recover") => {
-      if (!current() || !ready || this.deciding) return;
+      if (!current() || !ready || this.isBusy()) return;
       if (action === "delete" && (row.direction === "pull-only" || !confirmation.checked)) return;
       this.deciding = true;
       error.textContent = "";

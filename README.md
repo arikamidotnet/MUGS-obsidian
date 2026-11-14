@@ -7,17 +7,25 @@ Obsidian 1.8.0 or newer.
 Development requires Node 20.19+ (CI pins 20.20.2). Release dependencies are
 locked; use `npm ci` for repeatable installs.
 
-## 0.4.1 highlights
+## 0.4.2 highlights
 
-- Consistent Overview, Changes, Review and Conflicts navigation, responsive folder
-  rows, a searchable Review tab, per-file conflict comparisons and clearer settings.
-- Scoped first downloads read the selected repository subtree, including when a
-  file with the same name exists outside that subtree.
-- Proven local deletions stay deleted through pull mirroring and later sync passes;
-  old repository content is not restored and uploaded again.
-- Explicit conflict choices publish on the next sync; newer remote edits still
-  require a fresh decision. Verified idle passes avoid content reads, rewrites,
-  commits and pushes.
+- Bulk repository-file review: on-demand read-only analysis groups review entries
+  into exact-content duplicate/move candidates, filename-only candidates, no
+  matching vault file and inconclusive scans — with bounded, cancellable scanning.
+- Batch decisions with full previews: pick a folder, category and action, inspect
+  every repository path/revision and vault candidate, optionally open a lazy
+  vault-to-repository line comparison using the same diff UI as Conflicts/Changes,
+  then confirm explicitly.
+  Each batch covers one folder and one sync pass (up to 500 files) instead of one
+  sync per file, reporting applied / re-queued / pending outcomes per path.
+- Deletion safeguards unchanged: decisions stay revision-bound, recovery backups
+  are required before deletion, Download only cannot delete, and filename matches
+  never imply identity or permission.
+- Review intent that cannot be persisted is rolled back instead of silently
+  applying later; sync locks always release; analysis can be cancelled before a decision.
+- 0.4.1: consistent Overview/Changes/Review/Conflicts navigation, scoped first
+  downloads that survive same-name collisions, deletions that stay deleted, and
+  verified idle passes that avoid content reads, rewrites, commits and pushes.
 
 Use the upgrade/rollback instructions below and retain a private vault backup.
 
@@ -197,6 +205,36 @@ unwired); a view for the membership data layer.
 - Conflicts (if any) are rendered above the diff and can be resolved from the panel.
 
 ## Operator recovery notes (current)
+
+### Bulk repository-file review
+
+Open **Review → Analyze review items**. Analysis is read-only and on demand:
+it hashes saved vault text once and groups repository review entries into
+exact-content duplicate/move candidates, filename-only candidates, no matching
+vault file, or an inconclusive scan. Exact bytes do not prove a move or that the
+repository copy is unwanted. Filename matches never prove identity.
+
+Choose a folder, category and action, then **Preview batch**. Inspect every
+repository path/revision and the listed vault candidates; use **Compare with…**
+to see a bounded, read-only line comparison for a selected pair before checking the
+confirmation and applying. Recovery explicitly adds files even in Upload only;
+Download only cannot delete repository files. Deletion requires the engine's
+recovery backup before removal. Cancel analysis or the preview to leave all
+decisions unchanged.
+
+Each batch covers one folder and at most 500 files, saves intent once, and runs
+one normal sync pass for that folder (including its other ordinary sync changes).
+This avoids one pass per file and prevents another folder's push from staling the
+batch revision. Changed, held or open files are not forced through: outcomes show
+applied, re-queued and pending counts. Refresh/analyze again after a batch. Batches
+are not atomic; saved pending decisions can resume on a later sync. A persistence
+failure is reported rather than being presented as success.
+
+The analyzer scans up to 10,000 eligible text files, 2 MiB per file and 64 MiB
+total. Unreadable, binary or budget-skipped content is not treated as proof of
+absence; unmatched results become inconclusive if the scan was incomplete.
+Only saved bytes are compared, not unsaved editor buffers. No batch is applied
+automatically, and no existing ownership evidence is upgraded by analysis.
 
 - When a mapping shows "needs merge" / conflict status, open the Conflicts panel (via status bar click or dedicated view) and choose per file: ours / theirs / both.
 - When the **Review tab** lists paths (remote files this vault never
