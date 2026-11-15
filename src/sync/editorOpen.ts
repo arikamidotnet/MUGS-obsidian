@@ -38,6 +38,11 @@ export class EditorOpenGuard {
     this.open.delete(path);
   }
 
+  /** Update the live guard without invalidating references held by a running pass. */
+  replace(paths: Iterable<string>): void {
+    this.open = new Set(paths);
+  }
+
   /** True when `path` is open with unsaved changes. */
   isOpenWithUnsaved(path: string): boolean {
     return this.open.has(path);

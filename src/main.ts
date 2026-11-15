@@ -8,7 +8,7 @@
  * (`sync/schedule.ts`); everything here is thin Obsidian glue.
  */
 import { Plugin, Notice, type EventRef } from "obsidian";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { MugsStore, MemoryIO, type SaveResult } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
@@ -16,6 +16,7 @@ import { DiffView } from "./ui/diffView";
 import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
 import { ReconciliationView } from "./ui/reconciliationView";
+import { PreflightView, MUGS_PREFLIGHT_VIEW_TYPE } from "./ui/preflightView";
 import type { ReconciliationReviewDeps, ReconciliationReviewRow } from "./ui/reconciliationReview";
 import { setMugsContext } from "./ui/dataSources";
 import {
@@ -34,7 +35,7 @@ import { ChildProcessRunner } from "./git/runner";
 import { GitClient } from "./git/client";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
 import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
-import { decideRun, debounceFireTimes } from "./sync/schedule";
+import { decideRun } from "./sync/schedule";
 import type { VaultMirror, WorkingTreeWriter } from "./sync/cloneManager";
 import { cloneDir } from "./sync/cloneManager";
 import { repoToVaultPath } from "./sync/mirror";
@@ -43,7 +44,11 @@ import { EditorOpenGuard } from "./sync/editorOpen";
 import { FileSystemTrashStore } from "./sync/trash";
 import { toAdapterPath } from "./sync/adapterPath";
 import { createConflictResolver } from "./runtime/conflictResolver";
+import { acquireCloneLock } from "./runtime/cloneLock";
+import { assertSafeAdapterPath, isMissingFile } from "./runtime/pathSafety";
 import { buildStatusReport } from "./runtime/statusReport";
+import { automaticMappings, recordCanary, recordRollout, rolloutFailure } from "./runtime/rollout";
+import { mappingPreflight, type MappingPreflight } from "./runtime/preflight";
 import type { PendingOperation, FileConflict } from "./types";
 import type { ConflictDataSource, ConflictQuery, ConflictResolutionQuery, ConflictResolutionResult } from "./ui/dataSources";
 import { MCP_SERVER_NAME } from "./mcp/server";
@@ -77,7 +82,7 @@ const EVENT_COALESCE_MS = 1500;
 const BINARY_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
   "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
-  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "Drawing",
+  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "apk", "Drawing",
 ]);
 
 /** Status-bar states the plugin cycles through. */
@@ -96,8 +101,9 @@ export default class MugsPlugin extends Plugin {
   private pollTimer?: number;
   /** Pending debounced-sync timer handle. */
   private eventDebounceTimer?: number;
-  /** Timestamps of pending file-change events, coalesced via debounceFireTimes before a sync. */
-  private eventTimestamps: number[] = [];
+  /** Constant-space dirty state, bounded by the maximum event wait. */
+  private dirtySince?: number;
+  private queuedSync = false;
   /** Tracks vault paths currently open with unsaved changes so sync writes never clobber an edit (Area 5). */
   private editorOpen = new EditorOpenGuard();
   /** True while a sync pass is running — the guard that keeps scheduler ticks, file
@@ -105,6 +111,7 @@ export default class MugsPlugin extends Plugin {
    *  clones) on top of each other. */
   private syncInFlight = false;
   private reviewInFlight = false;
+  private resolutionInFlight = false;
   private unloaded = false;
   private readonly uiListeners = new Set<() => void>();
   /** Paths we (the plugin) just wrote via adapters. Used to suppress the resulting
@@ -117,6 +124,9 @@ export default class MugsPlugin extends Plugin {
   private currentRunController?: AbortController;
   /** Epoch ms of the newest successful sync — renders the "✓ synced HH:MM" state. */
   private lastSyncedAt?: number;
+  /** Outcomes of the most recent completed pass, read by the one-shot canary.
+  *  Written only under syncInFlight; cleared when a new pass starts. */
+  private lastOutcomes: SyncOutcome[] = [];
   /** Last terminal status-bar state (synced/conflict/skipped/error/paused/idle) —
    *  what the bar restores to when the window becomes visible again. */
   private lastTerminalBarState?: BarState;
@@ -242,6 +252,7 @@ export default class MugsPlugin extends Plugin {
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
     this.registerView(MUGS_CONFLICTS_VIEW_TYPE, (leaf) => new MugsConflictsPanel(leaf));
     this.registerView("mugs-reconciliation", (leaf) => new ReconciliationView(this, leaf));
+    this.registerView(MUGS_PREFLIGHT_VIEW_TYPE, (leaf) => new PreflightView(this, leaf));
     this.registerView("mugs-review", (leaf) => new ReviewQueueView(this, leaf));
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
@@ -254,6 +265,7 @@ export default class MugsPlugin extends Plugin {
     this.updateStatusBar(this.lastSyncedAt ? "synced" : "idle");
     this.startScheduler();
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibilityChange());
+    this.registerDomEvent(window, "online", () => { this.startupUncertain = true; void this.tickSync(true); });
     // Vault file events live on the VAULT (registering "modify"/"create"/"delete" on
     // workspace — the old wiring — was silently dead, so the 20s debounced
     // event-driven sync never fired and passes ran poll-only).
@@ -320,6 +332,12 @@ export default class MugsPlugin extends Plugin {
       callback: () => void this.openView("mugs-reconciliation"),
     });
 
+    this.addCommand({
+      id: "show-preflight",
+      name: "Open preflight and rollout",
+      callback: () => void this.openView(MUGS_PREFLIGHT_VIEW_TYPE),
+    });
+
   }
 
   private openSettings(): void {
@@ -353,6 +371,139 @@ export default class MugsPlugin extends Plugin {
     await this.executeSync(quiet);
   }
 
+  /** Local saved evidence only; no remote access and no clone mutation. */
+  preflightMappings(): MappingPreflight[] {
+    const settings = this.store.getSettings();
+    return settings.mappings.map(mapping => {
+      const dir = settings.lastSync[mapping.id]?.cloneDir;
+      let clonePresent = false;
+      try {
+        clonePresent = !!dir && statSync(dir).isDirectory() && existsSync(`${dir}/.git`);
+      } catch { /* Missing/unreadable clone is never proof of readiness. */ }
+      return mappingPreflight(settings, mapping.id, clonePresent);
+    });
+  }
+
+  /** Staging starts disabled. Never implicitly unpause a vault. */
+  async startStagedRollout(): Promise<void> {
+    if (this.unloaded || this.store.loadError || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+      throw new Error("another operation is running or settings are unavailable");
+    }
+    const previous = this.store.getSettings().sync;
+    if (previous.rollout?.mode === "staged") return;
+    this.store.setSync({ rollout: { mode: "staged", enabledMappingIds: [], blocked: {}, lastResult: {} } });
+    try {
+      const saved = await this.store.save();
+      if (!saved.ok) throw new Error("could not save staged rollout");
+    } catch (error) {
+      this.store.setSync({ rollout: previous.rollout });
+      throw error;
+    }
+    this.notifyUi();
+  }
+
+  /** Disabling is allowed without a canary and never resumes another mapping.
+   *  A user disable is an intent, not a fault: it removes the mapping from the
+   *  automatic set and is recorded in lastResult — it must NOT poison the
+   *  `blocked` map, or a later canary could never re-enable the mapping. */
+  async disableStagedMapping(id: string): Promise<void> {
+    if (this.unloaded || this.store.loadError || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+      throw new Error("another operation is running or settings are unavailable");
+    }
+    const current = this.store.getSettings().sync.rollout;
+    if (current?.mode !== "staged") throw new Error("staged rollout is not active");
+    const next = structuredClone(current);
+    next.enabledMappingIds = next.enabledMappingIds.filter(candidate => candidate !== id);
+    next.lastResult[id] = { status: "blocked", at: Date.now(), reason: "disabled by user" };
+    this.store.setSync({ rollout: next });
+    const saved = await this.store.save();
+    if (!saved.ok) {
+      // Keep the DISABLED rollout in memory (the user said off) and pause the
+      // session, then try to persist pause+disable so a restart cannot resume a
+      // mapping the user turned off. If this save fails too, the Notice is the
+      // only remaining channel — persistence itself is broken.
+      this.store.setSync({ paused: true });
+      await this.store.save().catch(() => undefined);
+      new Notice("MUGS: could not save the disabled mapping — automatic sync is paused. Keep it paused until settings can be saved.", 0);
+      throw new Error("could not save disabled mapping; automatic sync paused");
+    }
+    this.notifyUi();
+  }
+
+  /** One-shot canary for a single mapping: saved-state preflight, one targeted
+   *  sync pass, and automatic enablement ONLY when the pass is verifiably clean
+   *  and the result persisted. The pass itself is the live evidence — it reaches
+   *  the remote, revalidates the clone, merges and pushes. Its save-success
+   *  boolean alone is NEVER treated as a clean outcome: the outcome AND the
+   *  durable state (review entries, conflicts, pending ops, deferred changes)
+   *  decide. Fail closed on every failure path; enable nothing implicitly. */
+  async runMappingCanary(id: string): Promise<{ enabled: boolean; reason?: string }> {
+    if (this.unloaded || this.store.loadError || this.store.isLocked() ||
+      this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+      throw new Error("another operation is running, credentials are locked, or settings are unavailable");
+    }
+    const settings = this.store.getSettings();
+    const rollout = settings.sync.rollout;
+    if (rollout?.mode !== "staged") throw new Error("staged rollout is not active");
+    if (!settings.mappings.some(m => m.id === id)) throw new Error("mapping no longer exists");
+
+    // Preflight on saved local evidence: an unproven clone, missing baseline,
+    // review backlog, unresolved conflicts, pending work or held changes must be
+    // resolved by the user first — never by a pass.
+    const dir = settings.lastSync[id]?.cloneDir;
+    let clonePresent = false;
+    try {
+      clonePresent = !!dir && statSync(dir).isDirectory() && existsSync(`${dir}/.git`);
+    } catch { /* an unreadable clone is a blocker, not an error */ }
+    const evidence = mappingPreflight(settings, id, clonePresent);
+    if (evidence.blockers.length) {
+      const reason = `canary not run — ${evidence.blockers.join("; ")}`;
+      this.store.setSync({ rollout: recordCanary(rollout, id, reason) });
+      const saved = await this.store.save();
+      if (!saved.ok) new Notice(`MUGS: could not record the canary result — ${saved.reason}`, 8000);
+      this.notifyUi();
+      return { enabled: false, reason };
+    }
+
+    // The targeted pass (quiet=false so the user sees per-mapping detail). A
+    // concurrent automatic pass for OTHER mappings cannot corrupt this: the
+    // outcome is matched by mapping id, and a missing outcome fails closed.
+    this.lastOutcomes = [];
+    const saveOk = await this.executeSync(false, id);
+    const after = this.store.getSettings();
+    const current = after.sync.rollout;
+    if (current?.mode !== "staged") {
+      return { enabled: false, reason: "staged rollout was interrupted" };
+    }
+    const outcome = this.lastOutcomes.find(o => o.mappingId === id);
+    // A thrown pass yields no outcome (fail closed first); a completed pass whose
+    // state could not be persisted is next-worst; otherwise the durable outcome
+    // itself decides (deferred/blocked/pending/review/conflict checks).
+    const reason = !outcome ? "canary pass returned no outcome"
+      : !saveOk ? "canary pass state could not be saved"
+        : rolloutFailure(outcome, after);
+    this.store.setSync({ rollout: recordCanary(current, id, reason) });
+    const saved = await this.store.save();
+    if (!saved.ok) {
+      // Enablement must be durable before any automatic pass can run. Keep the
+      // PRE-canary rollout (mapping still disabled), pause, and try to persist
+      // the pause so a restart cannot act on the unsaved result.
+      this.store.setSync({ rollout: current, paused: true });
+      await this.store.save().catch(() => undefined);
+      new Notice("MUGS: could not save the canary result — automatic sync paused. Resolve persistence before enabling.", 0);
+      this.notifyUi();
+      return { enabled: false, reason: "could not save the canary result" };
+    }
+    this.notifyUi();
+    return reason ? { enabled: false, reason } : { enabled: true };
+  }
+
+  /** Subscribe to UI refresh notifications; returns an unsubscribe function. */
+  onUiUpdate(listener: () => void): () => void {
+    this.uiListeners.add(listener);
+    return () => { this.uiListeners.delete(listener); };
+  }
+
   private async executeSync(quiet = false, mappingId?: string, reviewOwned = false): Promise<boolean> {
     if (this.unloaded) return false;
     if (this.store.loadError) {
@@ -361,14 +512,17 @@ export default class MugsPlugin extends Plugin {
       this.updateStatusBar("error");
       return false;
     }
-    if (this.syncInFlight || (this.reviewInFlight && !reviewOwned)) return false;
+    if (this.syncInFlight || this.resolutionInFlight || (this.reviewInFlight && !reviewOwned)) return false;
     this.syncInFlight = true;
+    this.lastRunAt = Date.now();
+    this.dirtySince = undefined;
     try {
       return await this.performSync(quiet, mappingId);
     } finally {
       this.syncInFlight = false;
       this.currentRunController = undefined;
       this.notifyUi();
+      this.flushQueuedSync();
     }
   }
 
@@ -381,6 +535,10 @@ export default class MugsPlugin extends Plugin {
 
     const cloneRoot = this.cloneRoot();
     const settings = this.store.getSettings();
+    const automatic = quiet && !mappingId;
+    const selected = mappingId ? settings.mappings.filter(m => m.id === mappingId)
+      : automatic ? automaticMappings(settings) : settings.mappings;
+    if (selected.length === 0) return false;
     // Mappings with no baseline yet — used to report first-sync completion.
     const firstTimers = new Set(settings.mappings.filter((m) => !settings.lastSync[m.id]).map((m) => m.id));
 
@@ -389,7 +547,7 @@ export default class MugsPlugin extends Plugin {
 
     try {
       outcomes = await syncAllMappings({
-        mappings: mappingId ? settings.mappings.filter(m => m.id === mappingId) : settings.mappings,
+        mappings: selected,
         credentials: settings.credentials,
         getToken: (id) => this.store.getToken(id),
         buildProvider,
@@ -432,6 +590,18 @@ export default class MugsPlugin extends Plugin {
     // A completed (non-thrown) pass has re-verified content: the startup
     // uncertainty window is over for subsequent passes.
     if (!syncThrown && !mappingId) this.startupUncertain = false;
+    // Publish the pass outcomes for the one-shot canary (which matches by
+    // mapping id and fails closed when its mapping has no outcome here).
+    this.lastOutcomes = outcomes;
+    if (automatic && settings.sync.rollout?.mode === "staged") {
+      const current = this.store.getSettings();
+      const seen = new Set(outcomes.map(o => o.mappingId));
+      const missing: SyncOutcome[] = selected.filter(m => !seen.has(m.id)).map(m => ({
+        mappingId: m.id, label: m.label, status: "blocked", reason: "automatic pass did not return an outcome",
+      }));
+      const updated = recordRollout(current.sync, [...outcomes, ...missing], current, syncThrown ? "automatic pass failed" : undefined);
+      if (updated) this.store.setSync({ rollout: updated });
+    }
 
     // Persist under ownership. Contract: syncInFlight releases only after save resolves.
     // Consume SaveResult: {ok:false} is failure — do not let status become "synced".
@@ -445,6 +615,14 @@ export default class MugsPlugin extends Plugin {
     } catch (err) {
       saveResult = { ok: false, reason: "load-error" };
       new Notice(`MUGS: could not persist sync state — ${err instanceof Error ? err.message : String(err)}`, 8000);
+    }
+    if (automatic && !saveResult.ok && settings.sync.rollout?.mode === "staged") {
+      this.store.setSync({ paused: true, rollout: {
+        ...this.store.getSettings().sync.rollout!,
+        enabledMappingIds: [],
+      } });
+      new Notice("MUGS: staged rollout stopped — sync state could not be saved. Keep this vault paused until persistence is repaired.", 0);
+      await this.store.save().catch(() => undefined);
     }
 
     // Reporting + terminal state. All under the in-flight guard.
@@ -483,7 +661,11 @@ export default class MugsPlugin extends Plugin {
           new Notice(`MUGS: ${skipped.length} folder${skipped.length === 1 ? "" : "s"} skipped${reason}. Run Sync now for details.`, 10_000);
         }
       }
-      for (const o of outcomes.filter((o) => o.status === "ok")) {
+      const durable = this.store.getSettings();
+      for (const o of outcomes.filter((o) => o.status === "ok" &&
+        !(o.blocked?.length || o.counts?.deferred || o.pendingFailures ||
+          durable.lastSync[o.mappingId]?.pendingOps?.length || o.kind === "retry-pending"))) {
+        if (!saveResult.ok) continue;
         if (!quiet) new Notice(`MUGS — ${o.label}: synced`, 3000);
         if (firstTimers.has(o.mappingId)) {
           const direction = settings.sync.firstSyncDirection === "push" ? "files uploaded" : "files downloaded";
@@ -496,6 +678,7 @@ export default class MugsPlugin extends Plugin {
       // IMPORTANT (E04): never claim "synced" if the save refused or failed.
       const report = buildStatusReport({
         outcomes,
+        pendingOps: Object.values(durable.lastSync).flatMap(s => s.pendingOps ?? []),
         saveResult,
         thrown: syncThrown,
       });
@@ -506,7 +689,9 @@ export default class MugsPlugin extends Plugin {
         case "auth":
         case "offline":
         case "skipped":
-          this.updateStatusBar("skipped");
+        case "pending":
+        case "blocked":
+          this.updateStatusBar("skipped", report.message);
           break;
         case "error":
           this.updateStatusBar("error");
@@ -568,8 +753,10 @@ export default class MugsPlugin extends Plugin {
       if (rel) this.internalWritePaths.add(rel);
     };
     return {
+      acquireLock: acquireCloneLock,
       writeFile: async (absPath, content) => {
         const rel = toAdapterPath(basePath, absPath);
+        await assertSafeAdapterPath(basePath, rel);
         const parent = rel.slice(0, rel.lastIndexOf("/"));
         if (parent) {
           try {
@@ -579,22 +766,26 @@ export default class MugsPlugin extends Plugin {
           }
         }
         markInternal(rel);
+        await assertSafeAdapterPath(basePath, rel);
         await adapter.write(rel, content);
       },
       readFile: async (absPath) => {
+        const rel = toAdapterPath(basePath, absPath);
+        await assertSafeAdapterPath(basePath, rel);
         try {
-          return await adapter.read(toAdapterPath(basePath, absPath));
-        } catch {
-          return undefined;
+          return await adapter.read(rel);
+        } catch (error) {
+          if (isMissingFile(error)) return undefined;
+          throw error;
         }
       },
       deleteFile: async (absPath) => {
         const rel = toAdapterPath(basePath, absPath);
+        await assertSafeAdapterPath(basePath, rel);
         try {
           await adapter.remove(rel);
         } catch (e) {
-          const s = String(e).toLowerCase();
-          if (s.includes("enoent") || s.includes("not found") || s.includes("missing")) {
+          if (isMissingFile(e)) {
             // legitimately absent — delete is a no-op
             return;
           }
@@ -621,6 +812,7 @@ export default class MugsPlugin extends Plugin {
       mkdir(p: string): Promise<void>;
       stat(p: string): Promise<{ mtime: number; size: number } | null>;
       exists(p: string): Promise<boolean>;
+      getBasePath?(): string;
     };
     const rootOf = (folder: string): string => (folder === "." ? "" : normalizeVaultPath(folder));
     const vaultPath = (folder: string, rel: string): string => {
@@ -634,7 +826,7 @@ export default class MugsPlugin extends Plugin {
       try {
         return this.editorOpen ? this.editorOpen.isWriteSafe(p) : true;
       } catch {
-        return true; // defensive: missing guard method must not block deletes
+        return false;
       }
     };
     return {
@@ -646,10 +838,15 @@ export default class MugsPlugin extends Plugin {
           .filter((f) => (root === "" ? true : f.path.startsWith(`${root}/`)))
           .map((f) => (root === "" ? f.path : f.path.slice(root.length + 1)));
       },
-      read: async (folder, rel) => adapter.read(vaultPath(folder, rel)),
+      read: async (folder, rel) => {
+        const p = vaultPath(folder, rel);
+        await assertSafeAdapterPath(adapter.getBasePath?.() ?? "", p);
+        return adapter.read(p);
+      },
       exists: async (folder, rel) => adapter.exists(vaultPath(folder, rel)),
       write: async (folder, rel, content) => {
         const p = vaultPath(folder, rel);
+        await assertSafeAdapterPath(adapter.getBasePath?.() ?? "", p);
         const parent = p.slice(0, p.lastIndexOf("/"));
         if (parent) {
           try {
@@ -659,10 +856,13 @@ export default class MugsPlugin extends Plugin {
           }
         }
         markInternal(p);
+        await assertSafeAdapterPath(adapter.getBasePath?.() ?? "", p);
+        if (!this.editorOpen.isWriteSafe(p)) throw new Error("file opened during sync; write deferred");
         await adapter.write(p, content);
       },
       remove: async (folder, rel) => {
         const p = vaultPath(folder, rel);
+        await assertSafeAdapterPath(adapter.getBasePath?.() ?? "", p);
         if (!isDeleteSafe(p)) {
           // Defer: do not delete an open editor's file. The sync layer will
           // observe the file still present and record as deferred/pendingOp.
@@ -674,8 +874,7 @@ export default class MugsPlugin extends Plugin {
         try {
           await adapter.remove(p);
         } catch (e) {
-          const s = String(e).toLowerCase();
-          if (s.includes("enoent") || s.includes("not found") || s.includes("missing")) {
+          if (isMissingFile(e)) {
             return; // absent is fine for delete
           }
           // Propagate real errors (S01)
@@ -779,9 +978,9 @@ export default class MugsPlugin extends Plugin {
         save: () => this.store.save(),
         acquire: () => {
           if (this.unloaded || this.store.loadError) throw new Error("plugin is unloaded or settings could not be loaded");
-          if (this.syncInFlight || this.reviewInFlight) throw new Error("another sync or review is running — wait and retry");
+          if (this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) throw new Error("another sync, review or resolution is running — wait and retry");
           this.reviewInFlight = true;
-          return () => { this.reviewInFlight = false; this.notifyUi(); };
+          return () => { this.reviewInFlight = false; this.notifyUi(); this.flushQueuedSync(); };
         },
         sync: id => this.executeSync(true, id, true),
         verify: async (rows, action) => {
@@ -874,16 +1073,22 @@ export default class MugsPlugin extends Plugin {
     return {
       writeFile: async (absPath, content) => {
         const p = rel(absPath);
+        await assertSafeAdapterPath(basePath, p);
         const parent = p.slice(0, p.lastIndexOf("/"));
         if (parent) { try { await adapter.mkdir(parent); } catch { /* exists */ } }
         this.internalWritePaths.add(p);
+        await assertSafeAdapterPath(basePath, p);
+        if (!this.editorOpen.isWriteSafe(p)) throw new Error("file is open — close it and resolve again");
         await adapter.write(p, content);
       },
       readFile: async (absPath) => {
-        try { return await adapter.read(rel(absPath)); } catch { return undefined; }
+        const p = rel(absPath);
+        await assertSafeAdapterPath(basePath, p);
+        try { return await adapter.read(p); } catch (error) { if (isMissingFile(error)) return undefined; throw error; }
       },
       deleteFile: async (absPath) => {
         const p = rel(absPath);
+        await assertSafeAdapterPath(basePath, p);
         if (!this.editorOpen.isWriteSafe(p)) {
           throw new Error(`${p} is open with unsaved changes — close it and resolve again`);
         }
@@ -891,8 +1096,7 @@ export default class MugsPlugin extends Plugin {
           this.internalWritePaths.add(p);
           await adapter.remove(p);
         } catch (e) {
-          const s = String(e).toLowerCase();
-          if (s.includes("enoent") || s.includes("not found") || s.includes("missing")) return;
+          if (isMissingFile(e)) return;
           throw e;
         }
       },
@@ -919,6 +1123,13 @@ export default class MugsPlugin extends Plugin {
    *  Single-flight and ordering live inside runtime/conflictResolver.ts. */
   private conflictResolverFactory() {
     return createConflictResolver({
+      acquire: () => {
+        if (this.unloaded || this.store.loadError || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+          throw new Error("another operation is running or the plugin is unavailable — wait and retry");
+        }
+        this.resolutionInFlight = true;
+        return () => { this.resolutionInFlight = false; this.notifyUi(); this.flushQueuedSync(); };
+      },
       getConflicts: (id) => this.store.getConflicts(id),
       getMapping: (id) => this.store.getSettings().mappings.find((m) => m.id === id),
       cloneDirFor: (id) => {
@@ -974,7 +1185,7 @@ export default class MugsPlugin extends Plugin {
 
   /** Mark that a manual sync occurred (updates scheduling timestamp coherently). */
   private markManualSyncRun(): void {
-    this.lastRunAt = Date.now();
+    if (!this.syncInFlight && !this.reviewInFlight && !this.resolutionInFlight) this.lastRunAt = Date.now();
   }
 
   /** One gated poll tick: run only when the pause gate allows it.
@@ -982,11 +1193,13 @@ export default class MugsPlugin extends Plugin {
    *  timestamps are coherent (no double-interval waits after a manual click).
    */
   private async tickSync(eventTriggered = false): Promise<void> {
-    const settings = this.store.getSettings();
+    if (this.unloaded) return;
+    const settings = this.automaticSettings();
+    if (automaticMappings(settings).length === 0) return;
     const decision = decideRun({
       now: Date.now(),
       intervalMs: Math.max(1_000, settings.sync.intervalSeconds * 1000),
-      lastRunAt: eventTriggered ? undefined : this.lastRunAt,
+      lastRunAt: eventTriggered || this.dirtySince !== undefined ? undefined : this.lastRunAt,
       pausedByUser: settings.sync.paused,
       hidden: this.hidden,
     });
@@ -998,8 +1211,28 @@ export default class MugsPlugin extends Plugin {
       else if (decision.reason === "hidden") this.updateStatusBar("hidden");
       return;
     }
-    await this.runSync(true); // quiet: automatic runs don't spam Notices
-    this.lastRunAt = Date.now();
+    if (this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+      if (eventTriggered || this.dirtySince !== undefined) this.queuedSync = true;
+      return;
+    }
+    this.queuedSync = false;
+    await this.runSync(true); // executeSync stamps only a real run
+  }
+
+  private flushQueuedSync(): void {
+    if (!this.queuedSync || this.unloaded || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) return;
+    if (this.store.getSettings().sync.paused || this.hidden) return;
+    this.queuedSync = false;
+    if (this.eventDebounceTimer !== undefined) clearTimeout(this.eventDebounceTimer);
+    this.eventDebounceTimer = window.setTimeout(() => {
+      this.eventDebounceTimer = undefined;
+      void this.tickSync(true);
+    }, 0);
+  }
+
+  /** Call after applying runtime settings; resume catches up without waiting for the poll. */
+  automaticSyncSettingsChanged(): void {
+    void this.tickSync(true);
   }
 
   /** A vault file changed under a mapped path — debounce it into one sync.
@@ -1009,9 +1242,9 @@ export default class MugsPlugin extends Plugin {
    *  Plugin-caused writes (internalWritePaths) are suppressed (feedback guard).
    */
   private onVaultChange(path: string, kind: "modify" | "create" | "delete" | "rename" = "modify"): void {
-    const settings = this.store.getSettings();
-    if (settings.sync.paused || this.hidden) return; // pause gate
-    if (!this.relevantMapping(path)) return;          // only files that belong to a mapping
+    const settings = this.automaticSettings();
+    const enabled = automaticMappings(settings);
+    if (!enabled.length || !this.relevantMapping(path, enabled)) return;
 
     // Feedback guard: suppress our own adapter writes.
     if ((kind === "modify" || kind === "create") && this.internalWritePaths.has(path)) {
@@ -1019,15 +1252,18 @@ export default class MugsPlugin extends Plugin {
       return;
     }
 
-    // Buffer the event timestamp and coalesce a burst into one sync within a short window.
-    this.eventTimestamps.push(Date.now());
-    if (this.eventDebounceTimer) clearTimeout(this.eventDebounceTimer);
+    const now = Date.now();
+    this.dirtySince ??= now;
+    if (settings.sync.paused || this.hidden) return;
+    if (this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
+      this.queuedSync = true;
+      return;
+    }
+    if (this.eventDebounceTimer !== undefined) clearTimeout(this.eventDebounceTimer);
     this.eventDebounceTimer = window.setTimeout(() => {
-      const fires = debounceFireTimes(this.eventTimestamps, Math.max(1, EVENT_COALESCE_MS));
-      this.eventTimestamps = [];
       this.eventDebounceTimer = undefined;
-      if (fires.length > 0) void this.tickSync(true);
-    }, EVENT_COALESCE_MS);
+      void this.tickSync(true);
+    }, Math.max(0, Math.min(EVENT_COALESCE_MS, EVENT_DEBOUNCE_MS - (now - this.dirtySince))));
   }
 
   /** Rebuild the editor-open set from every file currently open in a view.
@@ -1044,7 +1280,7 @@ export default class MugsPlugin extends Plugin {
     } catch {
       // Defensive: a missing workspace method must not abort event handling.
     }
-    this.editorOpen = new EditorOpenGuard(open);
+    this.editorOpen.replace(open);
   }
 
   /** Register the MUGS agents MCP server when this Obsidian build hosts MCP (Area 10). */
@@ -1062,12 +1298,15 @@ export default class MugsPlugin extends Plugin {
   }
 
   /** The mapping a changed path belongs to — by remote scope or local folder. */
-  private relevantMapping(path: string): FolderMapping | undefined {
-    const settings = this.store.getSettings();
-    const byRemote = resolveMappingForPath(settings.mappings, path);
+  private automaticSettings(): Pick<MugsSettings, "sync" | "mappings"> {
+    return this.store.getAutomaticSettings?.() ?? this.store.getSettings();
+  }
+
+  private relevantMapping(path: string, mappings = this.automaticSettings().mappings): FolderMapping | undefined {
+    const byRemote = resolveMappingForPath(mappings, path);
     if (byRemote) return byRemote;
     const norm = normalizePath(path);
-    return settings.mappings.find((m) => {
+    return mappings.find((m) => {
       const lf = normalizePath(m.localFolder);
       if (lf === ".") return true; // whole-vault mapping — every path is relevant
       return norm === lf || norm.startsWith(`${lf}/`);
@@ -1088,6 +1327,8 @@ export default class MugsPlugin extends Plugin {
     } else {
       // Re-render the persistent state (a pass in flight keeps its phase text).
       this.updateStatusBar(this.syncInFlight ? "syncing" : this.lastTerminalBarState ?? (this.lastSyncedAt ? "synced" : "idle"));
+      this.startupUncertain = true;
+      void this.tickSync(true);
     }
   }
 
@@ -1157,7 +1398,8 @@ export default class MugsPlugin extends Plugin {
       }
     // Tooltip mirrors the click target so hover explains what clicking does.
     const tooltip =
-      state === "conflict" ? "MUGS — conflicts need your review. Click to open Conflicts."
+      detail && state !== "syncing" ? detail
+      : state === "conflict" ? "MUGS — conflicts need your review. Click to open Conflicts."
       : state === "skipped" ? "MUGS — some folders were skipped. Run Sync now for details."
       : state === "error" ? "MUGS — last sync failed. Click for details."
       : state === "syncing" ? `MUGS — syncing now: ${detail ?? "working…"}`

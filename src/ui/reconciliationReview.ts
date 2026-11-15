@@ -39,6 +39,7 @@ export class ReconciliationReview {
   private query = "";
   private fileButtons: HTMLButtonElement[] = [];
   private bulk?: BulkReview;
+  private bulkSection?: HTMLDetailsElement;
 
   constructor(private readonly deps: ReconciliationReviewDeps) {
     // Keep exactly the reviewed identity even if the caller refreshes its rows.
@@ -50,11 +51,17 @@ export class ReconciliationReview {
     return this.deciding || (this.bulk?.isBusy() ?? false);
   }
 
+  /** Background refreshes must not detach an open batch pane or its previews. */
+  preserveOnNotification(): boolean {
+    return this.isBusy() || !!this.bulkSection?.open;
+  }
+
   /** Stop accepting async results; the host is closing or replacing us. */
   detach(): void {
     this.closed = true;
     this.generation++;
     this.bulk?.detach();
+    this.bulkSection = undefined;
   }
 
   render(root: HTMLElement): void {
@@ -68,7 +75,7 @@ export class ReconciliationReview {
     root.addClass("mugs-reconciliation");
     root.createEl("h2", { text: "Review repository files", cls: "mugs-page-title" });
     root.createEl("p", {
-      text: "These files were kept in the repository because MUGS couldn't confirm they were safe to delete. Preview a file, then choose what to keep.",
+      text: "MUGS kept these files in the shared repository because it could not safely delete them automatically. Select a file below to preview it, then copy it into your vault or explicitly delete it from the repository. Nothing changes until you choose an action.",
       cls: "mugs-page-description",
     });
     if (!this.rows.length) {
@@ -77,13 +84,20 @@ export class ReconciliationReview {
     }
     this.selected = Math.min(this.selected, Math.max(0, this.rows.length - 1));
     if (this.deps.analyze && this.deps.decideBatch) {
+      const bulkSection = root.createEl("details", { cls: "mugs-bulk-review" });
+      this.bulkSection = bulkSection;
+      bulkSection.createEl("summary", { text: "Review multiple files (optional)" });
+      bulkSection.createEl("p", {
+        text: "Prefer the file list below if you are unsure. Bulk review groups files to help you inspect them; it never chooses an action for you.",
+        cls: "mugs-muted",
+      });
       this.bulk = new BulkReview({
         analyze: this.deps.analyze,
         compare: this.deps.compare,
         decide: this.deps.decideBatch,
         blocked: () => this.deciding,
       });
-      this.bulk.render(root.createDiv({ cls: "mugs-bulk-review" }));
+      this.bulk.render(bulkSection.createDiv());
     }
 
     const layout = root.createDiv({ cls: "mugs-recon-layout" });
@@ -173,6 +187,12 @@ export class ReconciliationReview {
     });
     const actions = detail.createDiv({ cls: "mugs-recon-primary" });
     const recover = actions.createEl("button", { text: "Add to vault", type: "button", cls: "mod-cta" });
+    const retain = actions.createEl("button", { text: "Keep for later", type: "button" });
+    retain.addEventListener("click", () => {
+      if (!current() || this.isBusy()) return;
+      status.textContent = "Kept for later. This review entry is already saved; no sync or repository change was made.";
+      error.textContent = "";
+    });
     actions.createEl("p", {
       text: row.direction === "push-only"
         ? "Add to vault copies this file to your device, even with Upload only."

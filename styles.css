@@ -769,9 +769,11 @@
 .mugs-recon-deletion { border-top: 1px solid var(--background-modifier-border); padding-top: 12px; }
 .mugs-recon-deletion summary { color: var(--text-muted); }
 .mugs-bulk-review { margin-bottom: 20px; padding: 14px 16px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); min-width: 0; }
-.mugs-bulk-review > h3 { margin: 0 0 6px; font-size: var(--font-ui-medium); }
+.mugs-bulk-review > summary { font-size: var(--font-ui-medium); font-weight: 600; }
+.mugs-bulk-review:not([open]) { padding: 10px 16px; }
 .mugs-bulk-review button { margin: 4px 8px 4px 0; white-space: normal; height: auto; }
 .mugs-bulk-categories { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; margin: 12px 0; }
+.mugs-bulk-scope { grid-column: 1 / -1; }
 .mugs-bulk-category { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-primary); }
 .mugs-bulk-count { font-size: var(--font-ui-large); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
 .mugs-bulk-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; margin: 14px 0; }

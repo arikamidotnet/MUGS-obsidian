@@ -6,6 +6,7 @@
  * args and canned output without touching a repository or the filesystem.
  */
 import type { GitResult, GitRunner, GitRunOpts, ReadResult, ReadError } from "./types";
+import { createHash } from "node:crypto";
 
 export type PullMode = "ff" | "rebase" | "merge";
 
@@ -50,6 +51,21 @@ export interface Author {
  *  via the environment and never consults global git config. */
 export const FALLBACK_IDENTITY: Author = { name: "MUGS Sync", email: "mugs@local" };
 
+/** Generous per-invocation deadlines; withRunOptions/run can override or disable them. */
+export const DEFAULT_GIT_TIMEOUT_MS = {
+  local: 120_000,
+  network: 600_000,
+} as const;
+
+/** Content commands can lazily download missing objects in a partial clone. */
+function defaultTimeoutMs(args: string[]): number {
+  let i = 0;
+  while (args[i] === "-c" || args[i] === "-C") i += 2;
+  return /^(clone|fetch|push|pull|show|diff|log|cat-file|checkout|reset|read-tree|merge|rebase)$/.test(args[i] ?? "")
+    ? DEFAULT_GIT_TIMEOUT_MS.network
+    : DEFAULT_GIT_TIMEOUT_MS.local;
+}
+
 /** An author aggregated over a log range: commit count + latest author timestamp. */
 export interface AuthorActivity {
   name: string;
@@ -62,16 +78,29 @@ export interface AuthorActivity {
 }
 
 export class GitClient {
-  constructor(private runner: GitRunner, private cwd?: string, private auth?: GitAuth) {}
+  constructor(private runner: GitRunner, private cwd?: string, private auth?: GitAuth, private defaults: GitRunOpts = {}) {}
 
   /** Return a client bound to a different working directory, reusing this runner + auth. */
   at(cwd: string): GitClient {
-    return new GitClient(this.runner, cwd, this.auth);
+    return new GitClient(this.runner, cwd, this.auth, this.defaults);
   }
 
   /** Return a client bound to an HTTP(S) credential, reusing this runner + cwd. */
   withAuth(auth: GitAuth | undefined): GitClient {
-    return new GitClient(this.runner, this.cwd, auth);
+    return new GitClient(this.runner, this.cwd, auth, this.defaults);
+  }
+
+  /** Bind cancellation/deadline defaults for ALL operations, including clone and
+   * lazy blob reads. Binding cwd/auth afterward preserves these options. Per-call
+   * options override defaults; timeoutMs: 0 explicitly disables the deadline. */
+  withRunOptions(defaults: GitRunOpts): GitClient {
+    return new GitClient(this.runner, this.cwd, this.auth, {
+      ...this.defaults,
+      ...defaults,
+      signal: defaults.signal ?? this.defaults.signal,
+      timeoutMs: defaults.timeoutMs ?? this.defaults.timeoutMs,
+      env: { ...this.defaults.env, ...defaults.env },
+    });
   }
 
   /**
@@ -109,19 +138,24 @@ export class GitClient {
   }
 
   /** Merge caller opts (including GitRunOpts for signal/timeout) with credential env and cwd. */
-  private execOpts(opts?: GitRunOpts): GitRunOpts | undefined {
+  private execOpts(args: string[], opts?: GitRunOpts): GitRunOpts {
     const authEnv = this.authEnv();
-    const merged: GitRunOpts = { ...(opts ?? {}) };
-    if (this.cwd && merged.cwd === undefined) merged.cwd = this.cwd;
-    if (authEnv) merged.env = { ...authEnv, ...(opts?.env ?? {}) };
-    return (merged.cwd || merged.env || merged.signal || merged.timeoutMs) ? merged : undefined;
+    const merged: GitRunOpts = {
+      ...this.defaults,
+      ...opts,
+      signal: opts?.signal ?? this.defaults.signal,
+      timeoutMs: opts?.timeoutMs ?? this.defaults.timeoutMs ?? (this.auth ? DEFAULT_GIT_TIMEOUT_MS.network : defaultTimeoutMs(args)),
+    };
+    if (this.cwd && opts?.cwd === undefined) merged.cwd = this.cwd;
+    if (this.defaults.env || authEnv || opts?.env) merged.env = { ...this.defaults.env, ...authEnv, ...opts?.env };
+    return merged;
   }
 
   /** Run a command that must succeed; throws with git's stderr otherwise. The
    *  thrown message quotes the command WITHOUT the credential-helper -c prefix
    *  so Notices stay readable and never contain the helper string. */
   private async must(args: string[], opts?: GitRunOpts): Promise<GitResult> {
-    const r = await this.runner.run(this.fullArgs(args), this.execOpts(opts));
+    const r = await this.runner.run(this.fullArgs(args), this.execOpts(args, opts));
     if (r.code !== 0) {
       throw new Error(`git ${args.join(" ")} failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
     }
@@ -130,7 +164,7 @@ export class GitClient {
 
   /** Run a command and return the raw result (for introspecting exit codes). */
   run(args: string[], opts?: GitRunOpts): Promise<GitResult> {
-    return this.runner.run(this.fullArgs(args), this.execOpts(opts));
+    return this.runner.run(this.fullArgs(args), this.execOpts(args, opts));
   }
 
   async init(): Promise<GitResult> {
@@ -342,6 +376,74 @@ export class GitClient {
     return { kind: "error", error: err };
   }
 
+  /** Bounded immutable blob queries. Metadata groups content by an 8MiB work
+   * budget; oversized blobs retain individual-read support and the existing cap.
+   * Unsupported batch runners and ambiguous responses fall back to typed show. */
+  async showManyTyped(requests: Array<{ ref: string; path: string }>): Promise<Map<string, ReadResult>> {
+    const key = (r: { ref: string; path: string }) => `${r.ref}:${r.path}`;
+    const unique = [...new Map(requests.map(r => [key(r), r])).values()];
+    if (unique.length > 128) {
+      const all = new Map<string, ReadResult>();
+      for (let i = 0; i < unique.length; i += 128) {
+        for (const [k, v] of await this.showManyTyped(unique.slice(i, i + 128))) all.set(k, v);
+      }
+      return all;
+    }
+    const results = new Map<string, ReadResult>();
+    const fallback = async (items: typeof unique) => {
+      for (const r of items) results.set(key(r), await this.showTyped(r.ref, r.path));
+    };
+    if (unique.length < 2 || unique.some(r => /[\r\n\0]/.test(key(r)))) {
+      await fallback(unique);
+      return results;
+    }
+    const info = await this.run(["cat-file", "--batch-check"], { input: unique.map(key).join("\n") + "\n" });
+    const lines = info.stdout.trimEnd().split("\n");
+    if (info.code !== 0 || lines.length !== unique.length) {
+      await fallback(unique);
+      return results;
+    }
+    const budget = 8 * 1024 * 1024;
+    let group: Array<{ request: typeof unique[number]; oid: string; size: number }> = [];
+    let bytes = 0;
+    const flush = async () => {
+      if (group.length === 0) return;
+      const content = await this.run(["cat-file", "--batch"], { input: group.map(g => g.oid).join("\n") + "\n" });
+      const raw = Buffer.from(content.stdout, "utf8");
+      let offset = 0;
+      const parsed = new Map<string, ReadResult>();
+      let valid = content.code === 0;
+      for (const item of group) {
+        const end = raw.indexOf(10, offset);
+        const header = end < 0 ? "" : raw.subarray(offset, end).toString("ascii");
+        const start = end + 1, stop = start + item.size;
+        if (header !== `${item.oid} blob ${item.size}` || raw[stop] !== 10 || stop >= raw.length) { valid = false; break; }
+        const payload = raw.subarray(start, stop);
+        const digest = createHash(item.oid.length === 64 ? "sha256" : "sha1")
+          .update(`blob ${payload.length}\0`).update(payload).digest("hex");
+        if (digest !== item.oid) { valid = false; break; }
+        parsed.set(key(item.request), { kind: "content", content: payload.toString("utf8") });
+        offset = stop + 1;
+      }
+      if (valid && offset === raw.length) for (const [k, v] of parsed) results.set(k, v);
+      else await fallback(group.map(g => g.request));
+      group = []; bytes = 0;
+    };
+    for (let i = 0; i < unique.length; i++) {
+      const match = /^([0-9a-f]{40}(?:[0-9a-f]{24})?) blob (\d+)$/.exec(lines[i]);
+      const size = match ? Number(match[2]) : NaN;
+      if (!match || !Number.isSafeInteger(size) || size > budget) {
+        await fallback([unique[i]]);
+        continue;
+      }
+      if (bytes + size > budget) await flush();
+      group.push({ request: unique[i], oid: match[1], size });
+      bytes += size;
+    }
+    await flush();
+    return results;
+  }
+
   /** Epoch seconds of the last commit that touched `path` at `ref`, or undefined
    *  when the path never existed there (git log prints nothing). Feeds the policy's
    *  recency-wins conflict resolution — commit metadata only, so a blobless
@@ -480,8 +582,16 @@ export function classifyShowError(text: string): ReadError {
   // Redact anything resembling credentials in the raw text for the message.
   const redacted = redactSensitive(text || "");
 
+  // These complete Git diagnostics identify an absent path. Quoted paths/ref
+  // names can themselves contain status numbers or even authentication wording.
+  if (/^fatal: path '.*' (?:does not exist in|exists on disk, but not in) '/m.test(t) ||
+      /^fatal: pathspec '.*' did not match any file/m.test(t)) {
+    return { kind: "missing-blob", message: redacted.trim() };
+  }
+
   // Auth / credential failures (exit 128 or 1 with credential wording).
-  if (/authentication failed|access denied|http basic|could not read .*password|bad credentials|401|403/.test(t)) {
+  // Status digits inside an object ID or filename are not an HTTP response.
+  if (/authentication failed|access denied|http basic|could not read .*password|bad credentials|(?:returned error:\s*|http(?:\/[\d.]+)?(?:\s+error|\s+status)?[: ]+|status(?:\s+code)?[: ]+)(?:401|403)\b/.test(t)) {
     return { kind: "auth", message: redacted.trim() || "authentication failed" };
   }
 

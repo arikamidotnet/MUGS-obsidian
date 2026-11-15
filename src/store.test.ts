@@ -29,11 +29,51 @@ const mapping = (over: Partial<FolderMapping> = {}): FolderMapping => ({
 });
 
 describe("MugsStore persistence + redaction", () => {
+  it("disables a staged canary when its mapping or credential changes, including after restart", async () => {
+    const io = new MemoryIO();
+    const store = new MugsStore(io);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "test-token" });
+    store.upsertMapping(mapping());
+    const staged = () => ({
+      mode: "staged" as const, enabledMappingIds: ["m1"], blocked: {}, lastResult: {},
+    });
+    store.setSync({ rollout: staged() });
+    store.upsertMapping(mapping());
+    expect(store.getSettings().sync.rollout?.enabledMappingIds).toEqual(["m1"]);
+    store.upsertMapping(mapping({ remotePath: "other" }));
+    expect(store.getSettings().sync.rollout?.enabledMappingIds).toEqual([]);
+    expect(store.getSettings().sync.rollout?.blocked.m1.reason).toContain("mapping changed");
+    store.setSync({ rollout: staged() });
+    store.upsertCredential({ id: "c1", label: "renamed", kind: "gitlab", token: store.getDisplaySettings().credentials[0].token });
+    expect(store.getSettings().sync.rollout?.blocked.m1.reason).toContain("account settings changed");
+    expect(store.getToken("c1")).toBe("test-token");
+    expect((await store.save()).ok).toBe(true);
+    const restarted = new MugsStore(io);
+    await restarted.load();
+    expect(restarted.getSettings().sync.rollout?.enabledMappingIds).toEqual([]);
+  });
+
   it("loads defaults from empty IO", async () => {
     const store = new MugsStore(new MemoryIO(null));
     const s = await store.load();
     expect(s.credentials).toEqual([]);
     expect(s.mappings).toEqual([]);
+  });
+
+  it("reloads a local mapping with no token instead of disabling the entire vault", async () => {
+    const io = new MemoryIO();
+    const first = new MugsStore(io);
+    await first.load();
+    first.upsertCredential({ id: "local", label: "Test local", kind: "local", token: "", baseUrl: "file:///tmp/test.git" });
+    first.upsertMapping(mapping({ providerId: "local" }));
+    expect((await first.save()).ok).toBe(true);
+
+    const reloaded = new MugsStore(io);
+    await reloaded.load();
+    expect(reloaded.loadError).toBeUndefined();
+    expect(reloaded.getSettings().mappings).toHaveLength(1);
+    expect(reloaded.getSettings().credentials[0].token).toBe("");
   });
 
   it("keeps the real token in memory but masks it for display", async () => {

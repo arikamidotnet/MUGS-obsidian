@@ -15,6 +15,23 @@ describe("classifyShowError (S02)", () => {
     expect(r.message).not.toMatch(/user@/);
   });
 
+  it.each(["401", "403"])("does not read %s inside a SHA or filename as HTTP auth", (digits) => {
+    const sha = `abc${digits}${"a".repeat(34)}`;
+    expect(classifyShowError(`fatal: path 'new-${digits}.md' does not exist in '${sha}'`).kind).toBe("missing-blob");
+    expect(classifyShowError(`fatal: invalid object name '${sha}'`).kind).toBe("missing-ref");
+    expect(classifyShowError(`fatal: corrupt loose object ${sha}`).kind).toBe("corrupt");
+  });
+
+  it.each([
+    "fatal: unable to access repository: The requested URL returned error: 401",
+    "fatal: unable to access repository: The requested URL returned error: 403",
+    "HTTP/2 403",
+    "HTTP status: 401",
+    "status code: 403",
+  ])("recognizes actual HTTP authentication status: %s", (message) => {
+    expect(classifyShowError(message).kind).toBe("auth");
+  });
+
   it("classifies missing-ref errors", () => {
     const r = classifyShowError("fatal: bad revision 'origin/nope'");
     expect(r.kind).toBe("missing-ref");

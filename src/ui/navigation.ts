@@ -1,6 +1,6 @@
 import { getMugsContext } from "./dataSources";
 
-export type MugsViewId = "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts";
+export type MugsViewId = "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts" | "mugs-preflight";
 
 /** A small, consistent way between the MUGS pages. */
 export function renderNavigation(host: HTMLElement, active: MugsViewId): void {
@@ -11,6 +11,7 @@ export function renderNavigation(host: HTMLElement, active: MugsViewId): void {
     ["mugs-map", "Overview"],
     ["mugs-diff", "Changes"],
     ["mugs-reconciliation", "Review"],
+    ["mugs-preflight", "Preflight"],
     ["mugs-conflicts", "Conflicts"],
   ] as const) {
     const button = nav.createEl("button", { type: "button", text: label });

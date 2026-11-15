@@ -28,16 +28,18 @@ function fail(msg) {
 
 const root = path.join(__dirname, "..");
 const pkgPath = path.join(root, "package.json");
+const lockPath = path.join(root, "package-lock.json");
 const manPath = path.join(root, "manifest.json");
 const verPath = path.join(root, "versions.json");
 
-let pkg, manifest, versions;
+let pkg, lock, manifest, versions;
 try {
   pkg = readJson(pkgPath);
+  lock = readJson(lockPath);
   manifest = readJson(manPath);
   versions = readJson(verPath);
 } catch (e) {
-  fail("Failed to read one of package.json / manifest.json / versions.json: " + e.message);
+  fail("Failed to read one of package.json / package-lock.json / manifest.json / versions.json: " + e.message);
 }
 
 const pkgVersion = pkg.version;
@@ -55,6 +57,9 @@ if (!manVersion || typeof manVersion !== "string") {
 }
 if (pkgVersion !== manVersion) {
   fail(`Version mismatch: package.json=${pkgVersion} manifest.json=${manVersion}`);
+}
+if (lock.version !== pkgVersion || lock.packages?.[""]?.version !== pkgVersion) {
+  fail(`Lockfile version mismatch: package.json=${pkgVersion} package-lock.json=${lock.version} root=${lock.packages?.[""]?.version}`);
 }
 
 if (!manMinApp || typeof manMinApp !== "string") {
@@ -103,7 +108,7 @@ for (const a of artifacts) {
 }
 
 console.log(
-  `check-release: OK — package.json=${pkgVersion} manifest.json=${manVersion} versions.json[${manVersion}]=${recordedMinApp} minAppVersion=${manMinApp}`
+  `check-release: OK — package.json=${pkgVersion} package-lock.json=${lock.version} manifest.json=${manVersion} versions.json[${manVersion}]=${recordedMinApp} minAppVersion=${manMinApp}`
 );
 if (target) {
   console.log(`check-release: target version ${target} matches declared version.`);

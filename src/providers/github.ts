@@ -25,12 +25,6 @@ const PERMISSION_ROLE: Record<string, MemberRole> = {
   read: "guest",
 };
 
-/** Roles that may push to a non-protected branch. */
-const WRITE_CAPABLE = new Set(["owner", "admin", "maintain", "write"]);
-
-/** A write-capable token has at least `write`; used as the default when unknown. */
-const DEFAULT_WRITE_CAPABLE = true;
-
 export interface GitHubOptions {
   /** API base URL, e.g. https://api.github.com or a GitHub Enterprise host. */
   baseUrl: string;
@@ -53,6 +47,8 @@ interface GitHubRepo {
   default_branch?: string;
   description?: string | null;
   private?: boolean;
+  /** Authenticated repository permission; absent must not be assumed writable. */
+  permissions?: { push?: boolean };
 }
 
 interface GitHubContributor {
@@ -70,9 +66,13 @@ interface GitHubBranch {
   protected: boolean;
 }
 
-/** URL-encode a namespaced repo id ("owner/repo") so it is safe in the path. */
+/** GitHub requires two path segments, unlike GitLab's encoded project ID. */
 function encodeRepoPath(repoId: string): string {
-  return encodeURIComponent(repoId);
+  const parts = repoId.split("/");
+  if (parts.length !== 2 || parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Choose a GitHub repository as owner/repo");
+  }
+  return parts.map(encodeURIComponent).join("/");
 }
 
 function mapProject(r: GitHubRepo): RepoSummary {
@@ -135,12 +135,7 @@ export class GitHubProvider implements Provider {
   /** Build a RepoSummary for an explicitly-allowed repo path. The default branch is
    *  resolved via the repo-specific branches endpoint (works with project-scoped tokens). */
   private async synthRepo(path: string): Promise<RepoSummary> {
-    let defaultBranch = "";
-    try {
-      defaultBranch = resolveDefaultBranch(await this.getBranches(path));
-    } catch {
-      defaultBranch = "";
-    }
+    const defaultBranch = resolveDefaultBranch(await this.getBranches(path));
     return repoSummarySchema.parse({
       id: path,
       name: path.split("/").pop() ?? path,
@@ -157,7 +152,7 @@ export class GitHubProvider implements Provider {
     const members: Member[] = [];
     for (const c of raw as GitHubContributor[]) {
       // Per-collaborator permission lookup — GitHub has no single member-roles list.
-      const perm = await this.transport.get<GitHubPermission>(`${base}/collaborators/${encodeRepoPath(c.login)}/permission`, {
+      const perm = await this.transport.get<GitHubPermission>(`${base}/collaborators/${encodeURIComponent(c.login)}/permission`, {
         headers: this.headers(),
       });
       members.push(mapMember(c, perm.status >= 200 && perm.status < 300 ? (perm.body?.role ?? "read") : "read"));
@@ -170,9 +165,8 @@ export class GitHubProvider implements Provider {
     const repo = await this.transport.get<GitHubRepo>(base, { headers: this.headers() });
     const defaultBranch = repo.status >= 200 && repo.status < 300 ? (repo.body?.default_branch ?? "") : "";
 
-    const access = await this.transport.get<GitHubPermission>(`${base}/access-level`, { headers: this.headers() });
-    const writeCapable =
-      access.status >= 200 && access.status < 300 ? WRITE_CAPABLE.has(access.body?.role ?? "") : DEFAULT_WRITE_CAPABLE;
+    if (repo.status < 200 || repo.status >= 300) throw new Error(`GitHub ${repo.status} error fetching repository ${repoId}`);
+    const writeCapable = repo.body?.permissions?.push === true;
 
     const url = withQuery(`${base}/branches`, { per_page: 100 });
     const res = await paginateAll(this.transport, url, this.headers());
@@ -191,10 +185,16 @@ export class GitHubProvider implements Provider {
   /** Immediate child directories under `path` via the contents API. */
   async listDirectories(repoId: string, path = ""): Promise<string[]> {
     const base = `${this.baseUrl}/repos/${encodeRepoPath(repoId)}/contents`;
-    const url = withQuery(base, path ? { path } : {});
+    const segments = path ? path.split("/") : [];
+    if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+      throw new Error("Choose a safe repository directory");
+    }
+    const url = `${base}${segments.length ? `/${segments.map(encodeURIComponent).join("/")}` : ""}`;
     const res = await this.transport.get<{ type: string; name: string }[]>(url, { headers: this.headers() });
-    if (res.status >= 400) throw new Error(`GitHub ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}`);
-    const dirs = (res.body ?? []).filter((c) => c.type === "dir").map((c) => c.name);
+    if (res.status < 200 || res.status >= 300 || !Array.isArray(res.body)) {
+      throw new Error(`GitHub ${res.status} error fetching directories for ${repoId}${path ? ` (${path})` : ""}`);
+    }
+    const dirs = res.body.filter((c) => c.type === "dir").map((c) => c.name);
     return [...new Set(dirs)].sort();
   }
 }

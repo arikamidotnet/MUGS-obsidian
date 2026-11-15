@@ -3,6 +3,7 @@ import { DiffView } from "./diffView";
 import { MapView } from "./mapView";
 import { MugsConflictsPanel } from "./diffPanel";
 import { ReviewQueueView } from "./reviewQueueView";
+import { PreflightView } from "./preflightView";
 import { setMugsContext, __resetMugsContextForTests } from "./dataSources";
 import type { FileConflict } from "../sync/conflict";
 
@@ -594,6 +595,24 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     expect(text).toContain("Your sync"); // legend rendered before the empty-state branch
   });
 
+  it("Map summary counts only proven folders and calls out repository review even after an OK pass", async () => {
+    const base = { remotePath: "", localFolder: "notes", providerId: "c1", direction: "push-only" as const };
+    setMugsContext({
+      map: { getRows: async () => [
+        { mapping: { ...base, id: "m1", label: "Reviewed" }, status: "ok", reviewCount: 8, hasProvenSync: false },
+        { mapping: { ...base, id: "m2", label: "Proven" }, status: "ok", reviewCount: 0, hasProvenSync: true },
+      ] },
+      diff: { getDiff: async () => IDENTICAL() },
+      conflicts: { getConflicts: async () => [], resolveConflict: async () => ({ remaining: 0 }) },
+    });
+    const v = new MapView({} as any);
+    await v.onOpen();
+    const text = collectText(v.contentEl);
+    expect(text).toContain("1/2 in sync");
+    expect(text).toContain("needs review");
+    expect(allTitles(v.contentEl).join("\n")).toContain("8 repository files kept for safety");
+  });
+
   it("Map view: renders honest per-mapping statuses — no downloads, needs review, skipped with hover reasons", async () => {
     const base = { remotePath: "", localFolder: "notes", providerId: "c1" };
     setMugsContext({
@@ -764,5 +783,114 @@ describe("MugsConflictsPanel — resolution errors render inline + groups refres
     // Leaf close stops whatever remains (nothing live — idempotent no-op).
     await p.onClose();
     expect(clears).toHaveLength(2);
+  });
+});
+
+// --- Preflight & rollout view ------------------------------------------------
+
+describe("PreflightView — staged rollout controls, canary gating, refresh", () => {
+  beforeEach(() => {
+    __resetMugsContextForTests();
+    // renderNavigation needs an installed context; actions alone suffice here.
+    setMugsContext({ actions: { openView: vi.fn() } } as any);
+  });
+
+  /** Fake plugin: staged settings, saved evidence per mapping, a listener set
+   *  standing in for the plugin's uiListeners, and recorded control calls. */
+  const preflightPlugin = (evidence: any[], settingsOver: any = {}) => {
+    const listeners = new Set<() => void>();
+    let evidenceCalls = 0;
+    const settings = {
+      sync: {
+        paused: false,
+        rollout: { mode: "staged", enabledMappingIds: [] as string[], blocked: {}, lastResult: {} as Record<string, any> },
+        ...settingsOver,
+      },
+      mappings: evidence.map(e => ({ id: e.id, label: e.label })),
+    };
+    return {
+      listeners,
+      evidenceCalls: () => evidenceCalls,
+      plugin: {
+        store: { getSettings: () => settings, loadError: undefined, isLocked: () => false },
+        preflightMappings: () => { evidenceCalls++; return evidence; },
+        onUiUpdate: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+        startStagedRollout: vi.fn(async () => {}),
+        disableStagedMapping: vi.fn(async () => {}),
+        runMappingCanary: vi.fn(async () => ({ enabled: true })),
+      } as any,
+    };
+  };
+
+  const clean = (id: string, label: string) => ({ id, label, blockers: [], reviewCount: 0, conflictCount: 0, pendingCount: 0, lastObservedAt: 1 });
+  const blocked = (id: string, label: string) => ({ id, label, blockers: [`${id}: 3 repository files need review`], reviewCount: 3, conflictCount: 0, pendingCount: 0 });
+
+  it("staged mode arms the canary only behind backup acknowledgment and only for blocker-free mappings", async () => {
+    const { plugin, evidenceCalls } = preflightPlugin([clean("m1", "Notes"), blocked("m2", "Docs")]);
+    const v = new PreflightView(plugin, {} as any);
+    await v.onOpen();
+    expect(evidenceCalls()).toBe(1);
+    const canary = findButtons(v.contentEl).find(b => b.textContent === "Run canary and enable automatic sync")!;
+    expect(canary).toBeDefined();
+    expect((canary as any).disabled).toBe(true); // gated until the backup is acknowledged
+
+    // The blocked mapping shows its evidence but never a canary control.
+    expect(collectText(v.contentEl)).toContain("3 repository files need review");
+    expect(findButtons(v.contentEl).filter(b => b.textContent === "Run canary and enable automatic sync")).toHaveLength(1);
+
+    const ack = findInputs(v.contentEl).find(i => (i as any).type === "checkbox")! as any;
+    ack.checked = true;
+    fire(ack, "change");
+    expect((canary as any).disabled).toBe(false);
+
+    fire(canary, "click");
+    await flush();
+    expect(plugin.runMappingCanary).toHaveBeenCalledWith("m1");
+    await v.onClose();
+  });
+
+  it("an enabled mapping shows Disable instead of a canary; disable routes to the plugin", async () => {
+    const { plugin } = preflightPlugin([clean("m1", "Notes")], { rollout: { mode: "staged", enabledMappingIds: ["m1"], blocked: {}, lastResult: {} } });
+    const v = new PreflightView(plugin, {} as any);
+    await v.onOpen();
+    expect(collectText(v.contentEl)).toContain("Automatic: enabled");
+    expect(findButtons(v.contentEl).some(b => b.textContent === "Run canary and enable automatic sync")).toBe(false);
+    fire(findButtons(v.contentEl).find(b => b.textContent === "Disable this mapping")!, "click");
+    await flush();
+    expect(plugin.disableStagedMapping).toHaveBeenCalledWith("m1");
+    await v.onClose();
+  });
+
+  it("subscribes on open, re-renders on pushed UI updates and unsubscribes on close", async () => {
+    const { plugin, listeners, evidenceCalls } = preflightPlugin([clean("m1", "Notes")]);
+    const v = new PreflightView(plugin, {} as any);
+    await v.onOpen();
+    expect(listeners.size).toBe(1);
+    expect(evidenceCalls()).toBe(1);
+
+    for (const listener of listeners) listener(); // e.g. a sync finished elsewhere
+    expect(evidenceCalls()).toBe(2); // re-rendered from the pushed event, no polling
+
+    await v.onClose();
+    expect(listeners.size).toBe(0);
+    expect(evidenceCalls()).toBe(2); // no further refresh can be triggered
+  });
+
+  it("legacy mode offers staged start behind explicit confirmation, never a canary", async () => {
+    const { plugin } = preflightPlugin([clean("m1", "Notes")], { rollout: undefined });
+    const v = new PreflightView(plugin, {} as any);
+    await v.onOpen();
+    expect(collectText(v.contentEl)).toContain("Legacy scheduling applies to all mappings");
+    expect(findButtons(v.contentEl).some(b => b.textContent === "Run canary and enable automatic sync")).toBe(false);
+    const start = findButtons(v.contentEl).find(b => b.textContent === "Start staged rollout (all disabled)")! as any;
+    expect(start.disabled).toBe(true);
+    const approval = findInputs(v.contentEl).find(i => (i as any).type === "checkbox")! as any;
+    approval.checked = true;
+    fire(approval, "change");
+    expect(start.disabled).toBe(false);
+    fire(start, "click");
+    await flush();
+    expect(plugin.startStagedRollout).toHaveBeenCalledTimes(1);
+    await v.onClose();
   });
 });

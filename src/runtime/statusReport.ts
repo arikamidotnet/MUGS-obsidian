@@ -18,10 +18,13 @@ export interface StatusCounts {
   conflicted: number;// files awaiting manual resolution
   failed: number;    // mappings that errored/were skipped for a persistent reason
   pending: number;   // durable pendingOps not yet applied+verified
+  blocked: number;   // files or mapping transactions awaiting a safe retry/review
 }
 
 /** Distinct terminal status kinds — each maps to its own user-facing message. */
 export type ReportKind =
+  | "pending"
+  | "blocked"
   | "conflict"     // needs a manual merge
   | "offline"      // provider unreachable — will retry with backoff
   | "auth"         // credentials missing/locked/invalid
@@ -56,12 +59,13 @@ export function buildStatusReport(opts: {
 }): StatusReport {
   const { outcomes, pendingOps, saveResult, thrown } = opts;
   const counts: StatusCounts = {
-    publish: outcomes.filter((o) => o.status === "ok" && o.push === true).length,
-    applied: outcomes.filter((o) => o.status === "ok" && o.pull !== undefined).length,
-    deferred: 0, // driver-side pendingOps consumption lands with sync-core's planner (seam)
-    conflicted: outcomes.reduce((n, o) => n + (o.conflicts?.length ?? 0), 0),
-    failed: 0,
+    publish: outcomes.reduce((n, o) => n + (o.counts?.publish ?? (o.push === true ? 1 : 0)), 0),
+    applied: outcomes.reduce((n, o) => n + (o.counts?.apply ?? (o.status === "ok" && o.pull !== undefined && o.pull !== "none" ? 1 : 0)), 0),
+    deferred: outcomes.reduce((n, o) => n + (o.counts?.deferred ?? 0), 0),
+    conflicted: outcomes.reduce((n, o) => n + Math.max(o.counts?.conflicted ?? 0, o.conflicts?.length ?? 0), 0),
+    failed: Math.max(outcomes.reduce((n, o) => n + (o.pendingFailures ?? 0), 0), pendingOps?.filter(o => o.state === "failed").length ?? 0),
     pending: pendingOps?.length ?? 0,
+    blocked: outcomes.reduce((n, o) => n + Math.max(o.blocked?.length ?? 0, o.status === "blocked" ? 1 : 0), 0),
   };
 
   const skips = outcomes.filter((o) => o.status === "skipped");
@@ -69,8 +73,7 @@ export function buildStatusReport(opts: {
   for (const s of skips) {
     const kind = classifySkipReason(s.reason);
     byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
-    if (kind === "offline" || kind === "auth") counts.failed += 1;
-    else counts.failed += 1;
+    counts.failed += 1;
   }
 
   const parts = (extra: string[]): string =>
@@ -123,6 +126,12 @@ export function buildStatusReport(opts: {
     };
   }
   const oks = outcomes.filter((o) => o.status === "ok").length;
+  if (counts.blocked > 0 || outcomes.some(o => o.kind === "blocked")) {
+    return { kind: "blocked", counts, message: parts(["changes blocked — retry or review required", countText(counts)]) };
+  }
+  if (counts.pending > 0 || counts.deferred > 0 || counts.failed > 0 || outcomes.some(o => o.kind === "retry-pending")) {
+    return { kind: "pending", counts, message: parts(["changes pending — not fully synced", countText(counts)]) };
+  }
   if (oks > 0) {
     return {
       kind: "synced",
@@ -145,6 +154,7 @@ function countText(c: StatusCounts): string {
   if (c.deferred) seg.push(`deferred ${c.deferred}`);
   if (c.conflicted) seg.push(`conflicted ${c.conflicted}`);
   if (c.pending) seg.push(`pending ${c.pending}`);
+  if (c.blocked) seg.push(`blocked ${c.blocked}`);
   if (c.failed) seg.push(`failed ${c.failed}`);
   return seg.length > 0 ? seg.join(", ") : "no changes";
 }

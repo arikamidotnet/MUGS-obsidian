@@ -20,8 +20,11 @@ export interface CategorizedReview {
 }
 export interface ReviewAnalysis {
   entries: CategorizedReview[];
+  totalFiles?: number;
   scanned: number;
   skipped: number;
+  bytesAttempted?: number;
+  limitsReached?: boolean;
 }
 export interface BulkResult {
   rows: { row: ReconciliationReviewRow; status: "applied" | "requeued" | "pending" }[];
@@ -34,12 +37,17 @@ export async function analyzeReview(
   files: { path: string; size: number }[],
   read: (path: string) => Promise<string>,
   signal?: AbortSignal,
-  limits = { files: 10000, fileBytes: 2 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 },
+  // Budgets sized so a real company vault (thousands of notes, ~200 MiB of
+  // text) can complete a scan: a partial scan cannot support "no match"
+  // conclusions, so a too-small budget made every unmatched file inconclusive.
+  // Still bounded, still cancellable, and single files over the per-file cap
+  // remain honestly "inconclusive" rather than silently trusted.
+  limits = { files: 20000, fileBytes: 8 * 1024 * 1024, totalBytes: 512 * 1024 * 1024 },
 ): Promise<ReviewAnalysis> {
   const hashes = new Map<string, string[]>();
   const names = new Map<string, string[]>();
   const lengths = new Set(rows.map(row => row.blob.length));
-  let scanned = 0, skipped = 0, bytes = 0;
+  let scanned = 0, skipped = 0, bytes = 0, limitsReached = false;
   const add = (index: Map<string, string[]>, key: string, path: string) => {
     const paths = index.get(key) ?? [];
     paths.push(path);
@@ -58,6 +66,7 @@ export async function analyzeReview(
     if (scanned >= limits.files || !Number.isFinite(file.size) || file.size < 0 ||
         file.size > limits.fileBytes || bytes + file.size > limits.totalBytes) {
       skipped++;
+      if (scanned >= limits.files || bytes + file.size > limits.totalBytes) limitsReached = true;
       continue;
     }
     scanned++;
@@ -82,7 +91,7 @@ export async function analyzeReview(
   }
   signal?.throwIfAborted();
   return {
-    scanned, skipped,
+    scanned, skipped, totalFiles: seen.size, bytesAttempted: bytes, limitsReached,
     entries: rows.map(row => {
       const exact = hashes.get(row.blob) ?? [];
       const filename = names.get(row.path.slice(row.path.lastIndexOf("/") + 1)) ?? [];

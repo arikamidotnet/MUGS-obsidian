@@ -139,6 +139,32 @@ describe("StoreMapDataSource.getRows — owner attribution", () => {
 });
 
 describe("StoreMapDataSource.getRows — honest skip reasons + conflict counts", () => {
+  it("projects review, pending work and correspondence proof from durable mapping state", async () => {
+    const store = storeWith([mapping(), mapping({ id: "m2" })], {
+      m1: {
+        mappingId: "m1", status: "ok", correspondenceSha: "proven123",
+        pendingOps: [{
+          opId: "m1:1:vault-write:a.md", kind: "vault-write", path: "a.md",
+          state: "pending", createdAt: 1, attempts: 0,
+        }],
+        reconciliation: {
+          version: 1, fingerprint: "scope", proven: {}, decisions: {},
+          review: {
+            "a.md": { ref: "ref1", blob: "blob1" },
+            "b.md": { ref: "ref2", blob: "blob2" },
+          },
+        },
+      },
+      m2: { mappingId: "m2", status: "ok" },
+    });
+    const rows = await new StoreMapDataSource(store, ".mugs-clones", makeRunner()).getRows();
+    expect(rows.map(({ reviewCount, pendingCount, hasProvenSync }) =>
+      ({ reviewCount, pendingCount, hasProvenSync }))).toEqual([
+      { reviewCount: 2, pendingCount: 1, hasProvenSync: true },
+      { reviewCount: 0, pendingCount: 0, hasProvenSync: false },
+    ]);
+  });
+
   it("marks a mapping with no credential as skipped (with reason) instead of quietly pending", async () => {
     const store = storeWith([mapping({ providerId: "deleted-cred" })], { m1: { mappingId: "m1", status: "ok" } });
     const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
@@ -161,6 +187,14 @@ describe("StoreMapDataSource.getRows — honest skip reasons + conflict counts",
     const ds = new StoreMapDataSource(store, ".mugs-clones", makeRunner());
     const rows = await ds.getRows();
     expect(rows[0].skipReason).toBeUndefined();
+  });
+
+  it("surfaces a driver-recorded skip reason from the last pass instead of a stale in-sync", async () => {
+    const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "pending", skipReason: "could not reach provider" } });
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "tok" });
+    const rows = await new StoreMapDataSource(store, ".mugs-clones", makeRunner()).getRows();
+    expect(rows[0].skipReason).toBe("could not reach provider");
+    expect(rows[0].status).toBe("pending");
   });
 
   it("counts only UNresolved conflicts so the Map card can say \"needs merge (n files)\"", async () => {

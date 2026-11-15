@@ -79,8 +79,10 @@ const make = (
   return { root, review, preview, decide };
 };
 const confirm = (root: FakeEl): void => {
-  checkbox(root).checked = true;
-  checkbox(root).fire("change");
+  const boxes = walk(root).filter(el => el.tagName === "input" && el.type === "checkbox");
+  const approval = boxes.find(el => el.required) ?? boxes.at(-1)!;
+  approval.checked = true;
+  approval.fire("change");
 };
 const select = (root: FakeEl, index: number): void => {
   fileButtons(root)[index]!.fire("click");
@@ -102,6 +104,39 @@ const makeBulk = (direction: ReconciliationReviewRow["direction"] = "push-only")
 };
 
 describe("bulk review UI", () => {
+  it("starts with a nonempty group and updates counts when the folder changes", async () => {
+    const first = row({ mappingId: "m1", path: "first.md" });
+    const second = row({ mappingId: "m2", mappingLabel: "Other", path: "second.md" });
+    const analysis: ReviewAnalysis = {
+      scanned: 4, skipped: 1,
+      entries: [
+        { row: first, category: "filename", matches: ["first.md"], matchCount: 1 },
+        { row: second, category: "inconclusive", matches: [], matchCount: 0 },
+      ],
+    };
+    const root = new El("div");
+    const decide = vi.fn(async () => ({ persisted: true, rows: [] }));
+    const bulk = new BulkReview({ analyze: async () => analysis, decide, blocked: () => false });
+    bulk.render(root as unknown as HTMLElement);
+    button(root, "Analyze review items").fire("click");
+    await flush();
+    const selects = walk(root).filter(el => el.tagName === "select");
+    expect(selects[1].value).toBe("filename");
+    expect(text(root)).toContain("1 repository file in this folder and category");
+    expect(text(root)).toContain("All folders · repository files, not vault files");
+    expect(text(root)).toContain("4 vault files attempted; 1 skipped or unreadable");
+    selects[0].value = "m2";
+    selects[0].fire("change");
+    expect(selects[1].value).toBe("inconclusive");
+    expect(text(selects[1])).toContain("Inconclusive scan (1)");
+    expect(text(root)).toContain("a match cannot be ruled out");
+    button(root, "Preview batch").fire("click");
+    expect(text(root)).toContain("second.md");
+    expect(text(root)).toContain("Copy into my vault: choose files");
+    expect(text(root)).toContain("1 of 1 repository files selected");
+    expect(decide).not.toHaveBeenCalled();
+  });
+
   it("analyzes only on demand and requires preview and explicit confirmation", async () => {
     const f = makeBulk();
     expect(f.analyze).not.toHaveBeenCalled();
@@ -198,11 +233,37 @@ describe("bulk review UI", () => {
 });
 
 describe("ReconciliationReview (Review tab)", () => {
+  it("keeps a saved review entry for later without invoking sync or a decision", async () => {
+    const { root, decide, review } = make();
+    await flush();
+    button(root, "Keep for later").fire("click");
+    expect(text(root)).toContain("no sync or repository change was made");
+    expect(decide).not.toHaveBeenCalled();
+    expect(review.isBusy()).toBe(false);
+  });
+
+  it("places optional bulk analysis behind a closed disclosure so individual review remains visible", async () => {
+    const root = new El("div");
+    const analyze = vi.fn(async (): Promise<ReviewAnalysis> => ({ entries: [], scanned: 0, skipped: 0 }));
+    const review = new ReconciliationReview({
+      rows: [row()], preview: async () => "preview", decide: async () => {},
+      analyze, decideBatch: async () => ({ persisted: true, rows: [] }),
+    });
+    review.render(root as unknown as HTMLElement);
+    await flush();
+    const bulk = walk(root).find(el => el.tagName === "details" && el.attrs["class"] === "mugs-bulk-review")!;
+    expect(bulk).toBeDefined();
+    expect(bulk.attrs.open).toBeUndefined();
+    expect(text(bulk)).toContain("Review multiple files (optional)");
+    expect(text(root)).toContain("Repository preview");
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
   it("explains empty discovery without calling the backend", () => {
     const { root, preview, decide } = make([]);
     expect(text(root)).toContain("Review repository files");
     expect(text(root)).toContain("Run sync");
-    expect(text(root)).toContain("safe to delete");
+    expect(text(root)).toContain("could not safely delete them automatically");
     expect(preview).not.toHaveBeenCalled();
     expect(decide).not.toHaveBeenCalled();
     expect(walk(root).some((el) => el.tagName === "button")).toBe(false);

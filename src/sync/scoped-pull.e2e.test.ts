@@ -71,7 +71,7 @@ describe("scoped first sync", () => {
         policy: { autoMerge: true, defaultResolution: "both" as const, sameChangeAccept: true, recencyWins: true, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
       };
       const out1 = await syncAllMappings(deps);
-      expect(out1[0]?.status).toBe("ok");
+      expect(out1[0]?.status, out1[0]?.reason).toBe("ok");
       expect(readFileSync(join(synced, "shared.md"), "utf8")).toBe("shared note\n");
       const out2 = await syncAllMappings(deps);
       expect(out2[0]?.status).toBe("ok");

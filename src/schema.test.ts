@@ -25,6 +25,18 @@ describe("data-plane schema (contract)", () => {
     expect(DEFAULT_SYNC_POLICY).toEqual(before);
   });
 
+  it("accepts a tokenless local repository but rejects a tokenless hosted account", () => {
+    const local = parseSettings({ credentials: [
+      { id: "local", label: "Local", kind: "local", token: "", baseUrl: "file:///tmp/remote.git" },
+    ] });
+    expect(local.credentials[0].token).toBe("");
+    const hosted = mugsSettingsSchema.safeParse({ credentials: [
+      { id: "hosted", label: "Hosted", kind: "github", token: "" },
+    ] });
+    expect(hosted.success).toBe(false);
+    if (!hosted.success) expect(hosted.error.issues[0].path).toEqual(["credentials", 0, "token"]);
+  });
+
   it("retains nested array defaults, unknown-field stripping, and structured issues", () => {
     const settings = parseSettings({ unknownFutureField: true, sync: {
       paused: true, obsidianConfig: { enabled: true, entries: [{ path: "app.json", scope: "personal", unknown: "strip" }] },
@@ -104,6 +116,11 @@ describe("data-plane schema (contract)", () => {
     // scoped links silently degraded to the legacy id-based repo match on reload.
     const s = parseSettings({ version: 1, mappings: [{ id: "m1", label: "L", remotePath: "d", localFolder: "notes", providerId: "c1", repoRef: "42" }] });
     expect(s.mappings[0].repoRef).toBe("42");
+  });
+
+  it("preserves a driver-recorded skipReason on a lastSync entry", () => {
+    const s = parseSettings({ lastSync: { m1: { mappingId: "m1", status: "pending", skipReason: "could not reach provider" } } });
+    expect(s.lastSync.m1.skipReason).toBe("could not reach provider");
   });
 
   it("accepts and preserves a security.kdf block (passphrase scheme)", () => {

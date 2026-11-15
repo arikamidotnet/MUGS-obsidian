@@ -130,7 +130,7 @@ export class StoreMapDataSource implements MapDataSource {
         ? "no credential selected — choose one for this mapping in MUGS settings"
         : credential.kind === "local" && !credential.baseUrl?.trim()
           ? "local provider needs a repo path — set it in the credential's settings"
-          : undefined;
+          : ls?.skipReason;
       const conflictCount = unresolvedConflicts(this.store.getConflicts(m.id)).length;
       rows.push({
         mapping: m,
@@ -140,6 +140,9 @@ export class StoreMapDataSource implements MapDataSource {
         lastPullAt: ls?.lastPullAt,
         skipReason,
         conflictCount: conflictCount > 0 ? conflictCount : undefined,
+        reviewCount: Object.keys(ls?.reconciliation?.review ?? {}).length,
+        pendingCount: ls?.pendingOps?.length ?? 0,
+        hasProvenSync: !!ls?.correspondenceSha,
       });
     }
 

@@ -25,6 +25,12 @@ export interface MapRow {
   skipReason?: string;
   /** Unresolved conflict files awaiting manual resolution, when > 0. */
   conflictCount?: number;
+  /** Repository files retained because their ownership/deletion is uncertain. */
+  reviewCount?: number;
+  /** Durable operations awaiting application or verification. */
+  pendingCount?: number;
+  /** False when a pass finished but vault/repository correspondence is unproven. */
+  hasProvenSync?: boolean;
 }
 
 /** Supplies the data the Map view renders. */
@@ -103,7 +109,7 @@ export interface MugsContext {
   conflicts: ConflictDataSource;
   /** Runtime actions, kept optional for data-only consumers and tests. */
   actions?: {
-    openView: (view: "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts") => void;
+    openView: (view: "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts" | "mugs-preflight") => void;
     syncNow: () => Promise<void>;
     openReview: () => void;
     openSettings: () => void;

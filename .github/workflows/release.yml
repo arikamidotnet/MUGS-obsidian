@@ -110,21 +110,27 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Bulk repository-file review: on-demand, read-only analysis groups review entries into exact-content duplicate/move candidates, filename-only candidates, no-match and inconclusive scans.
-          - Batch decisions with full previews, on-demand vault-to-repository diff comparisons and explicit confirmation: one folder, one sync pass, up to 500 files, with applied/re-queued/pending outcomes per path.
+          - Staged rollout with guarded canaries: the new Preflight & rollout page switches a vault to staged mode (nothing automatic until individually enabled) and runs a one-shot canary per folder — a real targeted sync pass that must be verifiably clean (no conflicts, deferred changes, pending work or review backlog) and persisted before the folder joins automatic sync. Failures fail closed with the reason recorded; unsavable rollout decisions pause automatic sync.
+          - Multi-client soak gate: a new release-gate test drives two full independent clients against one shared repository — distinct and non-overlapping edits converge automatically, same-region conflicts surface with both sides intact, one-click resolution converges everyone, deletions propagate, converged passes are verified no-ops.
+          - Review analysis sized for real vaults: scan budgets raised to 20,000 files / 8 MiB per file / 512 MiB total; budget-limited scans still report unmatched results as inconclusive, never as proof of absence. .apk joined the binary-extension guard.
+          - Bulk repository-file review: on-demand, read-only analysis groups review entries into exact-content duplicate/move candidates, filename-only candidates, no-match and inconclusive scans; batch decisions with path lists, diff comparisons and explicit confirmation (one folder, one sync pass, up to 500 files).
           - Deletion safeguards unchanged: revision-bound decisions, recovery backups before deletion, Download only cannot delete, filenames never imply identity.
           - Review intent that cannot persist is rolled back instead of applying later; sync locks always release; analysis can be cancelled before deciding.
-          - Direction-safe sync, editor-aware deferred operations, scoped commits, and recoverable conflicts (unchanged from 0.4.1).
+          - Revision-bound pending recovery, merged deletion protection, guarded editor mutations, exclusive clone locks and accurate pending/blocked status reporting.
+          - Docs: new guided-rollout guide (staged enablement, canaries, company checklist, Obsidian Sync comparison) plus updated install/provider walkthroughs.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
+          Desktop Git text sync only: attachment, configuration, mobile and encrypted-vault
+          parity with Obsidian Sync is not claimed. Company rollout requires separate
+          supported-platform, app-level and multi-client canary validation.
           Back up vault content, plugin data, and clones before upgrading. Rollback requires
           compatible settings/state as well as the previous plugin assets; do not delete dirty clones.
           EOF
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — bulk repository-file review" \
+            --title "${VERSION} — staged rollout with guarded canaries" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

@@ -82,4 +82,25 @@ describe("status reporting", () => {
     expect(classifySkipReason("repo not found or not accessible")).toBe("skipped");
     expect(classifySkipReason(undefined)).toBe("skipped");
   });
+
+  it("counts actual files and never reports deferred work as synced", () => {
+    const r = buildStatusReport({ outcomes: [{
+      ...ok("a"), counts: { publish: 7, apply: 5, deferred: 2, conflicted: 0 },
+    }] });
+    expect(r.kind).toBe("pending");
+    expect(r.counts).toMatchObject({ publish: 7, applied: 5, deferred: 2 });
+  });
+
+  it("lock-blocked mappings are blocked, not idle or authentication failures", () => {
+    const r = buildStatusReport({ outcomes: [{ mappingId: "m", label: "M", status: "blocked", reason: "locked by another process" }] });
+    expect(r.kind).toBe("blocked");
+    expect(r.counts.blocked).toBe(1);
+  });
+
+  it("pending failure and blocked files prevent a successful convergence claim", () => {
+    const r = buildStatusReport({ outcomes: [{ ...ok("m"), pendingFailures: 1, blocked: [{ path: "private.md", reason: "read failed" }] }] });
+    expect(r.kind).toBe("blocked");
+    expect(r.counts.failed).toBe(1);
+    expect(r.message).not.toContain("private.md");
+  });
 });

@@ -36,6 +36,10 @@ export const pendingOperationSchema = z.object({
   path: z.string().min(1),
   content: z.string().optional(),
   refSha: z.string().optional(),
+  fingerprint: z.string().optional(),
+  baseRef: z.string().optional(),
+  preimage: z.string().optional(),
+  preimageAbsent: z.boolean().optional(),
   state: z.enum(["pending", "applied-unverified", "failed"]),
   createdAt: z.number().int().nonnegative(),
   attempts: z.number().int().nonnegative(),
@@ -97,10 +101,14 @@ export const credentialSchema = z.object({
   label: z.string().min(1),
   kind: providerKindSchema,
   username: z.string().optional(),
-  token: z.string().min(1),
+  token: z.string(),
   baseUrl: z.string().url().optional(),
   /** Explicit allowed repos; when set, MUGS skips global enumeration. */
   repos: z.array(repoPathSchema).optional(),
+}).superRefine((credential, ctx) => {
+  if (credential.kind !== "local" && !credential.token) {
+    ctx.addIssue({ code: "custom", path: ["token"], message: "A hosted Git account needs a token" });
+  }
 });
 
 export const folderMappingSchema = z.object({
@@ -150,6 +158,8 @@ export const lastSyncStateSchema = z.object({
  *  the steady-state shortcut's change detector (mtime alone is not trusted). */
   contentSnapshot: z.record(z.string(), z.tuple([z.number(), z.number()])).optional(),
   status: syncStatusSchema.default("pending"),
+  /** Why the last pass could not complete (driver-recorded; cleared on success). */
+  skipReason: z.string().optional(),
   /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
    *  application completed AND state persisted. Distinct from lastRemoteSha
    *  (fetched tip) and lastLocalSha (clone HEAD), which may run ahead. */
@@ -218,6 +228,12 @@ export const syncPolicySchema = z.object({
   sameChangeAccept: z.boolean().default(true),
   recencyWins: z.boolean().default(true),
   paused: z.boolean().default(false),
+  rollout: z.object({
+    mode: z.enum(["legacy", "staged"]),
+    enabledMappingIds: z.array(z.string().min(1)),
+    blocked: z.record(z.string(), z.object({ reason: z.string(), at: z.number() })),
+    lastResult: z.record(z.string(), z.object({ status: z.enum(["ok", "blocked"]), at: z.number(), reason: z.string().optional() })),
+  }).optional(),
   intervalSeconds: z.number().int().positive().default(300),
   /** Which side wins a mapping's first initialization; "pull" = remote populates
    *  the vault (historic default), "push" = vault uploads without downloading history. */

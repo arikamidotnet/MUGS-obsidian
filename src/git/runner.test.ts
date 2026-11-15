@@ -31,7 +31,7 @@ const h = vi.hoisted(() => {
 
 vi.mock("node:child_process", () => ({ spawn: h.spawn, ChildProcess: EventEmitter }));
 
-import { ChildProcessRunner } from "./runner";
+import { ChildProcessRunner, BoundedOutput } from "./runner";
 
 beforeEach(() => {
   h.calls.length = 0;
@@ -137,7 +137,84 @@ describe("ChildProcessRunner", () => {
     const c = lastCall();
     emitSuccess(c, "ok");
     await p;
-    // Just exercising the path; detailed cancel/timeout behavior is tested in
-    // runner.bounds.cancel.test.ts with real timing.
+    // Real hung-child coverage is in client.process.test.ts.
+  });
+
+  it("does not spawn already-aborted work", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const result = await new ChildProcessRunner().run(["commit"], { signal: ac.signal });
+    expect(h.calls).toHaveLength(0);
+    expect(result).toEqual({ code: 1, stdout: "", stderr: "[cancelled]" });
+  });
+
+  it("removes the abort listener after success and ignores later aborts", async () => {
+    const ac = new AbortController();
+    const remove = vi.spyOn(ac.signal, "removeEventListener");
+    const promise = new ChildProcessRunner().run(["status"], { signal: ac.signal });
+    emitSuccess(lastCall(), "done");
+    expect(await promise).toEqual({ code: 0, stdout: "done", stderr: "" });
+    expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    ac.abort();
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("concatenates only at completion and preserves split UTF-8 and both streams", async () => {
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const promise = new ChildProcessRunner().run(["show", "HEAD:note"]);
+      const call = lastCall();
+      const bytes = Buffer.from("a🎉\0b\n", "utf8");
+      for (const byte of bytes) call.stdout.emit("data", Buffer.from([byte]));
+      for (let i = 0; i < 100; i++) call.stderr.emit("data", Buffer.from("e"));
+      expect(concat).not.toHaveBeenCalled();
+      call.proc.emit("close", 0);
+      expect(await promise).toEqual({ code: 0, stdout: "a🎉\0b\n", stderr: "e".repeat(100) });
+      expect(concat).toHaveBeenCalledTimes(2);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it("retains accepted blob output above the unused 16MiB suggested cap", async () => {
+    const promise = new ChildProcessRunner().run(["show", "HEAD:large"]);
+    const call = lastCall();
+    const chunk = Buffer.alloc(1024 * 1024, "x");
+    for (let i = 0; i < 17; i++) call.stdout.emit("data", chunk);
+    call.proc.emit("close", 0);
+    const result = await promise;
+    expect(result.code).toBe(0);
+    expect(result.stdout.length).toBe(17 * chunk.length);
+    expect(result.stderr).toBe("");
+  });
+});
+
+describe("BoundedOutput stream boundaries", () => {
+  it("uses bounded block metadata even for one-byte events", () => {
+    const out = new BoundedOutput(128 * 1024);
+    const byte = Buffer.from("x");
+    const alloc = vi.spyOn(Buffer, "allocUnsafe");
+    try {
+      let accepted = true;
+      for (let i = 0; i < 100_000; i++) accepted = out.append(byte) && accepted;
+      expect(accepted).toBe(true);
+      expect(alloc).toHaveBeenCalledTimes(2);
+      expect(out.text()).toBe("x".repeat(100_000));
+    } finally { alloc.mockRestore(); }
+  });
+
+  it("allows the exact cap and reports overflow without retaining excess bytes", () => {
+    const out = new BoundedOutput(4);
+    expect(out.append(Buffer.from("ab"))).toBe(true);
+    expect(out.append(Buffer.from("cd"))).toBe(true);
+    expect(out.append(Buffer.from("e"))).toBe(false);
+    expect(out.text()).toBe("abcd");
+  });
+
+  it("keeps only the prefix that fits when one chunk crosses the cap", () => {
+    const out = new BoundedOutput(4);
+    expect(out.append(Buffer.from("abc"))).toBe(true);
+    expect(out.append(Buffer.from("defghi"))).toBe(false);
+    expect(out.text()).toBe("abcd");
   });
 });

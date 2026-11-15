@@ -101,7 +101,7 @@ export class SettingsDraft {
    *  - no two mappings claim the same localFolder;
    *  - no mapping's localFolder nests inside another's (overlap);
    *  - every mapping points at an existing credential;
-   *  - every credential has label + token (schema enforces shape on save; surface early).
+   *  - hosted credentials have a token; local repositories need a file:// URL instead.
    */
   validate(): string[] {
     const problems: string[] = [];
@@ -141,7 +141,10 @@ export class SettingsDraft {
 
     for (const c of this.working.credentials) {
       if (!c.label) problems.push(`credential ${c.id}: label is required`);
-      if (!c.token) problems.push(`credential "${c.label || c.id}": token is required`);
+      if (c.kind !== "local" && !c.token) problems.push(`credential "${c.label || c.id}": token is required`);
+      if (c.kind === "local" && (!c.baseUrl || !c.baseUrl.startsWith("file://"))) {
+        problems.push(`credential "${c.label || c.id}": local repositories need a file:// URL in Base URL`);
+      }
     }
 
     return problems;
@@ -225,7 +228,10 @@ function applySnapshot(store: SettingsDraftTarget, snapshot: MugsSettings): void
   for (const m of snapshot.mappings) store.upsertMapping(structuredClone(m));
 
   store.setSecurity(structuredClone(snapshot.security));
-  store.setSync(structuredClone(snapshot.sync));
+  // Store setters can disable a canary when its mapping/account changes.
+  // Do not restore the stale draft whitelist over those safety decisions.
+  const rollout = store.getSettings().sync.rollout;
+  store.setSync({ ...structuredClone(snapshot.sync), rollout: rollout ?? snapshot.sync.rollout });
   store.setObsidianConfig(structuredClone(snapshot.sync.obsidianConfig));
 }
 

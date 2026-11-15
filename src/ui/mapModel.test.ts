@@ -72,6 +72,17 @@ describe("buildMapGraph — edges", () => {
 });
 
 describe("describeMapRow — honest status vocabulary", () => {
+  it("never calls an OK pass in sync while review, pending work or unproven correspondence remains", () => {
+    const review = describeMapRow({ status: "ok", direction: "push-only", reviewCount: 383, hasProvenSync: false });
+    expect(review.label).toBe("needs review");
+    expect(review.tone).toBe("warning");
+    expect(review.reason).toContain("383 repository files");
+    expect(describeMapRow({ status: "ok", direction: "push-only", pendingCount: 1, hasProvenSync: false }).label).toBe("pending");
+    expect(describeMapRow({ status: "ok", direction: "push-only", hasProvenSync: false }).label).toBe("pending");
+    expect(describeMapRow({ status: "ok", direction: "push-only", hasProvenSync: true }).label).toBe("in sync");
+    expect(describeMapRow({ status: "error", direction: "push-only", reviewCount: 1 }).label).toBe("failed");
+  });
+
   it("maps ok/up-to-date to \"in sync\" regardless of direction", () => {
     for (const status of ["ok", "up-to-date"] as const) {
       expect(describeMapRow({ status, direction: "push-pull" }).label).toBe("in sync");

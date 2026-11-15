@@ -780,6 +780,46 @@ describe("syncAllMappings — pass-scoped shared-work deduplication", () => {
   });
 });
 
+describe("syncAllMappings — skipped passes persist an honest status", () => {
+  it("marks a previously-ok mapping pending with its skip reason, then clears both on recovery", async () => {
+    // Regression (live canary): while the remote was unreachable the persisted
+    // status stayed "ok" from the last successful pass, so the Overview kept
+    // showing "in sync" for unpublished local work. A skip/blocked pass must
+    // record a non-success status + reason; the next completed pass clears it.
+    const store = new MugsStore(new MemoryIO());
+    store.setLastSync({ mappingId: "m1", status: "ok", lastRemoteSha: "L1", correspondenceSha: "C1" });
+    const deps = () => ({
+      mappings: [mapping()],
+      credentials: [credential()],
+      getToken: () => "t",
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner: makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true }).runner,
+      lastSync: storeWritableAccessor(store),
+    });
+
+    const unreachable: Provider = {
+      kind: "gitlab",
+      async listRepos() { throw new Error("provider unreachable"); },
+      async getBranches() { return []; },
+      async getMembers() { return []; },
+      async listDirectories() { return []; },
+    };
+    const skipped = await syncAllMappings({ ...deps(), buildProvider: () => unreachable });
+    expect(skipped[0]).toMatchObject({ status: "skipped", reason: "could not reach provider" });
+    const afterSkip = store.getLastSync("m1")!;
+    expect(afterSkip.status).toBe("pending");
+    expect(afterSkip.skipReason).toBe("could not reach provider");
+    expect(afterSkip.correspondenceSha).toBe("C1"); // proven history is not erased
+
+    const outcomes = await syncAllMappings(deps());
+    expect(outcomes[0]).toMatchObject({ status: "ok", pull: "fast-forward" });
+    const afterRecovery = store.getLastSync("m1")!;
+    expect(afterRecovery.status).toBe("ok");
+    expect(afterRecovery.skipReason).toBeUndefined();
+  });
+});
+
 describe("syncAllMappings — local provider (existing local clone)", () => {
   it("fast-forwards a pull-only local mapping without pushing", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });

@@ -49,7 +49,7 @@ export class ReconciliationView extends ItemView {
     this.unsubscribe = getMugsContext().actions?.subscribe?.(() => {
       // Sync finished: pick up newly queued/resolved files — unless a decision
       // is mid-flight (the component re-renders itself when it settles).
-      if (!this.review?.isBusy()) void this.refresh();
+      if (!this.review?.preserveOnNotification()) void this.refresh();
     });
     await this.refresh();
   }

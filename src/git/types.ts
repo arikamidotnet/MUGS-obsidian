@@ -18,13 +18,17 @@ export interface GitResult {
  *  timeoutMs requests a hard deadline from the runner (best-effort kill on expiry).
  */
 export interface GitRunOpts {
+  /** Optional stdin for batch object queries; never interpolated into argv. */
+  input?: string;
   cwd?: string;
   env?: Record<string, string>;
   /** AbortSignal for cooperative cancellation. When aborted the runner should
    *  attempt to terminate the child and resolve promptly. */
   signal?: AbortSignal;
   /** Hard deadline in milliseconds. Runner should kill the child and resolve
-   *  with a non-zero code when exceeded. 0 or omitted means no deadline. */
+   *  with a non-zero code when exceeded. For the raw runner, 0 or omitted means
+   *  no deadline. GitClient supplies generous operation defaults; use 0 to opt
+   *  out or withRunOptions to override the deadline for a bound client. */
   timeoutMs?: number;
 }
 

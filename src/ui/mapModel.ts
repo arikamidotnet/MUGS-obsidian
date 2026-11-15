@@ -78,6 +78,9 @@ export function describeMapRow(input: {
   skipReason?: string;
   /** Unresolved conflict files awaiting manual resolution, when known. */
   conflictCount?: number;
+  reviewCount?: number;
+  pendingCount?: number;
+  hasProvenSync?: boolean;
 }): MapRowDisplay {
   if (input.skipReason) return { label: "skipped", tone: "warning", reason: input.skipReason };
   switch (input.status) {
@@ -93,6 +96,18 @@ export function describeMapRow(input: {
       return { label: "failed", tone: "error", reason: "the last sync failed — run Sync again or check the MUGS notices" };
     case "ok":
     case "up-to-date":
+      if (input.pendingCount) return {
+        label: "pending", tone: "warning",
+        reason: `${input.pendingCount} operation${input.pendingCount === 1 ? "" : "s"} still awaiting verification`,
+      };
+      if (input.reviewCount) return {
+        label: "needs review", tone: "warning",
+        reason: `${input.reviewCount} repository file${input.reviewCount === 1 ? "" : "s"} kept for safety — open Review`,
+      };
+      if (input.hasProvenSync === false) return {
+        label: "pending", tone: "warning",
+        reason: "the last pass finished, but full folder correspondence is not verified",
+      };
       return input.direction === "push-only"
         ? { label: "in sync", tone: "success", reason: "Upload only: repository changes are never downloaded" }
         : { label: "in sync", tone: "success" };

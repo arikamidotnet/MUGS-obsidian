@@ -157,7 +157,10 @@ export class MapView extends ItemView {
     // "In sync" uses the same honest status model as the cards — a skipped or
     // conflicted mapping never counts as synced.
     const inSync = rows.filter(
-      (r) => describeMapRow({ status: r.status, direction: r.mapping.direction, skipReason: r.skipReason }).label === "in sync",
+      (r) => describeMapRow({
+        status: r.status, direction: r.mapping.direction, skipReason: r.skipReason,
+        reviewCount: r.reviewCount, pendingCount: r.pendingCount, hasProvenSync: r.hasProvenSync,
+      }).label === "in sync",
     ).length;
     let latest = 0;
     for (const r of rows) {
@@ -186,6 +189,9 @@ export class MapView extends ItemView {
       direction: edge.direction,
       skipReason: row?.skipReason,
       conflictCount: row?.conflictCount,
+      reviewCount: row?.reviewCount,
+      pendingCount: row?.pendingCount,
+      hasProvenSync: row?.hasProvenSync,
     });
 
     // Folder name (left side).

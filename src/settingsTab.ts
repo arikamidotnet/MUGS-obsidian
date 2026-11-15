@@ -159,6 +159,7 @@ export class MugsSettingTab extends PluginSettingTab {
     this.unsavedChanges = false;
     if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
     new Notice("MUGS: settings saved and now active.");
+    this.plugin.automaticSyncSettingsChanged();
     this._renderAll();
   }
 
@@ -399,7 +400,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Pause automatic sync")
-        .setDesc("Stop scheduled sync and file-change triggers. Apply to activate. Sync now remains available; resuming checks on the next timer tick.")
+        .setDesc("Stop scheduled sync and file-change triggers. Apply to activate. Sync now remains available; resuming checks immediately.")
         .addToggle((t) => {
           t.setValue(sync.paused).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ paused: v }));
@@ -485,7 +486,8 @@ export class MugsSettingTab extends PluginSettingTab {
     const steps = card.createEl("ol", { cls: "mugs-gs-steps" });
     steps.createEl("li", { text: "Add your account and access token under Accounts." });
     steps.createEl("li", { text: "Connect folders and choose Both ways, Upload only, or Download only." });
-    steps.createEl("li", { text: "Open MUGS Overview and run Sync now. Check folder status, view Changes, or Review files that need a decision." });
+    steps.createEl("li", { text: "Apply settings, then review the mapping and your backup. A first connection starts paused; resume automatic sync under Sync when ready. Sync now can run while paused." });
+    steps.createEl("li", { text: "Open MUGS Overview to check folder status, view Changes, or Review files that need a decision." });
 
     card.createDiv({
       cls: "mugs-note",
@@ -755,7 +757,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     new Setting(card)
       .setName("Token")
-      .setDesc("Your API token. Never shown in full; optionally encrypted at rest.")
+      .setDesc("Hosted account: API token. Local repository: leave empty.")
       .addText((t) => {
         t.setPlaceholder("Token").inputEl.type = "password";
         t.onChange((v) => { token = v; });
@@ -763,10 +765,10 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     new Setting(card)
       .setName("Base URL")
-      .setDesc("Self-hosted instance base URL (include /api/v4 if needed).")
+      .setDesc("Hosted account: API base URL. Local repository: file:///absolute/path/to/repo.git.")
       .addText((t) => {
         baseUrlInputEl = t.inputEl;
-        t.setPlaceholder("Base URL (optional, incl. /api/v4)").onChange((v) => { baseUrl = v.trim(); });
+        t.setPlaceholder("API URL or file:///absolute/path/to/repo.git").onChange((v) => { baseUrl = v.trim(); });
       });
 
     new Setting(card)
@@ -1089,19 +1091,25 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
                 }));
                 count += 1;
               }
+              if (count === 0) { new Notice("MUGS: no selected folder still matches this repository — refresh and choose again."); return; }
               new Notice(`MUGS: ${count} folder${count === 1 ? "" : "s"} connected. Apply settings to save.`);
             }
-            // U04: surface the direction/first-sync consequences BEFORE activation
-            // (the next successful Apply will make them real).
+            // A fresh connection must not start an unattended first pass as a
+            // side effect of Apply. Existing connections keep their chosen pause
+            // state; only the first mapping gets this one-time safety gate.
+            if (this.plugin.store.getSettings().mappings.length === 0) {
+              this.edit((d) => d.setSync({ paused: true }));
+            }
+            // Surface direction/first-sync consequences BEFORE activation.
             const consequence = direction === "pull-only"
               ? "Download only: repository files update this vault; your edits aren't uploaded."
               : direction === "push-only"
                 ? "Upload only: your files update the repository; repository changes aren't downloaded."
                 : "Both ways: upload and download changes. Conflicts need your review.";
             const first = this.view().sync.firstSyncDirection === "push"
-              ? "first sync will UPLOAD your vault folder to the remote (overwrites the remote path's content)."
-              : "first sync will DOWNLOAD the remote path into your vault folder (vault files there are replaced).";
-            new Notice(`MUGS — what happens after Apply:\n· ${consequence}\n· On a mapping's first sync, ${first}`, 12000);
+              ? "first sync starts by UPLOADING this device's eligible text files; unknown repository files stay for Review."
+              : "first sync starts by DOWNLOADING eligible repository text files; conflicts or unknown deletions need review.";
+            new Notice(`MUGS — what happens after Apply:\n· ${consequence}\n· ${first}${this.plugin.store.getSettings().mappings.length === 0 ? "\n· Automatic sync stays paused until you review the connection and resume it under Sync." : ""}`, 12000);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);

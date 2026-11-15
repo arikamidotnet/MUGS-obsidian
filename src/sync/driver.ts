@@ -173,7 +173,12 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
     ...extra,
   });
   const record = (o: SyncOutcome): void => { results.push(o); };
-  const skip = (mapping: FolderMapping, reason: string): void => { record(outcome(mapping, "skipped", { reason })); };
+  const skip = (mapping: FolderMapping, reason: string): void => {
+    // Persist the miss so the Overview cannot keep showing a stale "in sync"
+    // from an earlier successful pass (e.g. while the remote is unreachable).
+    deps.lastSync.recordSkipped?.(mapping.id, reason);
+    record(outcome(mapping, "skipped", { reason }));
+  };
 
   for (const mapping of deps.mappings) {
     const credential = deps.credentials.find((c) => c.id === mapping.providerId);
@@ -242,6 +247,7 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
       const result = await manager.syncMapping(mapping, repo, auth, sopts);
       if (result.kind === "blocked") {
         // S03: recoverable stop — surfaced, never silently retried into a reset.
+        deps.lastSync.recordSkipped?.(mapping.id, result.blockedReason ?? "blocked");
         record(outcome(mapping, "blocked", { reason: result.blockedReason, kind: result.kind, counts: result.counts }));
         continue;
       }
@@ -279,33 +285,36 @@ function errorMessage(error: unknown): string {
  */
 export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
   return {
-    lastRemoteSha: (id) => store.getSettings().lastSync[id]?.lastRemoteSha,
+    lastRemoteSha: (id) => store.getLastSync(id)?.lastRemoteSha,
     // Persist the git base SHA + a monotonic op id so an offline session resumes cleanly
     // from where it left off (resume.ts). baseSha is the pre-pull remote point we advance from.
     recordPull: (id, remoteSha) =>
-      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.lastRemoteSha ?? "", lastRemoteSha: remoteSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPullAt: Date.now() })),
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.lastRemoteSha ?? "", lastRemoteSha: remoteSha, opId: (cur.opId ?? 0) + 1, status: "ok", skipReason: undefined, lastPullAt: Date.now() })),
     recordPush: (id, localSha) =>
-      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", lastPushAt: Date.now() })),
-    recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict" })),
-    vaultPopulated: (id) => store.getSettings().lastSync[id]?.vaultPopulated,
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", skipReason: undefined, lastPushAt: Date.now() })),
+    recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict", skipReason: undefined })),
+    // Driver-level skip/blocked outcome: keep the row out of a stale "in sync".
+    recordSkipped: (id, reason) =>
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "pending", skipReason: reason.slice(0, 200) })),
+    vaultPopulated: (id) => store.getLastSync(id)?.vaultPopulated,
     recordVaultSync: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, vaultPopulated: true })),
     // Newest completed pull/push — the steady-state shortcut's mtime reference.
     lastCompletedAt: (id) => {
-      const s = store.getSettings().lastSync[id];
+      const s = store.getLastSync(id);
       const at = Math.max(s?.lastPullAt ?? 0, s?.lastPushAt ?? 0);
       return at > 0 ? at : undefined;
     },
     // Per-file fingerprints recorded at the last completed pass — the shortcut's
     // change detector pairs an old mtime with an EXACT stat match against this.
-    contentSnapshot: (id) => store.getSettings().lastSync[id]?.contentSnapshot,
+    contentSnapshot: (id) => store.getLastSync(id)?.contentSnapshot,
     recordContentSnapshot: (id, snap) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, contentSnapshot: snap })),
     // ADDITIVE (S01): durable pendingOps + proven correspondence round-trip through
     // the store so deferred work and the proven sync point survive restarts.
-    pendingOps: (id) => store.getSettings().lastSync[id]?.pendingOps,
+    pendingOps: (id) => store.getLastSync(id)?.pendingOps,
     recordPendingOps: (id, ops) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, pendingOps: ops })),
     recordCorrespondence: (id, sha) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, correspondenceSha: sha })),
     recordCloneDir: (id, dir) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, cloneDir: dir })),
-    reconciliation: (id) => store.getSettings().lastSync[id]?.reconciliation,
+    reconciliation: (id) => store.getLastSync(id)?.reconciliation,
     recordReconciliation: (id, reconciliation) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, reconciliation })),
     clearCorrespondence: (id) => persistLastSync(store, id, (cur) => ({ ...cur, correspondenceSha: undefined, vaultPopulated: false })),
   };
@@ -334,6 +343,6 @@ export function storeConflictAccessor(store: MugsStore): ConflictStore {
 
 /** Merge a mutation into the stored per-mapping last-sync state and write it back. */
 function persistLastSync(store: MugsStore, id: string, mutate: (current: LastSyncState) => LastSyncState): void {
-  const current: LastSyncState = store.getSettings().lastSync[id] ?? { mappingId: id };
+  const current: LastSyncState = store.getLastSync(id) ?? { mappingId: id, status: "pending" };
   store.setLastSync(mutate(current));
 }

@@ -32,6 +32,7 @@ import {
 } from "./crypto";
 import type {
   MugsSettings,
+  LastSyncState,
   FolderMapping,
   Credential,
   FileConflict,
@@ -52,6 +53,7 @@ export class MemoryIO implements SettingsIO {
   constructor(initial?: unknown) {
     this.data = initial ?? null;
   }
+
   async read(): Promise<unknown> {
     return this.data;
   }
@@ -85,6 +87,13 @@ export class MugsStore {
     // Clone the shared default so each store has its own mutable settings
     // (assigning by reference would let stores clobber one another's lastSync).
     this.settings = structuredClone(DEFAULT_SETTINGS);
+  }
+
+  private blockStagedMapping(id: string, reason: string): void {
+    const rollout = this.settings.sync.rollout;
+    if (rollout?.mode !== "staged" || !rollout.enabledMappingIds.includes(id)) return;
+    rollout.enabledMappingIds = rollout.enabledMappingIds.filter(candidate => candidate !== id);
+    rollout.blocked[id] = { reason, at: Date.now() };
   }
 
   /** Why the last load failed, when it did (corrupt/unreadable data.json). */
@@ -409,6 +418,15 @@ export class MugsStore {
     return structuredClone(this.settings);
   }
 
+  /** Scheduling needs configuration, never persisted note/conflict payloads. */
+  getAutomaticSettings(): Pick<MugsSettings, "sync" | "mappings"> {
+    return structuredClone({ sync: this.settings.sync, mappings: this.settings.mappings });
+  }
+
+  getLastSync(mappingId: string): LastSyncState | undefined {
+    return structuredClone(this.settings.lastSync[mappingId]);
+  }
+
   /** Settings with all tokens masked — safe to hand to the UI. */
   getDisplaySettings(): MugsSettings {
     const s = this.getSettings();
@@ -443,6 +461,11 @@ export class MugsStore {
     }
     // Metadata-only: keep the prior durable token; only the metadata fields change.
     const cred = isMetadataOnly && prior ? { ...input, token: prior.token } : { ...input };
+    if (prior && JSON.stringify(prior) !== JSON.stringify(cred)) {
+      for (const mapping of this.settings.mappings.filter(m => m.providerId === input.id)) {
+        this.blockStagedMapping(mapping.id, "account settings changed — recheck before automatic sync");
+      }
+    }
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
     if (!isMetadataOnly) {
@@ -454,6 +477,9 @@ export class MugsStore {
   }
 
   removeCredential(id: string): void {
+    for (const mapping of this.settings.mappings.filter(m => m.providerId === id)) {
+      this.blockStagedMapping(mapping.id, "account removed");
+    }
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== id);
     this.runtimeTokens.delete(id);
   }
@@ -462,23 +488,33 @@ export class MugsStore {
    *  obsidian config sync is enabled (Area 9), in which case a dedicated `.obsidian`
    *  scope mapping is allowed and per-path classification decides what is shared. */
   upsertMapping(mapping: FolderMapping): FolderMapping {
+    const prior = this.settings.mappings.find(m => m.id === mapping.id);
     assertMappingAllowed(
       this.settings.mappings,
       mapping.localFolder,
       this.settings.sync.obsidianConfig.enabled,
     );
+    if (prior && JSON.stringify(prior) !== JSON.stringify(mapping)) {
+      this.blockStagedMapping(mapping.id, "mapping changed — recheck before automatic sync");
+    }
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== mapping.id);
     this.settings.mappings.push(mapping);
     return structuredClone(mapping);
   }
 
   removeMapping(id: string): void {
+    this.blockStagedMapping(id, "mapping removed");
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== id);
     // Prune the mapping's keyed records so megabytes of stale conflict content
     // don't linger (and grow data.json) forever after a mapping is deleted.
     delete this.settings.lastSync[id];
     delete this.settings.conflicts[id];
     delete this.settings.staging[id];
+    const rollout = this.settings.sync.rollout;
+    if (rollout?.mode === "staged") {
+      delete rollout.blocked[id];
+      delete rollout.lastResult[id];
+    }
   }
 
   setLastSync(state: MugsSettings["lastSync"][string]): void {

@@ -21,8 +21,7 @@ export class BulkReview {
   detach(): void { this.closed = true; this.controller?.abort(); this.compareGeneration++; }
 
   render(root: HTMLElement): void {
-    root.createEl("h3", { text: "Bulk review" });
-    root.createEl("p", { text: "Analyze saved vault text to group exact-content candidates, filename-only matches and files without a match. No files are changed by analysis. Matching bytes do not prove a move; names never prove identity.", cls: "mugs-muted" });
+    root.createEl("p", { text: "1. Scan saved vault files for possible matches. 2. Choose one folder and group. 3. Inspect the batch and confirm one action. Scanning makes no changes; a match does not authorize deletion.", cls: "mugs-muted" });
     const analyze = root.createEl("button", { text: "Analyze review items", type: "button" });
     const cancel = root.createEl("button", { text: "Cancel analysis", type: "button" });
     cancel.hidden = true;
@@ -41,7 +40,7 @@ export class BulkReview {
       const controller = this.controller = new AbortController();
       void this.deps.analyze(controller.signal).then(analysis => {
         if (this.closed || controller.signal.aborted) return;
-        status.textContent = `${analysis.scanned} vault files scanned; ${analysis.skipped} skipped/unreadable. Results describe saved bytes at scan time.`;
+        status.textContent = `${analysis.entries.length} repository files to review. ${analysis.scanned} vault files attempted; ${analysis.skipped} skipped or unreadable${analysis.totalFiles === undefined ? "" : ` of ${analysis.totalFiles} visible files`}. ${analysis.limitsReached ? "Scan budget reached: no-match conclusions are inconclusive. " : ""}Results describe saved bytes at scan time.`;
         this.showAnalysis(body, analysis);
       }).catch(error => {
         if (!this.closed) status.textContent = controller.signal.aborted ? "Analysis cancelled. No decisions recorded." : `Analysis failed: ${String(error)}`;
@@ -54,11 +53,16 @@ export class BulkReview {
 
   private showAnalysis(root: HTMLElement, analysis: ReviewAnalysis): void {
     const summary = root.createDiv({ cls: "mugs-bulk-categories" });
+    summary.createEl("p", { text: "All folders · repository files, not vault files", cls: "mugs-muted mugs-bulk-scope" });
     for (const [category, label] of Object.entries(CATEGORY_LABELS)) {
       const card = summary.createDiv({ cls: "mugs-bulk-category" });
       card.createSpan({ text: String(analysis.entries.filter(entry => entry.category === category).length), cls: "mugs-bulk-count" });
       card.createSpan({ text: label, cls: "mugs-muted" });
     }
+    root.createEl("p", {
+      text: "Exact content: same saved bytes, not proof of a move. Filename only: name matches, contents may differ. No match: no saved vault file matched in a complete scan. Inconclusive: no match found, but skipped/unreadable vault files mean a match cannot be ruled out.",
+      cls: "mugs-muted",
+    });
     const controls = root.createDiv({ cls: "mugs-bulk-controls" });
     const labelSelect = (text: string) => {
       const label = controls.createEl("label");
@@ -70,16 +74,39 @@ export class BulkReview {
     for (const [id, label] of mappings) mapping.createEl("option", { text: label || id, attr: { value: id } });
     mapping.value = mappings.keys().next().value ?? "";
     const category = labelSelect("Category ");
-    for (const [id, label] of Object.entries(CATEGORY_LABELS)) category.createEl("option", { text: label, attr: { value: id } });
-    category.value = "exact";
+    const categories = Object.entries(CATEGORY_LABELS) as [ReviewCategory, string][];
+    const groupCount = (id: string, kind: ReviewCategory) =>
+      analysis.entries.filter(entry => entry.row.mappingId === id && entry.category === kind).length;
+    const refreshCategories = () => {
+      const previous = category.value;
+      category.empty();
+      for (const [id, label] of categories) {
+        category.createEl("option", { text: `${label} (${groupCount(mapping.value, id)})`, attr: { value: id } });
+      }
+      category.value = categories.some(([id]) => id === previous && groupCount(mapping.value, id)) ? previous
+        : categories.find(([id]) => groupCount(mapping.value, id))?.[0] ?? "exact";
+    };
+    refreshCategories();
     const action = labelSelect("Action ");
-    action.createEl("option", { text: "Add to vault (including Upload only)", attr: { value: "recover" } });
-    action.createEl("option", { text: "Delete from repository (backup first)", attr: { value: "delete" } });
+    action.createEl("option", { text: "Copy repository files into my vault", attr: { value: "recover" } });
+    action.createEl("option", { text: "Delete repository files for everyone (backup first)", attr: { value: "delete" } });
     action.value = "recover";
+    const actionHelp = root.createEl("p", { cls: "mugs-muted", attr: { role: "status" } });
+    const groupHelp = root.createEl("p", { cls: "mugs-muted", attr: { role: "status" } });
     const preview = controls.createEl("button", { text: "Preview batch", type: "button" });
     const pane = root.createDiv();
-    const invalidate = () => { if (!this.busy) pane.empty(); };
-    for (const select of [mapping, category, action]) select.addEventListener("change", invalidate);
+    const updateSelection = () => {
+      const count = groupCount(mapping.value, category.value as ReviewCategory);
+      groupHelp.textContent = `${count} repository file${count === 1 ? "" : "s"} in this folder and category${count > BULK_LIMIT ? `; select up to ${BULK_LIMIT} at once` : ""}.`;
+      actionHelp.textContent = action.value === "delete"
+        ? "Deletes these paths from the shared repository after a recovery backup. Other users are affected; a matching name or content is not consent."
+        : "Copies repository content to its mapped path in this vault, including Upload only. Existing possible matches at other paths are left untouched.";
+      preview.disabled = !count || this.busy;
+    };
+    const invalidate = () => { if (!this.busy) { pane.empty(); updateSelection(); } };
+    mapping.addEventListener("change", () => { refreshCategories(); invalidate(); });
+    for (const select of [category, action]) select.addEventListener("change", invalidate);
+    updateSelection();
     preview.addEventListener("click", () => {
       if (this.closed || this.busy || this.deps.blocked()) return;
       const generation = ++this.generation;
@@ -87,21 +114,37 @@ export class BulkReview {
       pane.empty();
       const entries = analysis.entries.filter(entry => entry.row.mappingId === mapping.value && entry.category === category.value as ReviewCategory);
       const chosenAction = action.value === "delete" ? "delete" : "recover";
-      if (!entries.length || entries.length > BULK_LIMIT) {
-        pane.createEl("p", { text: `Select a group containing 1–${BULK_LIMIT} files. No decisions recorded.` });
+      if (!entries.length) {
+        pane.createEl("p", { text: "Select a nonempty group. No decisions recorded." });
         return;
       }
       if (chosenAction === "delete" && entries.some(entry => entry.row.direction === "pull-only")) {
         pane.createEl("p", { text: "Download only: deleting repository files isn't allowed." });
         return;
       }
-      const rows = entries.map(entry => Object.freeze({ ...entry.row }));
-      pane.createEl("h4", { text: `${chosenAction === "delete" ? "Delete from repository" : "Add to vault"}: ${rows.length} files`, cls: "mugs-bulk-title" });
+      const selected = new Set(entries.slice(0, BULK_LIMIT));
+      pane.createEl("h4", { text: `${chosenAction === "delete" ? "Delete from shared repository" : "Copy into my vault"}: choose files`, cls: "mugs-bulk-title" });
       pane.createEl("p", { text: "One folder, one sync pass. The pass also processes this folder's other normal sync changes. Each file is rechecked; changed/held/open files remain pending or return to review. Analysis does not authorize deletion." });
+      if (entries.length > BULK_LIMIT) pane.createEl("p", { text: `First ${BULK_LIMIT} files selected. Deselect files to narrow the batch; remaining files can be handled in a later batch.`, cls: "mugs-muted" });
       const list = pane.createDiv({ cls: "mugs-bulk-preview", attr: { role: "list", "aria-label": "Files in this batch" } });
       const comparison = pane.createDiv({ cls: "mugs-bulk-comparison mugs-diff-view" });
-      for (const entry of entries) {
+      const selectionStatus = pane.createEl("p", { attr: { role: "status" } });
+      let confirmation: HTMLInputElement | undefined;
+      let apply: HTMLButtonElement | undefined;
+      const updateCount = () => {
+        selectionStatus.textContent = `${selected.size} of ${entries.length} repository files selected (maximum ${BULK_LIMIT}).`;
+        if (confirmation) confirmation.checked = false;
+        if (apply) apply.disabled = true;
+      };
+      for (const entry of entries.slice(0, BULK_LIMIT)) {
         const file = list.createDiv({ cls: "mugs-bulk-file", attr: { role: "listitem" } });
+        const pick = file.createEl("input", { type: "checkbox", attr: { "aria-label": `Select ${entry.row.path}` } });
+        pick.checked = true;
+        pick.addEventListener("change", () => {
+          if (pick.checked) selected.add(entry);
+          else selected.delete(entry);
+          updateCount();
+        });
         file.createEl("strong", { text: entry.row.path, cls: "mugs-bulk-file-path" });
         file.createEl("small", { text: `Repository commit ${entry.row.ref} · blob ${entry.row.blob}`, cls: "mugs-muted mugs-bulk-identity" });
         if (!entry.matches.length) file.createEl("span", { text: "No verified vault match", cls: "mugs-muted" });
@@ -129,25 +172,27 @@ export class BulkReview {
         if (entry.matchCount > entry.matches.length) file.createEl("span", { text: `${entry.matchCount - entry.matches.length} more matches not displayed`, cls: "mugs-muted" });
       }
       const label = pane.createEl("label");
-      const confirmation = label.createEl("input", { type: "checkbox" });
+      const confirmationInput = confirmation = label.createEl("input", { type: "checkbox" });
       confirmation.required = true;
       label.createSpan({ text: chosenAction === "delete"
-        ? `I approve deleting these ${rows.length} repository paths. Recovery backups are required first. This affects other users; matching names or bytes alone do not establish that these files are unwanted.`
-        : `I approve adding these ${rows.length} files to the vault, even in Upload only.` });
-      const apply = pane.createEl("button", { text: "Apply confirmed batch", type: "button" });
-      apply.disabled = true;
-      confirmation.addEventListener("change", () => { apply.disabled = !confirmation.checked || this.busy; });
+        ? "I approve deleting the selected repository paths. Recovery backups are required first. This affects other users; matching names or bytes alone do not establish that these files are unwanted."
+        : "I approve copying the selected repository files into my vault, even in Upload only. Possible matches at other paths will remain." });
+      const applyButton = apply = pane.createEl("button", { text: "Apply confirmed batch", type: "button" });
+      updateCount();
+      applyButton.disabled = true;
+      confirmationInput.addEventListener("change", () => { applyButton.disabled = !confirmationInput.checked || !selected.size || this.busy; });
       const cancel = pane.createEl("button", { text: "Cancel batch", type: "button" });
       let valid = true;
       cancel.addEventListener("click", () => { if (!this.busy) { valid = false; pane.empty(); } });
       // Changes to selectors invalidate even references to detached old buttons.
       for (const select of [mapping, category, action]) select.addEventListener("change", () => { valid = false; });
       const status = pane.createEl("p", { attr: { role: "status" } });
-      apply.addEventListener("click", () => {
-        if (this.closed || !valid || generation !== this.generation || this.busy || this.deps.blocked() || !confirmation.checked) return;
+      applyButton.addEventListener("click", () => {
+        if (this.closed || !valid || generation !== this.generation || this.busy || this.deps.blocked() || !confirmationInput.checked || !selected.size) return;
+        const rows = [...selected].map(entry => Object.freeze({ ...entry.row }));
         valid = false;
         this.busy = true;
-        for (const control of [mapping, category, action, preview, apply, cancel, confirmation]) control.disabled = true;
+        for (const control of [mapping, category, action, preview, applyButton, cancel, confirmationInput]) control.disabled = true;
         status.textContent = "Recording decisions and running guarded sync… Do not close Obsidian.";
         void this.deps.decide(rows, chosenAction).then(result => {
           if (this.closed) return;

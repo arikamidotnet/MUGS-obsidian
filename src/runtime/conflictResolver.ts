@@ -48,6 +48,8 @@ export interface ConflictResolverDeps {
   setConflicts: (mappingId: string, conflicts: FileConflict[]) => void;
   /** Record a durable retry entry when the transaction fails mid-way (never dropped). */
   recordRetry?: (mappingId: string, op: PendingOperation) => void;
+  /** Acquire the runtime's shared sync/review/resolution mutation boundary. */
+  acquire?: () => () => void;
   /** Epoch source (injectable for tests). */
   now?: () => number;
 }
@@ -72,7 +74,16 @@ export function createConflictResolver(deps: ConflictResolverDeps): ConflictReso
         retryable: true,
       });
     }
-    inFlight = run().finally(() => { inFlight = undefined; });
+    let release: (() => void) | undefined;
+    try {
+      release = deps.acquire?.();
+    } catch (error) {
+      return Promise.resolve({ ok: false, error: String(error), retryable: true });
+    }
+    inFlight = run().finally(() => {
+      inFlight = undefined;
+      release?.();
+    });
     return inFlight;
   };
 
@@ -110,8 +121,9 @@ async function runTransaction(
   }
 
   // safePath validation BEFORE any use of the path in file ops (contract §9).
-  try { checkRelPath(conflict.path); } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err), retryable: false };
+  const safe = checkRelPath(conflict.path);
+  if (!safe.ok) {
+    return { ok: false, error: `unsafe conflict path: ${safe.reason}`, retryable: false };
   }
 
   // Compute the resolved content up-front so originals can be staged first.

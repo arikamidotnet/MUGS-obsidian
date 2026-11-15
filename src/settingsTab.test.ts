@@ -160,7 +160,7 @@ function collectText(el: any): string {
 function makePlugin() {
   const settings = {
     version: 1,
-    credentials: [{ id: "c1", label: "Work", kind: "local", token: "secrettoken123" }],
+    credentials: [{ id: "c1", label: "Work", kind: "local", baseUrl: "file:///tmp/mugs-settings-test.git", token: "secrettoken123" }],
     mappings: [
       { id: "m1", label: "Notes", remotePath: "", localFolder: ".", providerId: "c1", direction: "push-pull" as const },
     ],
@@ -218,6 +218,7 @@ function makePlugin() {
   };
   return {
     store,
+    automaticSyncSettingsChanged: vi.fn(),
     app: { vault: { adapter: { list: async () => ({ folders: [] }) } } },
     manifest: { version: "0.3.8" },
   } as any;
@@ -443,6 +444,70 @@ describe("security section — passphrase controls", () => {
 });
 
 describe("add-mapping assistant", () => {
+  it("does not pause existing connections when another folder is linked", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().credentials[0].kind = "gitlab";
+    plugin.store.getSettings().mappings[0].localFolder = "Archive";
+    plugin.store.getSettings().mappings[0].remotePath = "Archive";
+    plugin.app.vault.adapter.list = async () => ({ folders: ["Notes"] });
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    await flush();
+
+    const row = tab.containerEl.querySelector(".mugs-match-row") as any;
+    expect(row).toBeTruthy();
+    const checkbox = row.children[0];
+    checkbox.checked = true;
+    checkbox.handlers.change[0]({ target: checkbox });
+    const connect = (function find(el: any): any {
+      if (el.tagName === "button" && el.textContent === "Connect selected folders") return el;
+      for (const child of el.children ?? []) {
+        const found = find(child);
+        if (found) return found;
+      }
+    })(tab.containerEl);
+    expect(connect).toBeTruthy();
+    connect.handlers.click[0]();
+    expect((tab as any).view().sync.paused).toBe(false);
+    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
+    await flush();
+    expect(plugin.store.getSettings().sync.paused).toBe(false);
+    expect(plugin.store.getSettings().mappings).toHaveLength(2);
+  });
+
+  it("stages a first connection paused before Apply so no unattended initial pass begins", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().mappings.splice(0);
+    plugin.store.getSettings().credentials[0].kind = "gitlab";
+    plugin.app.vault.adapter.list = async () => ({ folders: ["Notes"] });
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    await flush();
+
+    const row = tab.containerEl.querySelector(".mugs-match-row") as any;
+    expect(row).toBeTruthy();
+    const checkbox = row.children[0];
+    checkbox.checked = true;
+    checkbox.handlers.change[0]({ target: checkbox });
+    const findButton = (root: any, label: string): any => {
+      if (root.tagName === "button" && root.textContent === label) return root;
+      for (const child of root.children ?? []) {
+        const found = findButton(child, label);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    findButton(tab.containerEl, "Connect selected folders").handlers.click[0]();
+    expect((tab as any).view().sync.paused).toBe(true);
+    expect(plugin.store.getSettings().sync.paused).toBe(false);
+    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
+    await flush();
+    expect(plugin.store.getSettings().sync.paused).toBe(true);
+    expect(plugin.store.getSettings().mappings).toHaveLength(1);
+  });
+
   it("disables matched folders whose localFolder is already mapped, with a Mapped badge", async () => {
     const plugin = makePlugin();
     // REST provider so refreshMatches runs the name-match path.

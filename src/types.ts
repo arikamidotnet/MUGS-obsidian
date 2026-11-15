@@ -116,6 +116,14 @@ export interface SyncPolicy {
   recencyWins: boolean;
   /** Global maintenance pause (Area 8). While true, poll/event/auto-push/pull are suppressed. */
   paused: boolean;
+  /** Legacy mode preserves existing automatic behavior; staged mode only runs
+   * explicitly enabled mapping IDs. Missing state means legacy (upgrade-safe). */
+  rollout?: {
+    mode: "legacy" | "staged";
+    enabledMappingIds: string[];
+    blocked: Record<string, { reason: string; at: number }>;
+    lastResult: Record<string, { status: "ok" | "blocked"; at: number; reason?: string }>;
+  };
   /** Adaptive remote-drift poll interval in seconds (~300 default; UI presets refine it). */
   intervalSeconds: number;
   /** Which side wins a mapping's FIRST initialization (no lastSync baseline yet):
@@ -220,6 +228,12 @@ export interface PendingOperation {
   path: string;            // mapping-relative, safePath-validated
   content?: string;        // payload for vault-write (absent for delete/commit/push)
   refSha?: string;         // commit/push context
+  /** Engine retry provenance. Legacy records without this evidence are advisory,
+   *  never executable instructions. Reconciliation always replans current bytes. */
+  fingerprint?: string;
+  baseRef?: string;
+  preimage?: string;       // Git blob id of observed vault bytes, never cached intent
+  preimageAbsent?: boolean;
   state: "pending" | "applied-unverified" | "failed";
   createdAt: number;
   attempts: number;
@@ -330,6 +344,11 @@ export interface LastSyncState {
    *  (restored file, external edit) can no longer hide a content change. */
   contentSnapshot?: Record<string, [number, number]>;
   status: SyncStatus;
+  /** Why the last pass could not complete for this mapping (skipped/blocked
+   *  reason). Set by the driver; cleared on the next completed pull/push. Keeps
+   *  the Overview from showing a stale "in sync" while local work is unpublished
+   *  (e.g. the remote is unreachable). */
+  skipReason?: string;
 
   /** PROVEN vault↔repo correspondence. Advances ONLY after every planned vault
    *  application completed AND state persisted. Distinct from lastRemoteSha

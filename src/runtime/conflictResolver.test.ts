@@ -69,6 +69,20 @@ function makeDeps(overrides: Partial<ConflictResolverDeps> = {}, saveResult?: Sa
 }
 
 describe("S07 manual resolution transaction", () => {
+  it("rejects unsafe stored paths before any filesystem mutation", async () => {
+    const unsafe = { ...storedConflict(), path: "../escape.md" };
+    const { deps, log } = makeDeps({ getConflicts: () => [unsafe] });
+    const result = await createConflictResolver(deps).forMapping("m1")(unsafe, "ours");
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(log).toEqual([]);
+  });
+
+  it("refuses a shared busy boundary before reading or writing files", async () => {
+    const { deps, log } = makeDeps({ acquire: () => { throw new Error("sync busy"); } });
+    expect(await createConflictResolver(deps).forMapping("m1")(storedConflict(), "ours"))
+      .toMatchObject({ ok: false, retryable: true });
+    expect(log).toEqual([]);
+  });
   it("applies in contract order: originals first, then clone→vault→state clear→save", async () => {
     const { deps, log, cloneTree, vaultTree, trash, conflicts } = makeDeps();
     const resolver = createConflictResolver(deps).forMapping("m1");

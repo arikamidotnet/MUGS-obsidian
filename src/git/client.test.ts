@@ -22,7 +22,7 @@ describe("GitClient — command construction", () => {
   it("passes the working directory to every command", async () => {
     const r = new FakeRunner(() => ({ code: 0, stdout: "", stderr: "" }));
     await client(r, "/clones/notes").clone("https://gitlab.com/x/notes.git", "/clones/notes");
-    expect(last(r).opts).toEqual({ cwd: "/clones/notes" });
+    expect(last(r).opts).toMatchObject({ cwd: "/clones/notes", timeoutMs: 600_000 });
   });
 
   it("clones with url and dir", async () => {
@@ -144,7 +144,7 @@ describe("GitClient — HTTP(S) credentials", () => {
     const plain = client(r).at("/c/y");
     await plain.revParse("HEAD");
     expect(last(r).args).toEqual(["rev-parse", "HEAD"]);
-    expect(last(r).opts).toEqual({ cwd: "/c/y" });
+    expect(last(r).opts).toMatchObject({ cwd: "/c/y", timeoutMs: 120_000 });
   });
 
   it("throws readable errors that omit the credential-helper prefix", async () => {

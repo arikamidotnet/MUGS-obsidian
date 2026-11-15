@@ -7,12 +7,57 @@ Obsidian 1.8.0 or newer.
 Development requires Node 20.19+ (CI pins 20.20.2). Release dependencies are
 locked; use `npm ci` for repeatable installs.
 
+## Start here
+
+- [Install MUGS (BRAT or manual), connect your first folder and verify automatic sync](docs/getting-started.md)
+- [Set up a GitLab account and project](docs/gitlab.md)
+- [Set up a GitHub account and repository](docs/github.md)
+- [Roll out to a team safely: staged enablement, canaries and the Obsidian Sync comparison](docs/rollout.md)
+
+BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
+**not** from this GitLab source repository or an unpublished local candidate.
+The latest verified publication when these instructions were written is 0.4.3.
+Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.3 highlights
+
+- **Staged rollout with guarded canaries.** The new Preflight & rollout page
+  switches a vault to staged mode — every folder stops automatic syncing until
+  individually enabled — and offers a one-shot canary per folder: a real
+  targeted sync pass whose outcome *and durable state* must be verifiably clean
+  (no conflicts, deferred changes, pending work or review backlog) and persisted
+  before the folder joins automatic sync. Failures fail closed with the reason
+  recorded; rollout decisions that cannot be saved pause automatic sync instead
+  of running on an unpersisted decision. (`src/ui/preflightView.ts`,
+  `src/runtime/rollout.ts`, `src/runtime/preflight.ts`)
+- **Multi-client soak evidence.** A new release-gate test runs two full
+  independent clients against one shared repository: distinct and
+  non-overlapping edits converge automatically on both sides, same-region
+  conflicts surface with both sides intact (never silently merged, never lost),
+  one-click resolution converges everyone, deletions propagate, and converged
+  passes are verified no-ops. (`src/sync/multi-client.e2e.test.ts`)
+- **Review analysis sized for real vaults.** Scan budgets rose to 20,000 files,
+  8 MiB per file and 512 MiB total so a company vault can complete a scan;
+  budget-limited scans still report unmatched results as inconclusive, never as
+  proof of absence. (`.apk` also joined the binary-extension guard.)
+- Revision-bound recovery and guarded deletion handling prevent stale deferred
+  work or remote-delete/local-modify races from silently losing vault content.
+- Git subprocess cancellation, exclusive clone ownership and safer adapter path
+  handling block concurrent or out-of-scope mutations.
+- Status reports surface pending/blocked work; remote-edit reconciliation batches
+  immutable blob reads without bypassing startup uncertainty checks.
+- The Review tab prioritizes individual preview; optional bulk analysis explains
+  its counts, folder scope and the consequences of each action.
+- Desktop only. Attachments, settings/plugin sync, mobile and end-to-end vault
+  encryption are not supported; MUGS is not an Obsidian Sync replacement claim —
+  see [the comparison](docs/rollout.md) for what matches and what differs.
+
 ## 0.4.2 highlights
 
 - Bulk repository-file review: on-demand read-only analysis groups review entries
   into exact-content duplicate/move candidates, filename-only candidates, no
   matching vault file and inconclusive scans — with bounded, cancellable scanning.
-- Batch decisions with full previews: pick a folder, category and action, inspect
+- Batch decisions with path lists: pick a folder, category and action, inspect
   every repository path/revision and vault candidate, optionally open a lazy
   vault-to-repository line comparison using the same diff UI as Conflicts/Changes,
   then confirm explicitly.
@@ -45,8 +90,9 @@ purely git-native.
 - **Fine-grained folder sync.** Each mapping ties a remote path to a vault folder, so different
   users can share one repo while syncing only the folders relevant to them.
 - **Credentials live in the vault**, not the OS keychain. Tokens can be encrypted
-  at rest (`data.json`). `.obsidian/` syncing requires explicit opt-in and scope
-  policy; credential-bearing plugin data must stay excluded.
+  at rest (`data.json`). Configuration-directory sync is not fully implemented;
+  an opt-in control is not a guarantee that `.obsidian/` files are synchronized.
+  Credential-bearing plugin data must stay excluded.
 - **Declarative data plane (ADL).** The entire persisted settings object is defined by a single Zod
   schema (`src/schema.ts`) — the single source of truth. TS types are derived from it.
 - **Recoverable conflicts.** Clean three-way changes merge automatically; genuinely
@@ -91,7 +137,8 @@ Implemented features:
 - **Overview** (`mugs-map`, the ribbon default). One aligned row per connected
   folder — folder, direction, repository, last sync times and honest status —
   with Sync now, Review files and Settings actions, plus shared
-  Overview / Changes / Review / Conflicts navigation on every page. (`src/ui/mapView.ts`, `src/ui/navigation.ts`)
+  Overview / Changes / Review / Preflight / Conflicts navigation on every
+  page. (`src/ui/mapView.ts`, `src/ui/navigation.ts`)
 - **Changes view** (`mugs-diff`). Select a folder and comparison mode, then
   browse changed files with addition/deletion counts, line numbers, collapsible
   changes, and file-level Git author names where available. Compact cards state
@@ -114,20 +161,25 @@ Implemented features:
 - **Settings controls.** Manage credentials and folder mappings, with explicit
   Apply/Cancel drafts and validation of protected configuration scopes.
 
-Also shipped: first-sync policy, identity-keyed clone sharing with advisory
+Also shipped: first-sync policy, identity-keyed clone sharing with exclusive
 cross-process clone locks, event-driven sync (file changes coalesce into a pass
 within ~1.5 s; a gated poll — presets 3600 s / 300 s / 30 s, default 300 s, on a
 15 s tick — covers remote drift), a clickable status bar, opt-in passphrase
 encryption, serialized settings saves, cancellation on plugin unload, and the
 repository-file Review tab (the user surface for reconciliation review rows,
 with a file list, preview pane and explicit per-file decisions).
+- **Preflight & staged rollout** (`mugs-preflight`). Saved-evidence readiness
+  per folder, staged mode (nothing automatic until explicitly enabled), the
+  guarded one-shot canary, durable enable/disable with fail-closed persistence,
+  and one-click disable. (`src/ui/preflightView.ts`, `src/runtime/rollout.ts`)
 
-Remaining work (not claiming completeness): mobile support (desktop-only for
-now); per-hunk blame granularity; surfacing blocked and deferred outcomes in
-the status-bar aggregate (manual runs announce review items and the Review
-tab surfaces them, but automatic runs and the status-bar report still ignore
-blocked/deferred counts); agent worktree isolation (pure module exists,
-unwired); a view for the membership data layer.
+Remaining work (not claiming completeness): binary attachment and full
+configuration-directory synchronization, mobile support (desktop-only for now),
+vault-content end-to-end encryption, accessible bulk history/restore, per-hunk
+blame granularity, agent worktree isolation (pure module exists, unwired) and a
+view for the membership data layer. Multi-client behavior is pinned by the
+driver-level soak; per-vault, in-app canary evidence on production mappings
+remains part of the rollout checklist for each team.
 
 ## Sync flow and directions (current behavior)
 
@@ -208,7 +260,8 @@ unwired); a view for the membership data layer.
 
 ### Bulk repository-file review
 
-Open **Review → Analyze review items**. Analysis is read-only and on demand:
+Open **Review → Review multiple files (optional) → Analyze review items**.
+Analysis is read-only and on demand:
 it hashes saved vault text once and groups repository review entries into
 exact-content duplicate/move candidates, filename-only candidates, no matching
 vault file, or an inconclusive scan. Exact bytes do not prove a move or that the
@@ -230,11 +283,12 @@ applied, re-queued and pending counts. Refresh/analyze again after a batch. Batc
 are not atomic; saved pending decisions can resume on a later sync. A persistence
 failure is reported rather than being presented as success.
 
-The analyzer scans up to 10,000 eligible text files, 2 MiB per file and 64 MiB
-total. Unreadable, binary or budget-skipped content is not treated as proof of
-absence; unmatched results become inconclusive if the scan was incomplete.
-Only saved bytes are compared, not unsaved editor buffers. No batch is applied
-automatically, and no existing ownership evidence is upgraded by analysis.
+The analyzer scans up to 20,000 eligible text files, 8 MiB per file and 512 MiB
+total — sized so a real company vault completes a scan. Unreadable, binary or
+budget-skipped content is not treated as proof of absence; unmatched results
+become inconclusive if the scan was incomplete. Only saved bytes are compared,
+not unsaved editor buffers. No batch is applied automatically, and no existing
+ownership evidence is upgraded by analysis.
 
 - When a mapping shows "needs merge" / conflict status, open the Conflicts panel (via status bar click or dedicated view) and choose per file: ours / theirs / both.
 - When the **Review tab** lists paths (remote files this vault never
@@ -263,7 +317,7 @@ automatically, and no existing ownership evidence is upgraded by analysis.
 - Always keep a backup of the vault and the shared remote before large syncs or conflict resolution.
 - Live diagnostics are excluded from routine tests. Never run a second sync
   process against a vault owned by the running plugin: each clone carries an
-  advisory lock file, and the plugin reports a blocked outcome rather than
+  exclusive lock file, and the plugin reports a blocked outcome rather than
   compete with another process.
 
 ### Upgrade and rollback
@@ -279,11 +333,10 @@ blindly restoring an old vault tree. Never force-push as an automatic recovery.
 
 ## Installing into Obsidian
 
-1. `npm install && npm run build`
-2. Copy `main.js`, `manifest.json`, and `styles.css` into
-`.obsidian/plugins/mugs-obsidian/`.
-3. Enable **MUGS — Multi-User Git Sync** in Community plugins (or install via [BRAT](https://github.com/TfTHacker/obsidian42-brat)
-from the public repo).
+For a published version, follow the [BRAT and manual installation guide](docs/getting-started.md).
+Developers may run `npm ci && npm run build` in a separate source checkout and
+copy `main.js`, `manifest.json` and `styles.css` into
+`<vault>/.obsidian/plugins/mugs-obsidian/`; this does not publish a release.
 
 ## Phases
 
@@ -294,11 +347,11 @@ from the public repo).
 - **Phase 3:** multi-user membership view data layer (roster + local activity -> summary), visibility only. `✅`
 - **Phase 4:** Map & Diff Obsidian views — folder->repo graph and Diff with baseline comparison, with store/git-backed data seams; sync driver wired to the ribbon + *Run sync* command; add/delete credentials and mappings in Settings. `✅`
 - **Phase 5:** file-level 3-way merge + durable, resolvable conflicts. `✅`
-- **Later:** mobile support (desktop-only — the engine uses node:fs + the system git binary), device-flow auth, per-hunk blame, surfacing blocked/deferred outcomes in the status bar and Notices, agent worktree isolation, a membership view.
+- **Later:** mobile support (desktop-only — the engine uses node:fs + the system git binary), device-flow auth, per-hunk blame, agent worktree isolation, a membership view.
 
 ## Security notes
 
-Credentials are stored in the vault's `data.json`. When you enable **Encrypt credentials at rest**
+Credentials are stored in the vault's `data.json`. When you enable **Encrypt saved tokens**
 (Settings → Security), tokens are encrypted at rest with a passphrase you choose; the
 passphrase is never stored in the vault and cannot be recovered. Encryption is **off by default** —
 without it tokens are stored as-is, so treat the vault with the same care you would a password
@@ -308,13 +361,17 @@ never credentials.
 
 ## Teammate quickstart
 
-1. Install: copy `main.js`, `manifest.json`, `styles.css` into `.obsidian/plugins/mugs-obsidian/`
-(or add the repo via [BRAT](https://github.com/TfTHacker/obsidian42-brat)). **Desktop Obsidian only.**
-2. Settings → MUGS → Accounts: add your GitLab PAT (needs `api` scope + access to the shared repo),
-your username, and optionally restrict the token to that repo.
-3. Folder Mappings: pick your credential → the shared repo → check your folders → choose direction.
-Agree with your team on the **first-sync direction** before the first run (pull populates your
-vault from the remote by default; push uploads the vault onto it, additively).
+1. [Install and start safely](docs/getting-started.md), using the [GitLab](docs/gitlab.md)
+   or [GitHub](docs/github.md) token walkthrough. **Desktop Obsidian only.**
+2. In Settings → MUGS → Accounts, add your own token, then in Connected folders
+   choose the repository, check the intended matched folders and select direction.
+   Press Connect selected folders and **Apply settings**. The 0.4.3 candidate
+   pauses a *first* mapping automatically; for the published 0.4.2 version,
+   pause explicitly before connecting when a guarded first run is needed.
+3. Review the mapping, backup and Start new connections with setting; unpause and
+   Apply only when safe. Background sync then runs without a routine Sync now click.
+   Teams preferring per-folder enablement can use the
+   [Preflight & staged rollout](docs/rollout.md) flow instead of a global unpause.
 4. Watch the status bar: `⟳` while syncing (with live phase text), `✓ synced HH:MM`, `⚠ needs merge`,
 `✗ sync issues` / `✗ failed`, `⏸ paused`, `👁 hidden`. **Clicking it** opens the Conflicts panel when
 something needs a manual merge; the Review tab when repository files need decisions; otherwise the

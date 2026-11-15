@@ -95,9 +95,8 @@ describe("GitHubProvider — getMembers", () => {
     const members = await provider(t).getMembers("team/notes");
     expect(members).toHaveLength(1);
     expect(members[0]).toMatchObject({ id: "ada", username: "ada", name: "Ada", role: "maintainer" });
-    // Namespaced repo path is URL-encoded in both the list and per-user paths.
-    expect(t.calls[0].url).toBe("https://api.github.com/repos/team%2Fnotes/collaborators?per_page=100");
-    expect(t.calls[1].url).toBe("https://api.github.com/repos/team%2Fnotes/collaborators/ada/permission");
+    expect(t.calls[0].url).toBe("https://api.github.com/repos/team/notes/collaborators?per_page=100");
+    expect(t.calls[1].url).toBe("https://api.github.com/repos/team/notes/collaborators/ada/permission");
   });
 
   it("defaults to guest when the permission lookup fails", async () => {
@@ -111,9 +110,8 @@ describe("GitHubProvider — getMembers", () => {
 });
 
 describe("GitHubProvider — getBranches", () => {
-  it("marks the default branch and computes canPush from protection + access level", async () => {
+  it("marks the default branch and computes canPush from protection + repository permission", async () => {
     const t = new FakeTransport((url) => {
-      if (url.endsWith("/access-level")) return { status: 200, body: { role: "write" } };
       // Route the branches list before the bare repo GET (both contain "/repos/").
       if (url.includes("/branches"))
         return {
@@ -123,24 +121,34 @@ describe("GitHubProvider — getBranches", () => {
             { name: "release", protected: true },
           ],
         };
-      return { status: 200, body: { id: 1, default_branch: "main" } };
+      return { status: 200, body: { id: 1, default_branch: "main", permissions: { push: true } } };
     });
     const branches = await provider(t).getBranches("team/notes");
     expect(branches).toEqual([
       { name: "main", protected: false, default: true, canPush: true },
       { name: "release", protected: true, default: false, canPush: false },
     ]);
+    expect(t.calls.map((c) => c.url)).toEqual([
+      `${BASE}/repos/team/notes`,
+      `${BASE}/repos/team/notes/branches?per_page=100`,
+    ]);
   });
 
   it("blocks pushes for a read-only acting user", async () => {
     const t = new FakeTransport((url) => {
-      if (url.endsWith("/access-level")) return { status: 200, body: { role: "read" } };
       // Route the branches list before the bare repo GET.
       if (url.includes("/branches")) return { status: 200, body: [{ name: "main", protected: false }] };
-      return { status: 200, body: { default_branch: "main" } };
+      return { status: 200, body: { default_branch: "main", permissions: { push: false } } };
     });
     const branches = await provider(t).getBranches("t/n");
     expect(branches[0].canPush).toBe(false);
+  });
+
+  it("does not assume push access when GitHub omits permissions", async () => {
+    const t = new FakeTransport((url) =>
+      url.includes("/branches") ? { status: 200, body: [{ name: "main", protected: false }] }
+        : { status: 200, body: { default_branch: "main" } });
+    expect((await provider(t).getBranches("team/notes"))[0].canPush).toBe(false);
   });
 
   it("throws on a non-2xx response fetching the repo", async () => {
@@ -152,9 +160,8 @@ describe("GitHubProvider — getBranches", () => {
 describe("GitHubProvider — allowed repos", () => {
   it("synthesizes an allowed repo without calling /user/repos", async () => {
     const t = new FakeTransport((url) => {
-      if (url.endsWith("/access-level")) return { status: 200, body: { role: "write" } };
       if (url.includes("/branches")) return { status: 200, body: [{ name: "main", protected: false }] };
-      return { status: 200, body: { id: 1, default_branch: "main" } };
+      return { status: 200, body: { id: 1, default_branch: "main", permissions: { push: true } } };
     });
     const p = new GitHubProvider({ baseUrl: BASE, token: "t", allowedRepos: ["team/notes"], transport: t });
     const repos = await p.listRepos();
@@ -164,9 +171,34 @@ describe("GitHubProvider — allowed repos", () => {
     expect(t.calls.some((c) => c.url.includes("/user/repos"))).toBe(false);
   });
 
-  it("falls back to an empty default branch when branches cannot be resolved", async () => {
+  it("reports an inaccessible allow-listed repository rather than creating a broken mapping", async () => {
     const t = new FakeTransport(() => ({ status: 500, body: {} }));
     const p = new GitHubProvider({ baseUrl: BASE, token: "t", allowedRepos: ["o/r"], transport: t });
-    expect((await p.listRepos())[0]).toMatchObject({ id: "o/r", name: "r", pathWithNamespace: "o/r", httpUrlToRepo: "https://github.com/o/r.git", defaultBranch: "" });
+    await expect(p.listRepos()).rejects.toThrow(/GitHub 500/);
+  });
+
+  it("rejects ambiguous repository paths before making a request", async () => {
+    const t = new FakeTransport(() => ({ status: 200, body: [] }));
+    await expect(provider(t).getBranches("team/../notes")).rejects.toThrow(/owner\/repo/);
+    expect(t.calls).toHaveLength(0);
+  });
+});
+
+describe("GitHubProvider — directory discovery", () => {
+  it("uses repository path segments and an actual contents path, never a path query", async () => {
+    const t = new FakeTransport(() => ({ status: 200, body: [
+      { type: "dir", name: "journal" }, { type: "file", name: "readme.md" },
+    ] }));
+    expect(await provider(t).listDirectories("team/notes", "Team Notes/2026")).toEqual(["journal"]);
+    expect(t.calls[0].url).toBe(`${BASE}/repos/team/notes/contents/Team%20Notes/2026`);
+    await provider(t).listDirectories("team/notes");
+    expect(t.calls[1].url).toBe(`${BASE}/repos/team/notes/contents`);
+  });
+
+  it("fails closed for a missing directory or an unsafe path", async () => {
+    const t = new FakeTransport(() => ({ status: 404, body: { message: "Not Found" } }));
+    await expect(provider(t).listDirectories("team/notes", "missing")).rejects.toThrow(/GitHub 404/);
+    await expect(provider(t).listDirectories("team/notes", "../private")).rejects.toThrow(/safe repository directory/);
+    expect(t.calls).toHaveLength(1);
   });
 });

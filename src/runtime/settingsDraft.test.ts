@@ -109,6 +109,14 @@ describe("SettingsDraft — validation of the COMPLETE draft", () => {
     const problems = d.validate();
     expect(problems.length).toBe(2);
   });
+
+  it("accepts tokenless local repositories with a file URL and rejects a missing path", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({ id: "local", label: "Local", kind: "local", token: "", baseUrl: "file:///tmp/test.git" });
+    expect(d.validate()).toEqual([]);
+    d.upsertCredential({ id: "local", label: "Local", kind: "local", token: "" });
+    expect(d.validate().some((p) => p.includes("file://"))).toBe(true);
+  });
 });
 
 describe("SettingsDraft — commit semantics", () => {
