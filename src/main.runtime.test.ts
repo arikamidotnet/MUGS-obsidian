@@ -331,6 +331,30 @@ describe("MugsPlugin runtime (E05) — realistic stubs + fake timers", () => {
     expect(p.tickSync).toHaveBeenCalledTimes(2);
     expect(p.tickSync).toHaveBeenCalledWith(true);
   });
+
+  it("a rename OUT of a mapped folder still schedules a pass via the old path", async () => {
+    const p = new (await loadPlugin())();
+    p.store = { getSettings: () => ({
+      sync: { paused: false, intervalSeconds: 300 },
+      mappings: [{ id: "m1", localFolder: "Notes", remotePath: "Notes", providerId: "c1", direction: "push-pull" }],
+      lastSync: {},
+    }) };
+    p.hidden = false;
+    p.tickSync = vi.fn(async () => {});
+
+    // New path outside every mapping, old path inside: the deletion at the old
+    // location must trigger the event-driven pass, not wait for the next poll.
+    p.onVaultRename("Outside/b.md", "Notes/a.md");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.tickSync).toHaveBeenCalledWith(true);
+
+    // Neither path mapped: nothing is scheduled.
+    p.tickSync.mockClear();
+    p.dirtySince = undefined;
+    p.onVaultRename("Outside/b.md", "Elsewhere/c.md");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(p.tickSync).not.toHaveBeenCalled();
+  });
 });
 
 // --- Staged rollout control: one-shot canary + durable decisions ------------

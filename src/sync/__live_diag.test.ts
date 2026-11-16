@@ -35,6 +35,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
+import { BINARY_EXTENSIONS } from "./exclusion";
 import { MugsStore, MemoryIO } from "../store";
 import { ChildProcessRunner } from "../git/runner";
 import { buildProvider } from "../providers/factory";
@@ -44,13 +45,6 @@ import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 const VAULT = "/home/arikami/Documents/FBR-WRK";
 const DATA = `${VAULT}/.obsidian/plugins/mugs-obsidian/data.json`;
 const CLONE_ROOT = `${VAULT}/.mugs-clones`;
-
-/** Same binary-extension skip the plugin's mirror applies (main.ts). */
-const BINARY_EXTENSIONS = new Set([
-  "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
-  "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
-  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "Drawing",
-]);
 
 /** Recursive walk matching Obsidian's getFiles(): skips dot entries, returns vault-relative paths. */
 function walk(absDir: string, prefix = ""): string[] {

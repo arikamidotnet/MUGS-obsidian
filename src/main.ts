@@ -34,7 +34,7 @@ import { buildProvider } from "./providers/factory";
 import { ChildProcessRunner } from "./git/runner";
 import { GitClient } from "./git/client";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
-import { resolveMappingForPath, normalizePath } from "./sync/exclusion";
+import { BINARY_EXTENSIONS, resolveMappingForPath, normalizePath } from "./sync/exclusion";
 import { decideRun } from "./sync/schedule";
 import type { VaultMirror, WorkingTreeWriter } from "./sync/cloneManager";
 import { cloneDir } from "./sync/cloneManager";
@@ -77,14 +77,6 @@ const EVENT_DEBOUNCE_MS = 20_000;
 /** Short coalesce window so bursts coalesce but a sync triggers within a short delay,
  *  not gated behind the full long debounce or the poll interval (per contract E05). */
 const EVENT_COALESCE_MS = 1500;
-
-/** Extensions the vault mirror skips — the sync layer moves text, not binaries. */
-const BINARY_EXTENSIONS = new Set([
-  "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
-  "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
-  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "apk", "aseprite",
-  "Drawing",
-]);
 
 /** Status-bar states the plugin cycles through. */
 type BarState = "idle" | "syncing" | "synced" | "conflict" | "skipped" | "error" | "paused" | "hidden";
@@ -260,8 +252,8 @@ export default class MugsPlugin extends Plugin {
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass("mod-clickable");
     // Clicking the status routes to the surface that needs attention: the
-    // Conflicts panel when something needs a manual merge, otherwise the Diff
-    // view showing what the last sync did.
+    // Conflicts panel when something needs a manual merge, then the Review tab
+    // when entries are queued, otherwise the Overview.
     this.statusEl.addEventListener("click", () => this.onStatusBarClick());
     this.updateStatusBar(this.lastSyncedAt ? "synced" : "idle");
     this.startScheduler();
@@ -275,8 +267,7 @@ export default class MugsPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", (file) => this.onVaultChange(file.path, "create")));
     this.registerEvent(this.app.vault.on("delete", (file) => this.onVaultChange(file.path, "delete")));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-      // Treat rename as a modification of the new path (oldPath may be relevant too).
-      this.onVaultChange(file.path, "rename");
+      this.onVaultRename(file.path, oldPath);
     }));
     // Rebuild the editor-open set from REAL events so the write-back guard can
     // actually hold paths. The old wiring used a nonexistent "open-changed" event
@@ -1268,6 +1259,15 @@ export default class MugsPlugin extends Plugin {
     }, Math.max(0, Math.min(EVENT_COALESCE_MS, EVENT_DEBOUNCE_MS - (now - this.dirtySince))));
   }
 
+  /** A vault file was renamed. The new path schedules a pass like any change;
+   *  the OLD path is checked too, because a rename OUT of a mapped folder is a
+   *  deletion INSIDE it — without this the removal waits for the next poll
+   *  instead of the event-driven pass. */
+  private onVaultRename(path: string, oldPath: string): void {
+    this.onVaultChange(path, "rename");
+    if (oldPath && oldPath !== path) this.onVaultChange(oldPath, "rename");
+  }
+
   /** Rebuild the editor-open set from every file currently open in a view.
    *  Conservative rule: ANY open file is treated as write-unsafe (mirrorPull skips
    *  it; the next pass catches up once closed) — real dirtiness detection does not
@@ -1335,8 +1335,8 @@ export default class MugsPlugin extends Plugin {
   }
 
   /** Clicking the status item routes to the surface that needs attention: the
-   *  Conflicts panel when any mapping has unresolved conflicts, else the Diff view
-   *  (per-mapping last-sync state and what changed). */
+   *  Conflicts panel when any mapping has unresolved conflicts, else the Review
+   *  tab when entries are queued, else the Overview (per-mapping state). */
   private onStatusBarClick(): void {
     const s = this.store.getSettings();
     const hasConflicts = Object.values(s.conflicts).some((list) => list.some((c) => !c.resolved));

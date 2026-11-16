@@ -282,13 +282,13 @@ export class DiffView extends ItemView {
     }
   }
 
-  /** Resolve one file's conflict, persist it (working-tree write + store), then re-render. */
   /** Paths currently resolving for this view (U03: whole group disabled until promise settles). */
   private resolvingByMapping: Record<string, Set<string>> = {};
   private get resolving(): Set<string> {
     return this.resolvingByMapping[this.selectedMappingId] ??= new Set();
   }
 
+  /** Resolve one file's conflict, persist it (working-tree write + store), then re-render. */
   private async resolveFile(c: FileConflict, choice: ResolveChoice): Promise<void> {
     const mappingId = this.selectedMappingId;
     const busy = this.resolving;

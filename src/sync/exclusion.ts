@@ -214,3 +214,23 @@ export function shouldSync(path: string, rules: ExclusionRules): boolean {
   if (!matchesAnyInclude(path, rules.includes)) return false;
   return !new GitignoreMatcher(rules.excludes).isExcluded(path);
 }
+
+/**
+ * Extensions the sync layer never moves — the mirror transports text, not
+ * binaries. Canonical single source: the plugin's vault mirror (main.ts) and
+ * every live-test mirror import this set, so the guard cannot drift between
+ * the plugin and its diagnostics. All entries MUST be lowercase: every lookup
+ * lowercases the file extension before checking membership (a capitalized
+ * entry — the former "Drawing" — can never match).
+ */
+export const BINARY_EXTENSIONS: ReadonlySet<string> = new Set([
+  "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
+  "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
+  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "apk", "aseprite",
+  "drawing",
+]);
+
+/** True when a file extension is on the binary guard (case-insensitive). */
+export function isBinaryExtension(ext: string): boolean {
+  return BINARY_EXTENSIONS.has(ext.toLowerCase());
+}

@@ -14,16 +14,10 @@ import type { GitResult, GitRunner, GitRunOpts } from "./types";
 /** Captured-output cap per git invocation. Node's 1MB default kills the child
  *  mid-command once stdout/stderr crosses it — e.g. `git show` of a large file or
  *  a diff over a big tree — which surfaces as a phantom "could not run" failure.
- *  256MB comfortably covers file reads while keeping a runaway command bounded. */
+ *  256MB comfortably covers file reads while keeping a runaway command bounded.
+ *  Smaller per-operation caps (64MB default, 16MB blob) were proposed but never
+ *  enforced; every operation retains this single accepted PER STREAM limit. */
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
-
-/** Historical suggested caps, not enforced: all operations retain the accepted
- *  256MiB PER STREAM limit. Applying these smaller values would change behavior. */
-export const OP_CAPS = {
-  clone: MAX_OUTPUT_BYTES,
-  default: 64 * 1024 * 1024, // 64MB for typical log/diff/status
-  blob: 16 * 1024 * 1024, // 16MB for individual blob reads (show)
-} as const;
 
 /** Copy into bounded blocks once, then join once at completion (not per event).
  * Fixed blocks also bound metadata if a process dribbles one byte per event.

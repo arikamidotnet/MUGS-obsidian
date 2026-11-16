@@ -14,7 +14,7 @@ The guiding architectural invariant, repeated throughout, is:
 
 > **All correctness-sensitive logic lives in pure, dependency-free, unit-tested modules under `src/sync/` (and a few under `src/ui/`, `src/providers/`, `src/membership/`). The Obsidian/glue layer (`main.ts`, `settingsTab.ts`, the views) is thin: it wires injected seams and renders data — it never contains merge, scope, or policy logic.**
 
-This invariant is what makes the vitest suite (977 tests across 83 files at 0.4.7, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
+This invariant is what makes the vitest suite (980 tests across 83 files at 0.4.7, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
 
 ### 1.1 The sync pipeline
 
@@ -96,7 +96,7 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 | Git client | `src/git/{types,client,runner}.ts` | Thin git wrapper over an injectable runner |
 | Providers | `src/providers/{factory,http,types,gitlab,github,gitea,bitbucket,schema}.ts` | REST adapters per backend behind one `Provider` interface |
 | Membership | `src/membership/{types,merge}.ts` | Correlate remote roster + local activity into a summary |
-| Scope/exclusion | `src/sync/exclusion.ts` | gitignore matcher, scope predicate, rename detection, conflict-path |
+| Scope/exclusion | `src/sync/exclusion.ts` | gitignore matcher, scope predicate, rename detection, conflict-path, canonical binary-extension guard (`BINARY_EXTENSIONS` + `isBinaryExtension`, all-lowercase by invariant) |
 | Merge/conflict | `src/sync/{classifier,merge,conflict,conflictActions,policy,trash}.ts` | The 3-way pipeline, conflict records + action labels, suggestion policy, recoverable deletions |
 | Pull topology | `src/sync/rebase-policy.ts` | Pure pull-action decision from commit topology |
 | Applier | `src/sync/applier.ts` | Safe write ordering + per-path re-entrancy guard |
@@ -187,7 +187,7 @@ The payoff: **no false content conflict on any delete case**, and an untouched s
 
 **Chosen:**
 - `sync.intervalSeconds` drives a gated poll (`POLL_TICK_MS = 15s` internal tick; `decideRun` enforces the real interval; one pass runs shortly after plugin load). Presets: efficient (3600s), balanced (300s, default), near-realtime (30s), clamped to [1s, 1 day] — `cadence.ts`.
-- **Event triggers:** `vault.on('modify'|'create'|'delete'|'rename')`, scoped to mapped folders. A burst coalesces into one sync within a short window (`EVENT_COALESCE_MS = 1.5s`, fed through `debounceFireTimes`; the older 20s `EVENT_DEBOUNCE_MS` constant is vestigial). Plugin-caused writes are suppressed (`internalWritePaths`). Becoming visible again restores the last terminal status — it does not force an extra pass.
+- **Event triggers:** `vault.on('modify'|'create'|'delete'|'rename')`, scoped to mapped folders. A rename is checked against BOTH the new and the old path (`onVaultRename`), so moving a file *out* of a mapped folder — a deletion inside it — still triggers the event-driven pass instead of waiting for the next poll. A burst coalesces into one sync within a short window (`EVENT_COALESCE_MS = 1.5s`, fed through `debounceFireTimes`; the older 20s `EVENT_DEBOUNCE_MS` constant is vestigial). Plugin-caused writes are suppressed (`internalWritePaths`). Becoming visible again restores the last terminal status — it does not force an extra pass.
 - **Editor-open write-back guard** (`editorOpen.ts`): *any* file open in an editor is treated as write-unsafe (Obsidian exposes no dirtiness API on `TFile`; over-blocking is the safe failure mode). Such writes and deletes defer into durable pending operations rather than clobbering an in-progress edit.
 - **Resumable state** (`resume.ts`): last-sync is keyed on git base SHA + monotonic op id, not a timestamp, so an offline session resumes cleanly and reconnect reconciles deterministically.
 
@@ -288,10 +288,10 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 ## 5. Validation & testing
 
-All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **977 tests across 83 files** at 0.4.7, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
+All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **980 tests across 83 files** at 0.4.7, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
 
 - **Merge correctness (Area 3):** same-change accept/keep; modify/delete both directions; delete/delete; delete/add; empty-vs-deleted distinction — `merge.test.ts`, `conflict.test.ts`.
-- **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.
+- **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; the canonical binary-extension guard (all-lowercase invariant + case-insensitive lookups, pinned after the capitalized-`"Drawing"` entry silently never matched); safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.
 - **Editor-open checkpoint (Area 5):** real-time merge never clobbers a file open in an editor; resumable state survives offline→edit→reconnect — `editorOpen.test.ts`, `resume.test.ts` (+ driver tests).
 - **Attribution & presentation (Area 7):** per-line author model + per-file author-set parser + graceful degradation; action-labeled conflict parsing — `diffModel.test.ts`.
 - **Safety (Area 8):** pause gate suppresses poll/event/auto-push-pull while paused (the next tick after unpause catches up); staged-vs-unstaged classification; held paths excluded from push — `schedule.test.ts`, driver tests.
@@ -308,7 +308,7 @@ All new logic lives in pure modules and is covered by **vitest with fakes** (no 
 
 ```bash
 npm run build     # tsc --noEmit --skipLibCheck && node esbuild.config.min.js  (bundles CSS into main.js)
-npx vitest run    # full suite (977 tests / 83 files at 0.4.7, incl. real-git e2e)
+npx vitest run    # full suite (980 tests / 83 files at 0.4.7, incl. real-git e2e)
 npm run dev       # esdev watch build for iteration
 ```
 

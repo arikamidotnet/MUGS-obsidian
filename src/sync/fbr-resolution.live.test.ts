@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { syncAllMappings, storeConflictAccessor, storeWritableAccessor } from "./driver";
+import { BINARY_EXTENSIONS } from "./exclusion";
 import type { VaultMirror, WorkingTreeWriter } from "./cloneManager";
 import { decideReviewBatch, reviewConfig } from "../runtime/reconciliationBulk";
 import { buildProvider } from "../providers/factory";
@@ -47,15 +48,12 @@ const TARGET = process.env.MUGS_FBR_TARGET ?? "07 publish";
 /** Files this suite (or an interrupted earlier run) may create and clean up. */
 const TEST_FILE = /^MUGS-live-resolution-test-.*\.(md|log)$/;
 
-/** Same binary-extension set the plugin's mirror uses (src/main.ts). */
-const BINARY = new Set(["png","jpg","jpeg","gif","bmp","webp","ico","svgz","pdf","zip","gz","7z","tar","rar","mp3","mp4","mov","avi","mkv","wav","ogg","flac","ttf","otf","woff","woff2","docx","xlsx","pptx","bin","exe","sqlite","db","onnx","pt","apk","drawing"]);
-
 const listable = (rel: string): boolean => {
   const segs = rel.split("/");
   if (segs.some(s => s.startsWith("."))) return false;
   const last = segs[segs.length - 1];
   const ext = last.includes(".") ? last.slice(last.lastIndexOf(".") + 1).toLowerCase() : "";
-  return !BINARY.has(ext);
+  return !BINARY_EXTENSIONS.has(ext);
 };
 
 const walk = (folder: string): string[] => {

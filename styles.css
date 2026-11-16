@@ -80,81 +80,9 @@
 .mugs-text-warning { color: var(--text-warning, #d29922); }
 .mugs-text-error   { color: var(--text-error, #f85149); }
 
-/* Chip component — used in map summary, legend, diff badges. */
-.mugs-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: var(--font-ui-smaller);
-  height: 30px;
-  max-width: 100%;
-  font-weight: 500;
-}
-
-.mugs-chip-muted    { background: var(--background-modifier-form-field); color: var(--text-muted); }
-.mugs-chip-success  { background: color-mix(in srgb, var(--text-success, #3fb950) 12%, transparent); color: var(--text-success, #3fb950); }
-.mugs-chip-warning  { background: color-mix(in srgb, var(--text-warning, #d29922) 12%, transparent); color: var(--text-warning, #d29922); }
-.mugs-chip-error    { background: color-mix(in srgb, var(--text-error, #f85149) 12%, transparent); color: var(--text-error, #f85149); }
-
-/* Status icon — circular badge with a glyph. */
-.mugs-status-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  font-size: var(--font-ui-smaller);
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.mugs-status-ok, .mugs-status-icon.mugs-status-ok      { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
-.mugs-status-pending, .mugs-status-icon.mugs-status-pending { background: hsl(42, 90%, 85%); color: var(--text-warning, #d29922); }
-.mugs-status-conflict, .mugs-status-icon.mugs-status-conflict { background: hsl(18, 75%, 85%); color: #e45b3d; }
-.mugs-status-error, .mugs-status-icon.mugs-status-error     { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
-
-/* --- Card component -------------------------------------------------------- */
-
-.mugs-card {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 10px;
-  padding: 12px 16px;
-  margin-bottom: 12px;
-  background: var(--background-secondary);
-}
-
-.mugs-card:hover {
-  border-color: var(--interactive-accent);
-}
-
-.mugs-card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-
-.mugs-card-title {
-  font-size: var(--font-ui-medium);
-  font-weight: 600;
-  color: var(--text-normal);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.mugs-card-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-  flex-wrap: wrap;
-}
+/* Folder-status tint classes (applied with .mugs-dot and status labels). */
+.mugs-status-ok    { background: hsl(134, 40%, 85%); color: var(--text-success, #3fb950); }
+.mugs-status-error { background: hsl(0, 70%, 85%); color: var(--text-error, #f85149); }
 
 /* --- Empty state ----------------------------------------------------------- */
 
@@ -272,12 +200,6 @@
   font-size: var(--font-ui-smaller);
 }
 
-.mugs-divider {
-  height: 1px;
-  background: var(--background-modifier-border);
-  margin: 14px 0;
-}
-
 /* --- Unsaved-changes banner ----------------------------------------------- */
 
 .mugs-unsaved-banner {
@@ -301,23 +223,6 @@
 .mugs-maps-view { padding: 12px 16px; }
 
 .mugs-map-summary { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
-
-.mugs-map-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.mugs-map-legend-label { font-weight: 600; color: var(--text-normal); }
-
-.mugs-map-legend-item { display: inline-flex; gap: 6px; align-items: center; font-size: var(--font-ui-smaller); color: var(--text-muted); }
-
-.mugs-map-legend-swatch {
-  display: inline-block; width: 12px; height: 12px; border-radius: 3px;
-  border: 1px solid var(--background-modifier-border);
-}
 
 /* Folder sync rows — one full-width line per connected folder. */
 .mugs-sync-list { display: flex; flex-direction: column; gap: 8px; }
@@ -363,9 +268,6 @@
 .mugs-map-card-footer { display: flex; gap: 8px; align-items: center; justify-content: flex-end; min-width: 0; }
 .mugs-map-card-sync-times { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mugs-sync-status { font-size: var(--font-ui-smaller); font-weight: 500; white-space: nowrap; }
-.mugs-text-success { color: var(--text-success, #3fb950); }
-.mugs-text-warning { color: var(--text-warning, #d29922); }
-.mugs-text-error { color: var(--text-error, #f85149); }
 
 /* --- Diff view ------------------------------------------------------------- */
 
@@ -435,9 +337,8 @@
 /* Inline message under the picker when the typed ref can't be a branch/tag/commit. */
 .mugs-diff-ref-error { color: var(--text-error, #f85149); font-size: var(--font-ui-smaller); margin: 8px 0; }
 
-.mugs-diff-range-label, .mugs-diff-mapping-name, .mugs-diff-range-hint { font-size: var(--font-ui-smaller); }
+.mugs-diff-range-label, .mugs-diff-mapping-name { font-size: var(--font-ui-smaller); }
 .mugs-diff-range-label { color: var(--text-muted); }
-.mugs-diff-range-hint { color: var(--text-faint); margin-left: 6px; }
 
 .mugs-diff-output { width: 100%; }
 
@@ -485,13 +386,9 @@
 .mugs-diff-count-added   { background: var(--background-modifier-success-hover, #3fb95020); color: var(--text-success, #3fb950); }
 .mugs-diff-count-removed { background: var(--background-modifier-error-hover, #f8514920); color: var(--text-error, #f85149); }
 
-/* Author badges */
-.mugs-diff-author-badge, .mugs-conflict-action { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: var(--font-ui-smaller); font-weight: 500; }
-
-.mugs-diff-author-badge { background: var(--background-modifier-form-field); color: var(--text-accent); border: 1px solid var(--background-modifier-border); }
-.mugs-conflict-action    { border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); }
-
-.mugs-diff-author-badge[data-email]:hover, .mugs-conflict-action:hover { opacity: 0.85; }
+/* Conflict action chips */
+.mugs-conflict-action { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 10px; font-size: var(--font-ui-smaller); font-weight: 500; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); }
+.mugs-conflict-action:hover { opacity: 0.85; }
 
 /* Diff hunk table */
 .mugs-diff-code-scroll { overflow-x: auto; }
@@ -520,8 +417,6 @@
 .mugs-diff-hunk-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .mugs-diff-hunk-range { flex-shrink: 0; }
 .mugs-diff-hunk-section { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.mugs-diff-hunk-counts { display: inline-flex; gap: 4px; margin-left: auto; }
 
 /* --- Conflict action labels (ours/theirs did X) --------------------------- */
 
@@ -598,18 +493,11 @@
 
 /* --- Settings: add-mapping assistant -------------------------------------- */
 
-.mugs-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 16px; }
-@media (max-width: 720px) { .mugs-form-grid { grid-template-columns: 1fr; } }
-
-.mugs-field           { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.mugs-field label      { font-size: var(--font-ui-smaller); color: var(--text-muted); }
-.mugs-field input, .mugs-field select { width: 100%; min-width: 0; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-secondary); color: var(--text-normal); font-size: var(--font-ui-smaller); }
-
 .mugs-actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 2px; }
 
 /* Repo select */
-.mugs-repo-select, .mugs-dir-select { width: 100%; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); font-size: var(--font-ui-smaller); }
-.mugs-repo-select:focus, .mugs-dir-select:focus { outline: none; border-color: var(--interactive-accent); box-shadow: 0 0 0 1px var(--interactive-accent); }
+.mugs-repo-select { width: 100%; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); font-size: var(--font-ui-smaller); }
+.mugs-repo-select:focus { outline: none; border-color: var(--interactive-accent); box-shadow: 0 0 0 1px var(--interactive-accent); }
 
 /* Matched-folder rows */
 .mugs-matches      { margin: 8px 0; padding: 12px 14px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
@@ -655,17 +543,6 @@
 
 .mugs-link-btn { font-size: var(--font-ui-smaller); padding: 3px 9px; border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
 .mugs-link-btn:hover { border-color: var(--text-error, #f85149); color: var(--text-error, #f85149); }
-
-/* --- Dotfolder selector ---------------------------------------------------- */
-
-.mugs-dotfolders       { grid-column: 1 / -1; margin: 6px 0 0; padding: 10px 12px; border: 1px dashed var(--background-modifier-border); border-radius: 6px; background: var(--background-secondary); font-size: var(--font-ui-smaller); }
-.mugs-dotfolders > p   { margin: 6px 0 0; color: var(--text-muted); }
-.mugs-dotfolder-toggle { display: flex; align-items: center; gap: 8px; color: var(--text-normal); }
-.mugs-dotfolder-toggle input { width: auto; }
-
-/* --- Status bar ------------------------------------------------------------ */
-
-.mugs-status-bar { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 
 /* --- Overview and navigation --------------------------------------------- */
 .mugs-navigation { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--background-modifier-border); }
@@ -811,9 +688,6 @@
   .mugs-navigation { gap: 4px; }
   .mugs-navigation button { padding: 5px 8px; }
 }
-
-/* Conflicts group header count — plain text, consistent with Overview rows. */
-.mugs-conflicts-panel-count { font-size: var(--font-ui-smaller); color: var(--text-muted); }
 
 /* Compact, full-row change shading inspired by the supplied diff reference. */
 .mugs-diff-view .mugs-diff-hunk td { line-height: 1.55; }

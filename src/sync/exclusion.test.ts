@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isInScope, resolveMappingForPath, detectRenames, uniqueConflictPath, normalizeRemotePath } from "./exclusion";
+import { isInScope, resolveMappingForPath, detectRenames, uniqueConflictPath, normalizeRemotePath, BINARY_EXTENSIONS, isBinaryExtension } from "./exclusion";
 
 describe("isInScope — subtree + include/exclude composition", () => {
   it("includes everything when unscoped (remotePath empty)", () => {
@@ -122,5 +122,20 @@ describe("isInScope — whole-vault dotfolders", () => {
   it("still honors excludes for dotfolders in a whole-vault mapping", () => {
     expect(isInScope({ remotePath: "", excludes: [".trash/**"] }, ".trash/old.md")).toBe(false);
     expect(isInScope({ remotePath: "", excludes: [".trash/**"] }, "notes/x.md")).toBe(true);
+  });
+});
+
+describe("BINARY_EXTENSIONS — canonical binary guard", () => {
+  it("is all-lowercase so case-insensitive lookups can never miss", () => {
+    for (const ext of BINARY_EXTENSIONS) expect(ext).toBe(ext.toLowerCase());
+  });
+
+  it("guards the extensions that blocked real vault syncs, case-insensitively", () => {
+    expect(isBinaryExtension("aseprite")).toBe(true);
+    expect(isBinaryExtension("drawing")).toBe(true);
+    expect(isBinaryExtension("Drawing")).toBe(true); // the former capitalized-set-entry bug
+    expect(isBinaryExtension("DRAWING")).toBe(true);
+    expect(isBinaryExtension("md")).toBe(false);
+    expect(isBinaryExtension("")).toBe(false);
   });
 });

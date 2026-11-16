@@ -24,8 +24,14 @@ Back up the vault and plugin state before upgrading or making a first connection
 - **Company-wide release polish.** Documentation and packaging finalized for
   rollout: architecture notes corrected against the shipped code, provider
   walkthroughs updated for the automatic first-connection pause, and package
-  metadata (repository, homepage, issues, engines) completed. Plugin behavior
-  is unchanged from 0.4.6.
+  metadata (repository, homepage, issues, engines) completed.
+- **Deep-audit fixes.** `.drawing` files now really match the
+  binary-extension guard (its set entry was capitalized while every lookup
+  is case-insensitive, so it never matched), a rename out of a mapped folder
+  triggers a pass immediately instead of waiting for the next poll, and the
+  plugin and its live diagnostics share one canonical binary-extension set
+  (`src/sync/exclusion.ts`). Dead CSS selectors, a dead export and stale
+  comments were removed. Otherwise plugin behavior is unchanged from 0.4.6.
 - **Preflight & rollout page, restyled to match the Review page.** A folder
   sidebar with live sync-status dots and a search filter sits beside a detail
   pane carrying saved evidence, blockers, rollout state and per-folder
@@ -190,8 +196,10 @@ Implemented features:
 
 Also shipped: first-sync policy, identity-keyed clone sharing with exclusive
 cross-process clone locks, event-driven sync (file changes coalesce into a pass
-within ~1.5 s; a gated poll — presets 3600 s / 300 s / 30 s, default 300 s, on a
-15 s tick — covers remote drift), a clickable status bar, opt-in passphrase
+within ~1.5 s; renames count on both the old and new path, so moving a file out
+of a mapped folder still propagates the removal; a gated poll — presets
+3600 s / 300 s / 30 s, default 300 s, on a 15 s tick — covers remote drift), a
+clickable status bar, opt-in passphrase
 encryption, serialized settings saves, cancellation on plugin unload, and the
 repository-file Review tab (the user surface for reconciliation review rows,
 with a file list, preview pane and explicit per-file decisions).
@@ -257,10 +265,12 @@ remains part of the rollout checklist for each team.
   passes can reuse unchanged scoped trees, including when another mapping advances
   the shared repository tip.
 - Known binary extensions (images, archives, office documents, fonts,
-  `.apk`, `.aseprite`, …) are excluded from sync scope up front. Any other
-  binary content is excluded from text reconciliation and reported as blocked
-  — never merged. Do not assume attachment synchronization is supported by
-  the text merge path.
+  `.apk`, `.aseprite`, `.drawing`, …) are excluded from sync scope up front —
+  matching is case-insensitive and the canonical set lives in
+  `src/sync/exclusion.ts`, shared by the plugin and its live diagnostics.
+  Any other binary content is excluded from text reconciliation and reported
+  as blocked — never merged. Do not assume attachment synchronization is
+  supported by the text merge path.
 
 ## Credentials and encryption model (current limits)
 
