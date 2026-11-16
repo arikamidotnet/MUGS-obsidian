@@ -104,33 +104,23 @@ export class PreflightView extends ItemView {
       start.addEventListener("click", () => void this.act(() => this.plugin.startStagedRollout()));
     }
 
-    // Staged mode: one backup acknowledgment arms every canary control.
-    let arm: ((button: HTMLButtonElement) => void) | undefined;
+    // Staged mode: the canary explanation stays on the page; the backup
+    // acknowledgment moved into each folder's detail pane, directly beside
+    // the button it arms — one decision, one place, per folder.
     if (rollout?.mode === "staged") {
       page.createEl("h3", { text: "Enable a folder" });
       page.createEl("p", {
         text: "A canary runs one guarded sync pass for that folder. It becomes automatic only when the pass is verifiably clean (no conflicts, skipped files, deferred changes, pending work or review backlog) and the result is saved. Any failure leaves the folder disabled with the reason recorded in its details.",
         cls: "mugs-muted",
       });
-      const backup = page.createEl("label");
-      const acknowledged = backup.createEl("input", { type: "checkbox" });
-      backup.createSpan({ text: "I have a current backup of this vault (or accept the consequences) before enabling automatic sync." });
-      arm = (button: HTMLButtonElement) => {
-        button.disabled = !acknowledged.checked || this.busy;
-        acknowledged.addEventListener("change", () => { button.disabled = !acknowledged.checked || this.busy; });
-      };
     }
 
-    this.renderMappings(page, rollout, arm);
+    this.renderMappings(page, rollout);
   }
 
   /** Folder list + detail pane, mirroring the Review tab's layout. Saved
    *  evidence only; selection and the search query survive re-renders. */
-  private renderMappings(
-    root: HTMLElement,
-    rollout: RolloutState | undefined,
-    arm: ((button: HTMLButtonElement) => void) | undefined,
-  ): void {
+  private renderMappings(root: HTMLElement, rollout: RolloutState | undefined): void {
     root.createEl("h3", { text: "Folder status" });
     const evidence = this.plugin.preflightMappings();
     if (!evidence.length) {
@@ -234,9 +224,15 @@ export class PreflightView extends ItemView {
       const disable = actions.createEl("button", { text: "Disable this mapping", type: "button" });
       disable.addEventListener("click", () => void this.act(() => this.plugin.disableStagedMapping(item.id)));
       actions.createEl("p", { text: "Disabling is always available and never requires a canary.", cls: "mugs-muted" });
-    } else if (rollout && !item.blockers.length && arm) {
+    } else if (rollout && !item.blockers.length) {
+      // The backup acknowledgment lives here, directly above the canary it
+      // arms — per folder, so the gate and the action read as one control.
+      const ack = actions.createEl("label", { cls: "mugs-recon-ack" });
+      const acknowledged = ack.createEl("input", { type: "checkbox" });
+      ack.createSpan({ text: "I have a current backup of this vault (or accept the consequences)." });
       const canary = actions.createEl("button", { text: "Run canary and enable automatic sync", type: "button", cls: "mod-cta" });
-      arm(canary);
+      canary.disabled = true;
+      acknowledged.addEventListener("change", () => { canary.disabled = !acknowledged.checked || this.busy; });
       canary.addEventListener("click", () => void this.act(async () => {
         const result = await this.plugin.runMappingCanary(item.id);
         if (!result.enabled) new Notice(`MUGS canary — ${item.label} stays disabled: ${result.reason ?? "unverified"}`, 10_000);

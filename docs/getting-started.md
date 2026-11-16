@@ -18,7 +18,7 @@ Choose your provider: [GitLab](gitlab.md) · [GitHub](github.md).
 BRAT reads **GitHub releases**, not the GitLab source repository or a developer's
 local build. The verified public distribution repository is
 [`arikamidotnet/MUGS-obsidian`](https://github.com/arikamidotnet/MUGS-obsidian/releases).
-At the time this guide was written, **0.4.3 is the latest published release**.
+At the time this guide was written, **0.4.6 is the latest published release**.
 Choose only a version that appears on the linked Releases page and has matching
 `main.js`, `manifest.json`, and `styles.css` assets. Do not interpret a local
 version number or a GitLab tag as proof that BRAT can install it.
@@ -106,8 +106,6 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    substitute for a backup. Click **Apply settings** if you change it. When
    ready, turn **Pause automatic sync** off and **Apply settings**. This
    immediately checks for work; no routine **Sync now** click is needed.
-   Published 0.4.2 may not have the automatic first-connection pause: set
-   **Pause automatic sync** and Apply *before* connecting if you need this gate.
 
 Use **MUGS Overview** to inspect each folder, **Changes** for committed
 snapshots, **Review** for unknown repository files, **Preflight** for rollout

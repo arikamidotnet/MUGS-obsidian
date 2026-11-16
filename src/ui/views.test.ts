@@ -836,6 +836,7 @@ describe("PreflightView — staged rollout controls, canary gating, refresh", ()
 
     // Default selection is the first folder: status shows, canary gated by ack.
     expect(collectText(v.contentEl)).toContain("Synced");
+    expect(collectText(v.contentEl)).toContain("I have a current backup"); // ack sits in the folder's detail pane
     const canary = findButtons(v.contentEl).find(b => b.textContent === "Run canary and enable automatic sync")!;
     expect(canary).toBeDefined();
     expect((canary as any).disabled).toBe(true); // gated until the backup is acknowledged

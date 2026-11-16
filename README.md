@@ -16,8 +16,28 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.3.
+The latest verified publication when these instructions were written is 0.4.6.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.6 highlights (0.4.4–0.4.6)
+
+- **Preflight & rollout page, restyled to match the Review page.** A folder
+  sidebar with live sync-status dots and a search filter sits beside a detail
+  pane carrying saved evidence, blockers, rollout state and per-folder
+  actions. Every folder row and the detail pane show the last recorded sync
+  status (synced / up to date / conflict / failed / pending) with the
+  driver-recorded skip reason — saved evidence only, refreshed via pushed UI
+  updates instead of polling. (`src/ui/preflightView.ts`,
+  `src/runtime/preflight.ts`)
+- **Simpler backup acknowledgment.** The single page-level checkbox that
+  armed every canary is gone; each folder's detail pane now carries its own
+  acknowledgment directly beside the **Run canary** button it arms — one
+  decision, one place, per folder.
+- **`.aseprite` joined the binary-extension guard**, so Aseprite sprite files
+  are excluded from sync scope up front instead of being blocked on every
+  pass; blocked-file notices now tell the truth about binary exclusions (they
+  never pointed at real review entries). (`src/main.ts`,
+  `src/runtime/statusReport.ts`)
 
 ## 0.4.3 highlights
 
@@ -168,10 +188,13 @@ within ~1.5 s; a gated poll — presets 3600 s / 300 s / 30 s, default 300 s, on
 encryption, serialized settings saves, cancellation on plugin unload, and the
 repository-file Review tab (the user surface for reconciliation review rows,
 with a file list, preview pane and explicit per-file decisions).
-- **Preflight & staged rollout** (`mugs-preflight`). Saved-evidence readiness
-  per folder, staged mode (nothing automatic until explicitly enabled), the
-  guarded one-shot canary, durable enable/disable with fail-closed persistence,
-  and one-click disable. (`src/ui/preflightView.ts`, `src/runtime/rollout.ts`)
+- **Preflight & staged rollout** (`mugs-preflight`). Review-page layout: a
+  folder sidebar with live status dots and a search filter beside a detail
+  pane of saved evidence, blockers and rollout state. Staged mode (nothing
+  automatic until explicitly enabled), the guarded one-shot canary with its
+  per-folder backup acknowledgment co-located beside the button, durable
+  enable/disable with fail-closed persistence, and one-click disable.
+  (`src/ui/preflightView.ts`, `src/runtime/rollout.ts`)
 
 Remaining work (not claiming completeness): binary attachment and full
 configuration-directory synchronization, mobile support (desktop-only for now),
@@ -226,8 +249,11 @@ remains part of the rollout checklist for each team.
 - Startup verification can take several minutes on large mappings. Subsequent
   passes can reuse unchanged scoped trees, including when another mapping advances
   the shared repository tip.
-- Binary content is excluded from text reconciliation and reported as blocked.
-  Do not assume attachment synchronization is supported by the text merge path.
+- Known binary extensions (images, archives, office documents, fonts,
+  `.apk`, `.aseprite`, …) are excluded from sync scope up front. Any other
+  binary content is excluded from text reconciliation and reported as blocked
+  — never merged. Do not assume attachment synchronization is supported by
+  the text merge path.
 
 ## Credentials and encryption model (current limits)
 
@@ -365,9 +391,8 @@ never credentials.
    or [GitHub](docs/github.md) token walkthrough. **Desktop Obsidian only.**
 2. In Settings → MUGS → Accounts, add your own token, then in Connected folders
    choose the repository, check the intended matched folders and select direction.
-   Press Connect selected folders and **Apply settings**. The 0.4.3 candidate
-   pauses a *first* mapping automatically; for the published 0.4.2 version,
-   pause explicitly before connecting when a guarded first run is needed.
+   Press Connect selected folders and **Apply settings**. A *first* mapping
+   starts paused automatically; unpause only after reviewing the connection.
 3. Review the mapping, backup and Start new connections with setting; unpause and
    Apply only when safe. Background sync then runs without a routine Sync now click.
    Teams preferring per-folder enablement can use the

@@ -39,10 +39,14 @@ first connected over repositories that already contain history.
 ## Preflight & rollout page
 
 Open it from any MUGS page's navigation (**Preflight**) or the command palette
-(**MUGS: Open preflight and rollout**). It shows, per folder:
+(**MUGS: Open preflight and rollout**). The page uses the same layout as the
+Review tab: a folder sidebar — each row carrying a live sync-status dot and a
+search filter — beside a detail pane for the selected folder. It shows, per
+folder:
 
-- saved local evidence only: review / conflict / pending counts, last sync
-  timestamp, recorded clone — no remote access happens by just opening it;
+- saved local evidence only: last recorded sync status and skip reason,
+  review / conflict / pending counts, last sync timestamp, recorded clone —
+  no remote access happens by just opening it;
 - blockers that must be resolved before a folder can be enabled (unproven
   clone, no baseline, review backlog, unresolved conflicts, pending work, held
   changes, prior rollout failures).
@@ -54,8 +58,10 @@ precedence over everything.
 
 ## The one-shot canary
 
-For each blocker-free folder, the Preflight page offers **Run canary and
-enable automatic sync** (after you acknowledge a current backup). A canary:
+For each blocker-free folder, the folder's detail pane offers **Run canary
+and enable automatic sync**, gated by a per-folder backup acknowledgment
+sitting directly beside the button — check it and the canary arms; no other
+control stands between you and the pass. A canary:
 
 1. re-checks saved state (any blocker aborts before syncing);
 2. runs one real targeted sync pass for that folder only — this is the live

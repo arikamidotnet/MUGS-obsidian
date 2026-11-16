@@ -112,9 +112,9 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 | Clone/driver | `src/sync/cloneManager.ts`, `src/sync/driver.ts` | Per-mapping pass + cross-mapping driver over identity-keyed shared clones |
 | Vault mirror | `src/sync/mirror.ts` | repo↔vault path mapping + the pure pull planner (`planMirrorPull`) |
 | Editor guard | `src/sync/editorOpen.ts` | Open-editor write/delete deferral (any open file = unsafe) |
-| Runtime | `src/runtime/{conflictResolver,statusReport}.ts` | Manual resolution transaction; aggregate status report |
+| Runtime | `src/runtime/{conflictResolver,statusReport,rollout,preflight,reconciliationBulk,cloneLock,pathSafety}.ts` | Manual resolution transaction; aggregate status report + advisory notice wording; staged-rollout/canary gating; saved-evidence preflight; bulk review analysis/decisions; clone locks; adapter path safety |
 | Diff model (A7) | `src/ui/diffModel.ts` | Unified-diff parse, per-file attribution, author colors |
-| Views (glue) | `src/ui/{mapView,diffView,diffPanel,diffRender,mapModel,dataSources,defaultDataSources,reviewQueueView,reconciliationModal}.ts` | Registered Obsidian views + data sources |
+| Views (glue) | `src/ui/{mapView,diffView,diffPanel,diffRender,mapModel,dataSources,defaultDataSources,reviewQueueView,reconciliationView,reconciliationReview,reconciliationBulk,preflightView,navigation}.ts` | Registered Obsidian views (Overview, Changes, Review, Conflicts, Preflight & rollout) + data sources + shared navigation |
 
 ---
 
