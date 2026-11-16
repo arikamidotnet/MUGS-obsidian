@@ -113,11 +113,8 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Maintenance & hardening release: no user-facing behavior change. The sync engine, conflict surfacing, Review workflow and scheduling model are unchanged from 0.4.9.
-          - Dead code removed: unused imports, locals and parameters swept across the sync core, providers, store, settings UI and tests; the draftAuthor helper no longer takes the commit draft it never read (the acting agent alone determines the recorded author).
-          - Stricter type-checking: noUnusedLocals and noUnusedParameters are now enabled in tsconfig.json, so the build fails on any future dead binding instead of letting it accumulate.
-          - Nix build is DRY: flake.nix reads the version from package.json (the single source of truth kept in sync by scripts/check-release.js) instead of a hardcoded value that had drifted to 0.1.0.
-          - Test portability: the real-git regression suite shells out via /bin/sh rather than /bin/bash, which is absent on some hosts (e.g. NixOS); the commands are plain POSIX git invocations, so behavior is identical on GitHub runners.
+          - Bug fix: a corrupt data.json no longer bricks the plugin. In real Obsidian, loadData() JSON-parses data.json and throws on corrupt JSON. The store's load() only guarded the parse, not the read — so a corrupt file (disk failure, partial write, manual edit) made the read reject, the error escaped onload(), and the plugin loaded with no status bar, no settings and no sync. load() now guards the read as well: a corrupt file degrades to defaults with a sticky "settings could not be read" notice, and the plugin refuses to save over the corrupt file until it is fixed or restored.
+          - Unchanged: everything else behaves exactly as in 0.4.10.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -130,7 +127,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — maintenance & hardening (dead code, stricter type-checking, DRY Nix build, test portability)" \
+            --title "${VERSION} — corrupt data.json no longer bricks the plugin" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

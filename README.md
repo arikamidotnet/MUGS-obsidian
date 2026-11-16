@@ -16,8 +16,20 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.10.
+The latest verified publication when these instructions were written is 0.4.11.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.11 highlights
+
+- **Bug fix: a corrupt `data.json` no longer bricks the plugin.** In real
+  Obsidian, `loadData()` JSON-parses `data.json` and *throws* on corrupt JSON.
+  The store's `load()` only guarded the parse, not the read — so a corrupt file
+  (disk failure, partial write, manual edit) made the read reject, the error
+  escaped `onload()`, and the plugin loaded with no status bar, no settings and
+  no sync. `load()` now guards the read as well: a corrupt file degrades to
+  defaults with a sticky "settings could not be read" notice, and the plugin
+  refuses to save over the corrupt file until it is fixed or restored.
+  - Unchanged: everything else behaves exactly as in 0.4.10.
 
 ## 0.4.10 highlights
 
