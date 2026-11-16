@@ -146,6 +146,30 @@ export function buildStatusReport(opts: {
   };
 }
 
+/** Advisory Notice lines for ok-mappings that finished with blocked files.
+ *  Review-queue blocks (unknown remote-only, withheld deletions, unverified
+ *  content) point at Review; binary-content blocks never create review entries,
+ *  so they get wording that says what happened instead of pointing at an empty
+ *  queue. Counts and labels only — never file names or contents. */
+export function advisoryNotices(outcomes: SyncOutcome[]): string[] {
+  const lines: string[] = [];
+  for (const o of outcomes) {
+    const blocked = o.blocked ?? [];
+    if (o.status !== "ok" || blocked.length === 0) continue;
+    const n = blocked.length;
+    const binary = blocked.filter((b) => /binary/i.test(b.reason ?? "")).length;
+    const files = `${n} file${n === 1 ? "" : "s"}`;
+    if (binary === n) {
+      lines.push(`MUGS — ${o.label}: ${files} not synced — binary content is excluded from text sync.`);
+    } else if (binary > 0) {
+      lines.push(`MUGS — ${o.label}: ${files} left unchanged for safety (${binary} binary, excluded from text sync). Open "Review repository files" to decide the rest.`);
+    } else {
+      lines.push(`MUGS — ${o.label}: ${files} left unchanged for safety. Open "Review repository files" to decide.`);
+    }
+  }
+  return lines;
+}
+
 /** Compact count text — counts only, never file names or contents. */
 function countText(c: StatusCounts): string {
   const seg: string[] = [];

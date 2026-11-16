@@ -3,7 +3,7 @@
  * terminal kinds, refused-save is an error, no note contents ever.
  */
 import { describe, it, expect } from "vitest";
-import { buildStatusReport, classifySkipReason } from "./statusReport";
+import { advisoryNotices, buildStatusReport, classifySkipReason } from "./statusReport";
 import type { SyncOutcome } from "../sync/driver";
 
 const ok = (id: string, push = false): SyncOutcome => ({
@@ -95,6 +95,44 @@ describe("status reporting", () => {
     const r = buildStatusReport({ outcomes: [{ mappingId: "m", label: "M", status: "blocked", reason: "locked by another process" }] });
     expect(r.kind).toBe("blocked");
     expect(r.counts.blocked).toBe(1);
+  });
+
+  it("advisory notices: binary-only blocks say so and never point at Review", () => {
+    const lines = advisoryNotices([{
+      ...ok("m"),
+      blocked: [{ path: "a.aseprite", reason: "binary content excluded from text merge" }],
+    }]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("1 file not synced");
+    expect(lines[0]).toContain("binary content is excluded from text sync");
+    expect(lines[0]).not.toContain("Review repository files");
+  });
+
+  it("advisory notices: mixed binary and review blocks mention both surfaces", () => {
+    const lines = advisoryNotices([{
+      ...ok("m"),
+      blocked: [
+        { path: "a.aseprite", reason: "binary content excluded from text merge" },
+        { path: "b.md", reason: "held for review" },
+      ],
+    }]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("2 files left unchanged for safety");
+    expect(lines[0]).toContain("1 binary, excluded from text sync");
+    expect(lines[0]).toContain("Review repository files");
+  });
+
+  it("advisory notices: non-binary blocks keep Review guidance; other outcomes stay silent", () => {
+    const lines = advisoryNotices([
+      { ...ok("m"), blocked: [{ path: "b.md", reason: "held for review" }] },
+      ok("clean"),
+      { mappingId: "x", label: "x", status: "skipped", reason: "no credential" },
+      { mappingId: "y", label: "y", status: "conflict", conflicts: [{ path: "c.md", ours: "o", theirs: "t" }] },
+    ]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("left unchanged for safety");
+    expect(lines[0]).toContain("Review repository files");
+    expect(lines[0]).not.toContain("binary");
   });
 
   it("pending failure and blocked files prevent a successful convergence claim", () => {

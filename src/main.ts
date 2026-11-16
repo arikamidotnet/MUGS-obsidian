@@ -46,7 +46,7 @@ import { toAdapterPath } from "./sync/adapterPath";
 import { createConflictResolver } from "./runtime/conflictResolver";
 import { acquireCloneLock } from "./runtime/cloneLock";
 import { assertSafeAdapterPath, isMissingFile } from "./runtime/pathSafety";
-import { buildStatusReport } from "./runtime/statusReport";
+import { advisoryNotices, buildStatusReport } from "./runtime/statusReport";
 import { automaticMappings, recordCanary, recordRollout, rolloutFailure } from "./runtime/rollout";
 import { mappingPreflight, type MappingPreflight } from "./runtime/preflight";
 import type { PendingOperation, FileConflict } from "./types";
@@ -82,7 +82,8 @@ const EVENT_COALESCE_MS = 1500;
 const BINARY_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svgz", "pdf", "zip", "gz", "7z", "tar",
   "rar", "mp3", "mp4", "mov", "avi", "mkv", "wav", "ogg", "flac", "ttf", "otf", "woff", "woff2",
-  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "apk", "Drawing",
+  "docx", "xlsx", "pptx", "bin", "exe", "sqlite", "db", "onnx", "pt", "apk", "aseprite",
+  "Drawing",
 ]);
 
 /** Status-bar states the plugin cycles through. */
@@ -646,12 +647,13 @@ export default class MugsPlugin extends Plugin {
           const reason = o.reason ? ` — ${o.reason}` : "";
           new Notice(`MUGS — ${o.label} skipped${reason}`, 8000);
         }
-        // Advisory review items: the pass succeeded, but files are retained for an
-        // explicit decision (unknown remote-only, withheld deletions, unverified
-        // content). Surface them so the reconciliation queue is discoverable.
-        for (const o of outcomes.filter((o) => o.status === "ok" && (o.blocked?.length ?? 0) > 0)) {
-          const n = o.blocked!.length;
-          new Notice(`MUGS — ${o.label}: ${n} file${n === 1 ? "" : "s"} left unchanged for safety. Open "Review repository files" to decide.`, 8000);
+        // Advisory blocked files: the pass succeeded, but some files were retained
+        // for an explicit decision (unknown remote-only, withheld deletions,
+        // unverified content) or excluded as binary content. Binary blocks never
+        // create review entries, so they say what happened instead of sending the
+        // user to an empty Review queue (wording lives in statusReport, pure).
+        for (const message of advisoryNotices(outcomes)) {
+          new Notice(message, 8000);
         }
       } else {
         const skipped = outcomes.filter((o) => o.status === "skipped");

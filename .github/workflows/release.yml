@@ -110,7 +110,9 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Preflight & rollout page rebuilt to match the Review page's layout and visual language: a folder sidebar with live status dots and a search filter beside a detail pane showing saved evidence, blockers, rollout state and per-folder actions — both decision surfaces now read the same way.
+          - .aseprite joined the binary-extension guard: Aseprite sprite files (and their remote twins) are now excluded from sync scope up front, so a diverged binary file no longer produces a blocked outcome on every pass — which also unblocked staged-rollout canaries for folders carrying such files (the NUL-byte merge guard remains the fail-safe for any unlisted binary type).
+          - Blocked-file notices tell the truth about binary exclusions: an ok pass with only binary-content blocks now says "not synced — binary content is excluded from text sync" instead of pointing at a Review queue that never contained an entry for them; mixed cases mention both surfaces. Wording lives in a pure, tested helper (statusReport).
+          - Preflight & rollout page rebuilt to match the Review page's layout and visual language (from 0.4.4): a folder sidebar with live status dots and a search filter beside a detail pane showing saved evidence, blockers, rollout state and per-folder actions.
           - Live sync status on the rollout surface: each folder row and detail pane shows its last recorded sync status (synced, up to date, conflict needs review, sync failed, sync pending) with the driver-recorded skip reason when a pass could not complete — saved evidence only, refreshed via pushed UI updates instead of polling.
           - Staged rollout with guarded canaries (from 0.4.3): staged mode starts with nothing automatic; a one-shot canary per folder must pass verifiably clean (no conflicts, deferred changes, pending work or review backlog) and persist before the folder joins automatic sync. Failures fail closed with the reason recorded; unsavable rollout decisions pause automatic sync.
           - Multi-client soak gate: a release-gate test drives two full independent clients against one shared repository — distinct and non-overlapping edits converge automatically, same-region conflicts surface with both sides intact, one-click resolution converges everyone, deletions propagate, converged passes are verified no-ops.
@@ -128,7 +130,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — Preflight & rollout page rebuilt around the Review layout with live status" \
+            --title "${VERSION} — .aseprite binary guard + truthful blocked-file notices" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \
