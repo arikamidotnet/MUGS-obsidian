@@ -88,7 +88,7 @@ export async function paginateAll(
     try {
       if (new URL(next).origin !== baseOrigin) {
         // Cross-origin next link — drop token-bearing headers; keep Accept for JSON negotiation.
-        const { Accept, accept, ...rest } = headers as any;
+        const { Accept, accept } = headers as any;
         sendHeaders = Accept || accept ? { Accept: (Accept || accept) as string } : {};
       }
     } catch {

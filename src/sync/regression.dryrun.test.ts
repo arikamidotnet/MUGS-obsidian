@@ -12,7 +12,7 @@ import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from ".
 import { MugsStore, MemoryIO } from "../store";
 import type { VaultMirror } from "./cloneManager";
 import type { FolderMapping, Credential } from "../types";
-import { installHermeticGitIdentity, hermeticExecSync, CountingRunner, totalGitInvocations } from "./testkit";
+import { installHermeticGitIdentity, hermeticExecSync, CountingRunner } from "./testkit";
 
 installHermeticGitIdentity();
 
@@ -56,7 +56,7 @@ function makeDryRunFixture() {
   const cred: Credential = { id: "c", label: "L", kind: "local", token: "t", baseUrl: "file://" + remotePlain };
   const store = new MugsStore(new MemoryIO());
   const runner = new CountingRunner();
-  const deps = (dryRun?: boolean) => ({
+  const deps = () => ({
     mappings: [{ id: "m", label: "M", remotePath: "", localFolder: "Synced", providerId: "c", direction: "push-pull" as const } as FolderMapping],
     credentials: [cred],
     getToken: () => "t",
@@ -72,7 +72,6 @@ function makeDryRunFixture() {
     rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
     lastSync: storeWritableAccessor(store),
     conflicts: storeConflictAccessor(store),
-    // dryRun will be threaded via the new surface once implemented
   });
 
   return { base, deps, runner, io, synced, store };

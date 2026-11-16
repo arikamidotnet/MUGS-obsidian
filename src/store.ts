@@ -15,7 +15,6 @@ import {
   redactToken,
   isBlockedFolder,
   normalizeVaultPath,
-  type Settings,
   type KdfParams,
 } from "./schema";
 import {
@@ -487,9 +486,7 @@ export class MugsStore {
    *  obsidian config sync is enabled (Area 9), in which case a dedicated `.obsidian`
    *  scope mapping is allowed and per-path classification decides what is shared. */
   upsertMapping(mapping: FolderMapping): FolderMapping {
-    const prior = this.settings.mappings.find(m => m.id === mapping.id);
     assertMappingAllowed(
-      this.settings.mappings,
       mapping.localFolder,
       this.settings.sync.obsidianConfig.enabled,
     );
@@ -674,7 +671,6 @@ export type SaveResult =
 /** Throw if adding a mapping would sync a blocked `.obsidian/` folder. A dedicated
  *  `.obsidian/` scope is permitted only when obsidian config sync is enabled. */
 export function assertMappingAllowed(
-  existing: FolderMapping[],
   localFolder: string,
   obsidianEnabled = false,
 ): void {

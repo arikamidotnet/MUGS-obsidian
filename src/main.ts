@@ -7,9 +7,9 @@
  * debounces file-change events into syncs. The scheduling *policy* is pure
  * (`sync/schedule.ts`); everything here is thin Obsidian glue.
  */
-import { Plugin, Notice, type EventRef } from "obsidian";
+import { Plugin, Notice } from "obsidian";
 import { rmSync } from "node:fs";
-import { MugsStore, MemoryIO, type SaveResult } from "./store";
+import { MugsStore, type SaveResult } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";

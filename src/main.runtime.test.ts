@@ -11,12 +11,6 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-// We will import the module under test after shimming the globals it touches.
-let MugsPlugin: any;
 
 const hoisted = vi.hoisted(() => {
   const timers: any = { intervals: new Set<number>(), timeouts: new Set<number>() };
@@ -42,11 +36,11 @@ vi.mock("obsidian", () => {
             stat: async () => ({ mtime: Date.now(), size: 10 }),
             list: async () => ({ files: [], folders: [] }),
           },
-          on: (ev: string, cb: any) => ({ unsubscribe: () => {} }),
+          on: (_ev: string, _cb: any) => ({ unsubscribe: () => {} }),
           getFiles: () => [],
         },
         workspace: {
-          on: (ev: string, cb: any) => ({ unsubscribe: () => {} }),
+          on: (_ev: string, _cb: any) => ({ unsubscribe: () => {} }),
           iterateAllLeaves: (_fn: any) => {},
           getLeavesOfType: () => [],
           getLeaf: () => ({ setViewState: async () => {} }),

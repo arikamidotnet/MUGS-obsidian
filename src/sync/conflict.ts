@@ -9,7 +9,7 @@
  *
  * Pure and dependency-free (like classifier.ts), so it is pinned by tests.
  */
-import { classifyFile, type FileDiff } from "./classifier";
+import { type FileDiff } from "./classifier";
 import { threeWayMerge } from "./merge";
 import type { FileConflict } from "../types";
 

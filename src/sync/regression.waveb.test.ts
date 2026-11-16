@@ -30,7 +30,10 @@ import { EditorOpenGuard } from "./editorOpen";
 installHermeticGitIdentity();
 
 function sh(cmd: string): string {
-  return execSync(cmd, { shell: "/bin/bash", env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  // /bin/sh (not /bin/bash): the commands are plain POSIX git invocations, and
+  // /bin/sh exists on every supported host (GitHub runners, NixOS) while
+  // /bin/bash does not on some (e.g. NixOS hosts where /bin lacks bash).
+  return execSync(cmd, { shell: "/bin/sh", env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] }).toString();
 }
 
 interface Fixture {
@@ -558,7 +561,6 @@ describe("dryRun (contract §2): discovery+planning with zero mutations", () => 
   it("plans without touching the vault, clone, or remote", async () => {
     // Baseline.
     await syncAllMappings(f.deps());
-    const tipBefore = remoteTip();
 
     // Local edit + remote advance: a real pass would publish AND apply.
     writeFileSync(join(f.synced, "F.md"), "v1 local edit\n");

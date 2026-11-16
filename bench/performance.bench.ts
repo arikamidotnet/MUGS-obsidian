@@ -4,7 +4,7 @@
  * redaction, mapping validation) so we can watch for regressions as the sync
  * engine grows. These run without git/network, keeping them CI-friendly.
  *
- * Run with: npm run bench   (i.e. `vitest run bench/`)
+ * Run with: npm run bench   (i.e. `vitest bench --run`)
  */
 import { bench, describe } from "vitest";
 import { parseSettings, redactToken, isBlockedFolder } from "../src/schema";

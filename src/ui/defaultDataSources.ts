@@ -12,11 +12,11 @@
  * (`Provider.getMembers`) is intentionally out of scope here (later phase).
  */
 import type { MugsStore } from "../store";
-import type { FolderMapping, SyncStatus, FileConflict } from "../types";
+import type { FolderMapping, FileConflict } from "../types";
 import { GitClient, type AuthorActivity } from "../git/client";
 import { ChildProcessRunner } from "../git/runner";
 import type { GitRunner } from "../git/types";
-import { cloneDir, type CloneLayout, type LastSyncAccessor, type WorkingTreeWriter } from "../sync/cloneManager";
+import { cloneDir, type LastSyncAccessor, type WorkingTreeWriter } from "../sync/cloneManager";
 import { repoToVaultPath } from "../sync/mirror";
 import { authorsByFileFromLog, validateRef, type AuthorsByFile } from "./diffModel";
 import type {
@@ -34,8 +34,6 @@ import { applyResolution, unresolvedConflicts, resolveConflictFile } from "../sy
 
 /** Default on-disk folder (under the vault) holding per-mapping clones. */
 export const DEFAULT_CLONE_DIRNAME = ".mugs-clones";
-
-const CLONE_LAYOUT: CloneLayout = { root: DEFAULT_CLONE_DIRNAME };
 
 /** True when `dir` is a checked-out git work tree (best-effort, never throws). */
 async function isWorkTree(client: GitClient, dir: string): Promise<boolean> {

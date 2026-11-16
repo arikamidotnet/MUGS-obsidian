@@ -13,7 +13,7 @@
  * seams (ChildProcessRunner, store-backed accessor) and calls this from the ribbon
  * and command.
  */
-import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy, Agent, PendingOperation, SyncPlanKind } from "../types";
+import type { FolderMapping, Credential, LastSyncState, FileConflict, ObsidianConfigPolicy, Agent, SyncPlanKind } from "../types";
 import type { Provider, RepoSummary } from "../providers/types";
 import type { HttpTransport } from "../providers/http";
 import type { ProviderInput } from "../providers/factory";

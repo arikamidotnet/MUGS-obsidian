@@ -13,7 +13,6 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, utimesSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
 import { ChildProcessRunner } from "../git/runner";
 import { MugsStore, MemoryIO } from "../store";

@@ -6,19 +6,6 @@
  */
 import { z } from "zod";
 import { DEFAULT_SYNC_POLICY } from "./types";
-import type {
-  FolderMapping,
-  LastSyncState,
-  ProviderKind,
-  SyncDirection,
-  SyncStatus,
-  PendingOpKind,
-  PendingOperation,
-  SyncPlanKind,
-  PlannedAction,
-  SyncPlan,
-  RepoIdentity,
-} from "./types";
 // Wave-B contract types (additive copy from WAVE-B-CONTRACTS.md):
 // PendingOperation, SyncPlan*, RepoIdentity, ResolveOutcome, ConflictResolver, DiffEndpoint, LastSyncState additions.
 // Zod schemas added below for the serializable subset (pendingOps in lastSync, etc.). Runtime-only types (ResolveOutcome etc.) are re-declared or typed from src/types.

@@ -8,16 +8,13 @@
  * Run: npx vitest run src/sync/runSync.harness.test.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from "node:fs";
+import { rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor } from "./driver";
 import { buildProvider } from "../providers/factory";
 import { ChildProcessRunner } from "../git/runner";
-import { MugsStore, MemoryIO } from "../store";
-import type { VaultMirror } from "./cloneManager";
-import { StoreDiffDataSource } from "../ui/defaultDataSources";
+import { MugsStore } from "../store";
 import type { FolderMapping, Credential, MugsSettings } from "../types";
 import { installHermeticGitIdentity, hermeticExecSync, expectedIdentityCloneDir, recordedCloneDir } from "./testkit";
 

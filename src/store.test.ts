@@ -1,4 +1,4 @@
-import { describe, it, expect, test } from "vitest";
+import { describe, it, expect } from "vitest";
 import { MugsStore, MemoryIO } from "./store";
 import { deriveKey, encryptBytes, generateSalt, derivePassphraseKey, encryptAesGcm, decryptAesGcm } from "./crypto";
 
@@ -523,11 +523,8 @@ describe("C02 lock state machine (explicit transitions + preconditions + failure
     ).toThrow(/locked/i);
 
     // Metadata-only updates (re-passing a masked or cipher form) may be allowed for label etc.,
-    // but must not change the durable secret.
-    // We simulate by calling with the display-masked form (implementation may treat as non-secret update).
-    const display = store2.getDisplaySettings().credentials[0];
-    // If the impl accepts a masked token as metadata update, it should not lose the original.
-    // For strictness, we only assert that a *real secret value* is rejected.
+    // but must not change the durable secret. For strictness, this test only asserts that
+    // a *real secret value* is rejected while locked.
     // The durable doc after attempted (rejected) change + save must still have the original ciphertext.
     await store2.save();
     const onDisk = (await io.read()) as any;

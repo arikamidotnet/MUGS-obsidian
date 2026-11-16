@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { withQuery, extractNextLink, paginateAll, FetchTransport, type HttpTransport, type HttpResponse, safeExtractNextLink, safeResolveNext, redactUrl } from "./http";
+import { withQuery, extractNextLink, paginateAll, FetchTransport, type HttpTransport, type HttpResponse, safeExtractNextLink, safeResolveNext } from "./http";
 
 /** Fake transport that routes on URL substring and records calls. */
 class FakeTransport implements HttpTransport {
@@ -111,11 +111,6 @@ describe("paginateAll", () => {
   });
 
   it("redacts URLs in pagination error messages (C04)", async () => {
-    const t = new FakeTransport(() => ({
-      status: 200,
-      body: [{ id: 1 }],
-      linkHeader: '<https://user:sekret@host/p?page=2>; rel="next"',
-    }));
     // The next page will 500; the error message must not contain the userinfo.
     const pages2: Record<string, HttpResponse> = {
       "https://user:sekret@host/p?page=2": { status: 500, body: {} },

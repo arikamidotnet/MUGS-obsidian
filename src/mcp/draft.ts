@@ -38,8 +38,10 @@ export function formatDraftMessage(draft: CommitDraft, agent: Agent): string {
   return `${core}${onBehalfOfTrailer(agent.ownerHuman)}`;
 }
 
-/** The author identity that will be recorded for a drafted commit. */
-export function draftAuthor(draft: CommitDraft, agent: Agent): DraftAuthor {
+/** The author identity that will be recorded for a drafted commit. (The draft
+ *  itself carries no identity — the acting agent does; the parameter is kept for
+ *  API symmetry with formatDraftMessage.) */
+export function draftAuthor(_draft: CommitDraft, agent: Agent): DraftAuthor {
   const ref = authorRefForAgent(agent);
   // A draft authored by an agent without a committer email has no "<...>" to attach.
   return ref.email ? { name: ref.name, email: ref.email } : { name: ref.name };

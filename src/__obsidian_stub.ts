@@ -17,7 +17,7 @@ export class Setting {
   constructor(containerEl: HTMLElement) { this.el = containerEl; }
   setName(name: string): this { const d = this.el.createDiv(); d.textContent = String(name); return this; }
   setDesc(desc: string): this { const d = this.el.createDiv({ cls: "setting-desc" }); d.textContent = String(desc); return this; }
-  addExtraButton(cb: (button: any) => void): this { return this; }
+  addExtraButton(_cb: (button: any) => void): this { return this; }
   addText(cb: (text: any) => void): this {
     const input = this.el.createEl("input", { type: "text" });
     const tc = { inputEl: input, setPlaceholder: (p: string) => { input.placeholder = p; return tc; }, setValue: (v: string) => { input.value = v; return tc; }, onChange: (_cb: (v: string) => void) => tc };
@@ -54,7 +54,7 @@ export class Setting {
     input.addEventListener("change", () => { if (onChangeCb) onChangeCb(input.checked); });
     return this;
   }
-  addSlider(cb: (slider: any) => void): this { return this; }
+  addSlider(_cb: (slider: any) => void): this { return this; }
   addButton(cb: (button: any) => void): this {
     const btn = document.createElement("button");
     let onClickCb: (() => void) | null = null;
@@ -63,7 +63,7 @@ export class Setting {
     btn.addEventListener("click", () => { if (onClickCb) onClickCb(); });
     return this;
   }
-  addColorPicker(cb: (picker: any) => void): this { return this; }
+  addColorPicker(_cb: (picker: any) => void): this { return this; }
   addField(_label: string, _input: HTMLElement): this { return this; }
   setClass(_cls: string): this { return this; }
 }

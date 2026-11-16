@@ -6,7 +6,7 @@
  * refused/failed save ROLLS BACK so the active settings stay intact.
  */
 import { describe, it, expect } from "vitest";
-import { SettingsDraft, type SettingsDraftTarget } from "./settingsDraft";
+import { SettingsDraft } from "./settingsDraft";
 import type { MugsSettings, Credential, FolderMapping } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 

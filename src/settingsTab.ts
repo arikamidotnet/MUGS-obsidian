@@ -526,11 +526,6 @@ export class MugsSettingTab extends PluginSettingTab {
     return;
   }
 
-  /** Human-readable direction label for a mapping. */
-  private directionText(d: SyncDirection): string {
-    return directionLabel(d);
-  }
-
   /** CSS class name for a sync-status dot, or "" when no status is recorded.
    *  Colors are theme variables so they adapt to light/dark/custom themes:
    *  error = red, conflict/pending = yellow, ok/up-to-date = green, none = gray. */
@@ -556,7 +551,8 @@ export class MugsSettingTab extends PluginSettingTab {
       // Header row: status dot + label + delete button. Rendered manually so the
       // sync-status dot sits beside the name (native Setting has no leading icon slot).
       const header = block.createDiv({ cls: "mugs-mapping-header" });
-      const dot = header.createEl("span", { cls: `mugs-dot ${this.statusDotClass(activeLastSync[m.id]?.status)}` });
+      // The dot element renders via createEl's side effect; no reference is needed.
+      header.createEl("span", { cls: `mugs-dot ${this.statusDotClass(activeLastSync[m.id]?.status)}` });
       header.createEl("span", { cls: "mugs-mapping-name", text: m.label });
       new Setting(header).addButton((b) =>
         b.setButtonText("Delete").onClick(() => {

@@ -97,7 +97,7 @@ async function paginateValues(
     let sendHeaders = headers;
     try {
       if (new URL(next).origin !== new URL(baseForOrigin).origin) {
-        const { Accept, accept, ...rest } = headers as any;
+        const { Accept, accept } = headers as any;
         sendHeaders = Accept || accept ? { Accept: (Accept || accept) as string } : {};
       }
     } catch {

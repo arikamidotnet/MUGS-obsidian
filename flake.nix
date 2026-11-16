@@ -11,7 +11,9 @@
   # outputs with plain `import nixpkgs {}` + builtins.listToAttrs instead.
   outputs = { self, nixpkgs }:
     let
-      version = "0.1.0";
+      # Single source of truth: the version in package.json (kept in sync by
+      # scripts/check-release.js). Reading it here keeps the Nix build DRY.
+      version = (builtins.fromJSON (builtins.readFile ./package.json)).version;
 
       mkSystem = system:
         let

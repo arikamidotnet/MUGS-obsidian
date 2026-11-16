@@ -5,7 +5,7 @@ import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
 import { cloneDir } from "./cloneManager";
-import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, resolveRepo } from "./driver";
+import { syncAllMappings, storeWritableAccessor, resolveRepo } from "./driver";
 import { identityCloneDir, canonicalizeRemote } from "./repoIdentity";
 import { EditorOpenGuard } from "./editorOpen";
 import { resumeKey } from "./resume";
@@ -140,7 +140,7 @@ interface SpyState {
 function spyAccessor(base?: string): { accessor: Parameters<typeof syncAllMappings>[0]["lastSync"]; state: SpyState } {
   const state: SpyState = { pull: [], push: [], conflict: [] };
   const accessor = {
-    lastRemoteSha: (id: string) => base,
+    lastRemoteSha: (_id: string) => base,
     recordPull: (id: string, remoteSha: string) => {
       state.pull.push([id, remoteSha]);
     },
