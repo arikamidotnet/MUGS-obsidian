@@ -16,8 +16,28 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.9.
+The latest verified publication when these instructions were written is 0.4.10.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.10 highlights
+
+- **Maintenance & hardening release.** No user-facing behavior change; the
+  sync engine, conflict surfacing, Review workflow and scheduling model are
+  unchanged from 0.4.9.
+  - **Dead code removed.** Unused imports, locals and parameters swept across
+    the sync core, providers, store, settings UI and tests; the `draftAuthor`
+    helper no longer takes the commit draft it never read (the acting agent
+    alone determines the recorded author).
+  - **Stricter type-checking.** `noUnusedLocals` and `noUnusedParameters` are
+    now enabled in `tsconfig.json`, so the build fails on any future dead
+    binding instead of letting it accumulate.
+  - **Nix build is DRY.** `flake.nix` reads the version from `package.json`
+    (the single source of truth kept in sync by `scripts/check-release.js`)
+    instead of a hardcoded value that had drifted to `0.1.0`.
+  - **Test portability.** The real-git regression suite shells out via
+    `/bin/sh` rather than `/bin/bash`, which is absent on some hosts (e.g.
+    NixOS); the commands are plain POSIX git invocations, so behavior is
+    identical on GitHub runners.
 
 ## 0.4.9 highlights
 

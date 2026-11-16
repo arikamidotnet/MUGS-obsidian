@@ -113,10 +113,11 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Preflight & staged rollout removed: the opt-in staged-enablement feature (the Preflight page, per-folder canaries before a mapping joined automatic sync, rollout records in the sync policy) is gone. Every folder now syncs automatically whenever the vault is not globally paused — one scheduling model, no enablement state to manage.
-          - Why: a killed session left a real vault frozen in staged mode — the mode had no exit, a recorded pass failure permanently blocked the canary that could clear it, and the shutdown abort was written into durable state as a blocked entry. The feature was removed rather than patched.
-          - Migration: saved sync.rollout state in existing data.json files is ignored on load (the schema no longer defines it) and dropped on the next save; vaults previously frozen in staged mode resume normal automatic sync after upgrading.
-          - Unchanged: the global pause remains the maintenance switch; clean three-way auto-merge, genuine-conflict surfacing, the Review workflow, reconciliation proof and the multi-client soak gate all behave exactly as in 0.4.8.
+          - Maintenance & hardening release: no user-facing behavior change. The sync engine, conflict surfacing, Review workflow and scheduling model are unchanged from 0.4.9.
+          - Dead code removed: unused imports, locals and parameters swept across the sync core, providers, store, settings UI and tests; the draftAuthor helper no longer takes the commit draft it never read (the acting agent alone determines the recorded author).
+          - Stricter type-checking: noUnusedLocals and noUnusedParameters are now enabled in tsconfig.json, so the build fails on any future dead binding instead of letting it accumulate.
+          - Nix build is DRY: flake.nix reads the version from package.json (the single source of truth kept in sync by scripts/check-release.js) instead of a hardcoded value that had drifted to 0.1.0.
+          - Test portability: the real-git regression suite shells out via /bin/sh rather than /bin/bash, which is absent on some hosts (e.g. NixOS); the commands are plain POSIX git invocations, so behavior is identical on GitHub runners.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -129,7 +130,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — Preflight & staged rollout removed (one automatic scheduling model)" \
+            --title "${VERSION} — maintenance & hardening (dead code, stricter type-checking, DRY Nix build, test portability)" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \
