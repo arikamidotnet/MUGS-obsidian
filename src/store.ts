@@ -187,7 +187,8 @@ export class MugsStore {
    *   (true returned). A wrong passphrase leaves those credentials in the
    *   visible "missing token" state (false returned) — nothing throws, and a
    *   later unlock with the right passphrase recovers them.
-   * Never throws; never persists the passphrase.
+   * Never throws (corrupt persisted KDF parameters resolve to false); never persists
+   * the passphrase.
    */
   async unlock(passphrase: string): Promise<boolean> {
     const sec = this.security();
@@ -200,7 +201,14 @@ export class MugsStore {
     if (this.unlockedFlag) {
       // Verify by deriving a trial key and checking it can decrypt at least one
       // pw-cipher stored token whose plaintext we already know via runtime.
-      const trialKey = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+      let trialKey: CryptoKey;
+      try {
+        trialKey = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+      } catch {
+        // Corrupt persisted KDF params (e.g. an invalid salt) — treat like a wrong
+        // passphrase instead of throwing out of a method documented "never throws".
+        return false;
+      }
       for (const c of this.settings.credentials) {
         if (!c.token || !c.token.startsWith(PASSPHRASE_PREFIX)) continue;
         const known = this.runtimeTokens.get(c.id);
@@ -217,7 +225,13 @@ export class MugsStore {
       return true;
     }
 
-    const key = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+    let key: CryptoKey;
+    try {
+      key = await derivePassphraseKey(passphrase, sec.kdf.salt, sec.kdf.iterations);
+    } catch {
+      // Corrupt persisted KDF params — tokens stay locked; never throw.
+      return false;
+    }
     let legacyKey: CryptoKey | undefined;
     const legacy = async (): Promise<CryptoKey> => (legacyKey ??= await deriveKey(keyHint(this.settings)));
     let failures = 0;

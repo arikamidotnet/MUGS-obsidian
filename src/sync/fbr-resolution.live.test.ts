@@ -8,7 +8,10 @@
  * What it proves, against the REAL vault + repo, through the production engine:
  * 1. Leftovers from an earlier interrupted run are removed from BOTH sides via
  *    a dedicated raw clone BEFORE any engine pass (so no stale divergence can
- *    pollute the convergence pass).
+ *    pollute the convergence pass). Cleanup is REPO-WIDE: an older version of
+ *    this suite wrote its probe file without the mapping's scope prefix, and an
+ *    interrupted run left it at the repository root — outside every mapping's
+ *    scope, where no engine pass or scoped cleanup could ever remove it.
  * 2. A repository-only review entry is recovered via the real decideReviewBatch
  *    flow — copied into the vault with blob-verified bytes (skipped when every
  *    entry was already recovered by an earlier run).
@@ -142,7 +145,9 @@ describe.skipIf(!(process.env.MUGS_FBR_CANARY === "1" && process.env.MUGS_FBR_RE
       const vaultLeftovers = walk(folder).filter(rel => TEST_FILE.test(rel));
       for (const rel of vaultLeftovers) unlinkSync(vaultFile(rel));
       const tree = await remoteTree();
-      const remoteLeftovers = [...tree].filter(p => TEST_FILE.test(p.slice(scopePrefix.length)) && p.startsWith(scopePrefix));
+      // Repo-wide match: TEST_FILE is specific to this suite's artifacts, and a
+      // scope-restricted filter once stranded a root-level probe file forever.
+      const remoteLeftovers = [...tree].filter(p => TEST_FILE.test(p));
       if (remoteLeftovers.length > 0) {
         for (const p of remoteLeftovers) {
           const local = join(rawDir, p);
@@ -153,7 +158,7 @@ describe.skipIf(!(process.env.MUGS_FBR_CANARY === "1" && process.env.MUGS_FBR_RE
         await rawAt.push("origin", branch);
       }
       const afterCleanup = await remoteTree();
-      expect([...afterCleanup].some(p => p.startsWith(scopePrefix) && TEST_FILE.test(p.slice(scopePrefix.length)))).toBe(false);
+      expect([...afterCleanup].some(p => TEST_FILE.test(p))).toBe(false);
       expect(walk(folder).some(rel => TEST_FILE.test(rel))).toBe(false);
 
       // --- 2. converge through the engine ------------------------------------

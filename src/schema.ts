@@ -8,7 +8,6 @@ import { z } from "zod";
 import { DEFAULT_SYNC_POLICY } from "./types";
 import type {
   MugsSettings,
-  Credential,
   FolderMapping,
   LastSyncState,
   ProviderKind,
@@ -300,11 +299,6 @@ export function parseSettings(raw: unknown): Settings {
 /** Coerce an unknown settings blob to the domain interface (best-effort). */
 export function toDomain(raw: unknown): MugsSettings {
   return parseSettings(raw) as unknown as MugsSettings;
-}
-
-/** Return a copy of a credential with its token redacted for display. */
-export function redactCredential(c: Credential): Omit<Credential, "token"> & { token: string } {
-  return { ...c, token: redactToken(c.token) };
 }
 
 /** Mask a token so only the last 4 chars are visible (if long enough). */

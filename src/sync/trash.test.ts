@@ -91,3 +91,62 @@ describe("FileSystemTrashStore (S06 versioning + safe restore)", () => {
     }
   });
 });
+
+describe("trash key/path validation (reject, never sanitize)", () => {
+  it("FS store: trash() throws on unsafe mapping ids/paths BEFORE any disk write", () => {
+    const base = mkdtempSync(join(tmpdir(), "mugs-trash-"));
+    try {
+      const store = new FileSystemTrashStore(join(base, "trash"));
+      expect(() => store.trash("../escape", "a.md", "x")).toThrow(/unsafe/i);
+      expect(() => store.trash("m1/sub", "a.md", "x")).toThrow(/unsafe/i);
+      expect(() => store.trash("m1", "../escape.md", "x")).toThrow(/unsafe/i);
+      expect(() => store.trash("..", "a.md", "x")).toThrow(/unsafe/i);
+      // Nothing escaped the (never created) trash root.
+      expect(existsSync(join(base, "trash"))).toBe(false);
+      expect(existsSync(join(base, "escape.md"))).toBe(false);
+      expect(existsSync(join(base, "a.md"))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("FS store: clearMapping() refuses unsafe ids so rmSync never sees an escaped path", () => {
+    const base = mkdtempSync(join(tmpdir(), "mugs-trash-"));
+    try {
+      const store = new FileSystemTrashStore(join(base, "trash"));
+      store.trash("m1", "a.md", "keep");
+      expect(() => store.clearMapping("../..")).toThrow(/unsafe/i);
+      expect(() => store.clearMapping("a/b")).toThrow(/unsafe/i);
+      // The legitimate record survived the refused clears…
+      expect(store.restore("m1", "a.md")).toBe("keep");
+      // …and a safe clear still works.
+      store.clearMapping("m1");
+      expect(store.restore("m1", "a.md")).toBe("");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("FS store: resolver-style `:` keys round-trip; reads degrade safely on unsafe input", () => {
+    const base = mkdtempSync(join(tmpdir(), "mugs-trash-"));
+    try {
+      const store = new FileSystemTrashStore(join(base, "trash"));
+      store.trash("m1:vault", "notes/a.md", "vault copy");
+      expect(store.restore("m1:vault", "notes/a.md")).toBe("vault copy");
+      expect(store.restore("m1", "../x.md")).toBe("");
+      expect(store.restoreTo("../escape", "a.md", base)).toMatchObject({ ok: false, reason: "unsafe-path" });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("MemoryTrashStore enforces the same rules (seam parity)", () => {
+    const t = new MemoryTrashStore();
+    expect(() => t.trash("../escape", "a.md", "x")).toThrow(/unsafe/i);
+    expect(() => t.trash("m1/sub", "a.md", "x")).toThrow(/unsafe/i);
+    expect(() => t.trash("m1", "../escape.md", "x")).toThrow(/unsafe/i);
+    expect(t.size).toBe(0);
+    t.trash("m1:vault", "a.md", "ok");
+    expect(t.get("m1:vault", "a.md")).toBe("ok");
+  });
+});

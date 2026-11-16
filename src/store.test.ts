@@ -855,3 +855,45 @@ describe("upsertCredential metadata-edit semantics (masked/cipher re-supply vs r
     expect(store2.getToken("c1")).toBe("glpat-ROTATED-SECRET");
   });
 });
+
+/**
+ * unlock() is documented "never throws" — a corrupt data.json (invalid KDF salt)
+ * must degrade to a failed unlock (false), not an exception the settings UI has
+ * no try/catch for.
+ */
+describe("unlock() robustness against corrupt KDF params", () => {
+  const badKdf = { algorithm: "PBKDF2-SHA-256" as const, salt: "!!!not-base64!!!", iterations: 1000 };
+
+  it("resolves false (never throws) when the persisted salt is not valid base64", async () => {
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [{ id: "c1", label: "work", kind: "gitlab", token: "aesgcm-pw:not-a-real-cipher" }],
+      mappings: [],
+      lastSync: {},
+      conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [],
+      staging: {},
+      security: { encryptCredentials: true, kdf: badKdf },
+    });
+    const store = new MugsStore(io);
+    await store.load();
+    expect(store.isLocked()).toBe(true);
+    await expect(store.unlock("whatever")).resolves.toBe(false);
+    // Still locked; a corrupt vault never surfaces a fake secret.
+    expect(store.isLocked()).toBe(true);
+    expect(store.getToken("c1")).toBeUndefined();
+  });
+
+  it("resolves false when KDF params corrupt AFTER a successful unlock (re-verify branch)", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-SECRET" });
+    await store.setEncryptionPassphrase("right-pass");
+    expect(await store.unlock("right-pass")).toBe(true);
+    // Corrupt the persisted salt in place (as a partial data.json clobber would).
+    store.setSecurity({ encryptCredentials: true, kdf: badKdf } as never);
+    await expect(store.unlock("right-pass")).resolves.toBe(false);
+  });
+});

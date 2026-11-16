@@ -9,9 +9,9 @@
  *
  * Attribution colors come from assignAuthorColors (stable per name) so the full-tab
  * view and the sidebar panel tint the same author identically. Folding + action
- * labels are pure presentation built on describeConflictActions / attributeHunks.
+ * labels are pure presentation built on describeConflictActions / assignAuthorColors.
  */
-import { parseUnifiedDiff, attributeHunks, authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile, type DiffLine } from "./diffModel";
+import { authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile, type DiffLine } from "./diffModel";
 import { describeConflictActions, type ConflictAction } from "../sync/conflictActions";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
@@ -267,7 +267,7 @@ export function renderConflicts(
  * `colors` maps author name → accent color; when omitted a default palette is built
  * from the authors present in the parsed diff.
  */
-export function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<string, string>): void {
+function renderDiff(parsed: ParsedDiff, host: HTMLElement, colors?: Map<string, string>): void {
   if (parsed.files.length === 0) {
     // Render a contained empty state (styled via .mugs-diff-output .mugs-empty-state)
     // so it matches the other "in sync" / "no baseline" cards in the Diff view.
@@ -414,14 +414,4 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
     else if (line.type === "removed") oldNo++;
     else { oldNo++; newNo++; }
   }
-}
-
-/** Parse + attribute a raw diff string, then render it into `host`. Convenience for views. */
-export function renderDiffText(
-  diffText: string,
-  host: HTMLElement,
-  authorsByFile: Record<string, { name: string; email?: string }[]> = {},
-): void {
-  const parsed = attributeHunks(parseUnifiedDiff(diffText), authorsByFile);
-  renderDiff(parsed, host);
 }

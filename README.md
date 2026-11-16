@@ -16,8 +16,39 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.7.
+The latest verified publication when these instructions were written is 0.4.8.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.8 highlights
+
+- **Second deep-audit sweep.** A full re-read of the sync core, data plane,
+  git layer, providers, runtime and UI, with fixes:
+  - **Trash namespace collision.** Mirror-pull vault deletions/overwrites
+    recorded their recovery copies under vault-root-relative paths while
+    every other recorder used repo-relative keys — two *different* files
+    could collide on one `.mugs-trash` key whenever a repo folder shares the
+    mapping's local-folder name, and a remote-driven deletion's restore
+    could recover an empty copy. All recorders now share the repo-relative
+    namespace, pinned by a new real-git e2e test.
+  - **Trash key validation.** The filesystem trash store validates mapping
+    ids and paths before any disk access (reject, never sanitize):
+    recording and clearing throw on unsafe input — an unrecordable deletion
+    cannot proceed and the recursive remove never sees an escaped path —
+    while reads degrade to empty results.
+  - **`unlock()` truly never throws.** Corrupt persisted key-derivation
+    parameters (e.g. an invalid salt in `data.json`) resolve to a failed
+    unlock instead of throwing out of the settings flow.
+  - **Dead code and stale comments removed.** Unused `paginateAllSafe`,
+    `redactCredential`, `renderDiffText` and the `autoResolvedPaths` merge
+    vestige; a misleading `mirrorPull` parameter name; pre-S06 comments
+    claiming genuine conflicts were auto-resolved (they are always
+    surfaced for review).
+  - **Live-suite hardening.** The real-vault resolution suite's leftover
+    cleanup now scans the whole repository (an older suite version could
+    strand its probe file at the repo root — outside every mapping's scope,
+    where no engine pass could ever remove it), and the real-vault rollout
+    gate asserts structural fail-closed invariants instead of a
+    point-in-time snapshot of the vault's saved state.
 
 ## 0.4.7 highlights (0.4.4–0.4.7)
 
@@ -281,6 +312,8 @@ remains part of the rollout checklist for each team.
   Settings → Security. A wrong passphrase leaves credentials in
   a visible "missing token" state — nothing is lost or overwritten. Vaults from
   the older hint-based scheme migrate to the passphrase scheme on first unlock.
+  Corrupt saved key-derivation parameters degrade to a failed unlock
+  (credentials stay locked) rather than an error.
 - Treat an unencrypted vault with the same care as a password manager.
 - At runtime, tokens are passed to git/provider calls via per-invocation environment variables only (never written to argv, `.git/config`, or persistent logs).
 - Tokens are redacted in UI and masked in most error paths. Provider errors may still surface URLs.
@@ -352,7 +385,8 @@ ownership evidence is upgraded by analysis.
   the trash store), and a resolution is acknowledged only after the state save
   persists it — a refused save keeps the conflict and records a durable retry.
 - Sync-driven deletions are recorded in the trash store
-  (`<vault>/.mugs-clones/.mugs-trash`) before removal, so remotely deleted and
+  (`<vault>/.mugs-clones/.mugs-trash`, keyed by mapping id + repo-relative
+  path) before removal, so remotely deleted and
   both-sides-deleted content stays recoverable.
 - If a clone is in a bad state, pause sync and preserve its index, worktree,
   refs, and untracked files before investigating. Do not delete a clone that

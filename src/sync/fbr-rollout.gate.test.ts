@@ -3,7 +3,13 @@
  *  and MUGS_FBR_DATA (the absolute path of the plugin data.json to inspect) are
  *  set — no operator path ships in the public source. Loads data.json through
  *  the real schema into MemoryIO — read-only, nothing is ever saved back, no
- *  credential is read, no clone or remote is touched. */
+ *  credential is read, no clone or remote is touched.
+ *
+ *  Structural invariants ONLY: the vault's rollout state legitimately evolves
+ *  (reviews get recovered, staged mode gets entered, pause gets toggled), so
+ *  this gate pins the fail-closed PROPERTIES — never a point-in-time snapshot
+ *  of the saved state (the first version asserted paused/legacy-mode and a
+ *  nonempty review backlog, and went stale the moment the vault moved on). */
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { MugsStore, MemoryIO } from "../store";
@@ -20,17 +26,15 @@ describe.skipIf(process.env.MUGS_FBR_CANARY !== "1" || !DATA)("real-vault staged
     const settings = await store.load();
     expect(store.loadError).toBeUndefined();
 
-    // Live invariants this release must preserve: paused, untouched legacy
-    // scheduling, no pending operations, and a nonempty review backlog to gate.
-    expect(settings.sync.paused).toBe(true);
-    expect(settings.sync.rollout).toBeUndefined(); // legacy mode, untouched
+    // Structural safety invariants of the live state, whatever mode it is in:
+    // mappings exist, and none carries unapplied pending operations.
     expect(settings.mappings.length).toBeGreaterThan(0);
+    expect(settings.mappings.some(m => (settings.lastSync[m.id]?.pendingOps ?? []).length > 0)).toBe(false);
     const reviewByMapping = new Map(settings.mappings.map(m => [m.id,
       Object.keys(settings.lastSync[m.id]?.reconciliation?.review ?? {}).length]));
-    expect([...reviewByMapping.values()].reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
-    expect(settings.mappings.some(m => (settings.lastSync[m.id]?.pendingOps ?? []).length > 0)).toBe(false);
 
-    // Entering staged mode (as Preflight does) starts with NOTHING automatic.
+    // Entering staged mode (as Preflight does) starts with NOTHING automatic —
+    // from the live settings, whatever their current rollout/pause state.
     const staged = { ...structuredClone(settings.sync), rollout: { mode: "staged" as const, enabledMappingIds: [] as string[], blocked: {} as Record<string, any>, lastResult: {} as Record<string, any> } };
     expect(automaticMappings({ ...settings, sync: staged })).toEqual([]);
 
@@ -49,12 +53,24 @@ describe.skipIf(process.env.MUGS_FBR_CANARY !== "1" || !DATA)("real-vault staged
         expect(after.enabledMappingIds).not.toContain(mapping.id);
       }
     }
-    expect(withReview).toBeGreaterThan(0);
+    if ([...reviewByMapping.values()].some((n) => n > 0)) expect(withReview).toBeGreaterThan(0);
 
     // Even a hypothetical pass that reports "ok" is not a clean canary while
     // review entries remain in durable state — the gate reads state, not luck.
-    const target = settings.mappings.find(m => (reviewByMapping.get(m.id) ?? 0) > 0)!;
+    // Proven on a COPY of the live settings with a probe review entry injected,
+    // so a fully recovered vault (empty backlog) still proves the gate.
+    const injected = structuredClone(settings);
+    const target = injected.mappings[0];
+    const ls = injected.lastSync[target.id] ?? { mappingId: target.id, status: "pending" as const };
+    injected.lastSync[target.id] = ls;
+    ls.reconciliation = {
+      version: 1,
+      fingerprint: "0".repeat(64),
+      proven: {},
+      review: { "MUGS-gate-probe.md": { ref: "0".repeat(40), blob: "0".repeat(40) } },
+      decisions: {},
+    };
     const okOutcome: SyncOutcome = { mappingId: target.id, label: target.label, status: "ok" };
-    expect(rolloutFailure(okOutcome, settings)).toMatch(/review/);
+    expect(rolloutFailure(okOutcome, injected)).toMatch(/review/);
   }, 30_000);
 });

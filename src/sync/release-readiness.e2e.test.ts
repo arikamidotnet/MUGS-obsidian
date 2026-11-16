@@ -193,6 +193,41 @@ describe("release readiness — real git end-to-end", () => {
     } finally { f.cleanup(); }
   }, 120_000);
 
+  it("records a remote-driven vault deletion in .mugs-trash under the REPO-relative key", async () => {
+    const f = makeFixture("trash-key");
+    try {
+      f.seedRemote({ "note.md": "original content\n", "keep.md": "keep\n" });
+      const trash = new MemoryTrashStore();
+      const deps = { ...f.deps(), trash };
+      // Pass 1 (first-sync pull): the remote populates the vault, establishing correspondence.
+      const first = await syncAllMappings(deps);
+      expect(first[0].status).toBe("ok");
+      expect(readFileSync(join(f.syncedVault, "note.md"), "utf8")).toBe("original content\n");
+      // A second device deletes note.md on the remote.
+      const scratch = join(f.base, "scratch-del");
+      hermeticExecSync(`git clone -q "${f.remotePlain}" "${scratch}"`);
+      unlinkSync(join(scratch, "note.md"));
+      hermeticExecSync(`git -C "${scratch}" config user.name O && git -C "${scratch}" config user.email o@l`);
+      hermeticExecSync(`git -C "${scratch}" add -A && git -C "${scratch}" commit -q -m "delete note.md"`);
+      hermeticExecSync(`git -C "${scratch}" push -q "${f.remotePlain}" main`);
+      rmSync(scratch, { recursive: true, force: true });
+      // Pass 2: the deletion propagates to the vault. The recovery copy must land under
+      // the REPO-relative key ("note.md") — the namespace every other recorder uses —
+      // NOT the vault-root-relative key ("Synced/note.md"), which would collide with a
+      // DIFFERENT file's record whenever a repo folder shares the mapping's localFolder
+      // name. (Pre-fix, the clone-side empty record was the only one under "note.md",
+      // so a restore would have recovered "" instead of the real content.)
+      const second = await syncAllMappings(deps);
+      expect(second[0].status).toBe("ok");
+      expect(existsSync(join(f.syncedVault, "note.md"))).toBe(false);
+      expect(trash.get("map-rc", "note.md")).toBe("original content\n");
+      expect(trash.has("map-rc", "Synced/note.md")).toBe(false);
+      // The unrelated file is untouched locally and still on the remote.
+      expect(readFileSync(join(f.syncedVault, "keep.md"), "utf8")).toBe("keep\n");
+      expect(f.remoteHas("keep.md")).toBe("keep\n");
+    } finally { f.cleanup(); }
+  }, 120_000);
+
   it.each(["push-only", "pull-only", "push-pull"] as const)(
     "%s: a 250-file idle pass reads no content and does not rewrite, commit or push",
     async (direction) => {

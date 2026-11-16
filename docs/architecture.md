@@ -14,7 +14,7 @@ The guiding architectural invariant, repeated throughout, is:
 
 > **All correctness-sensitive logic lives in pure, dependency-free, unit-tested modules under `src/sync/` (and a few under `src/ui/`, `src/providers/`, `src/membership/`). The Obsidian/glue layer (`main.ts`, `settingsTab.ts`, the views) is thin: it wires injected seams and renders data — it never contains merge, scope, or policy logic.**
 
-This invariant is what makes the vitest suite (980 tests across 83 files at 0.4.7, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
+This invariant is what makes the vitest suite (987 tests across 83 files at 0.4.8, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
 
 ### 1.1 The sync pipeline
 
@@ -152,7 +152,7 @@ Genuine conflicts (overlapping edits, divergent add/add) are **recorded and surf
 
 1. **Deletes as values (jj model).** Content is `string | undefined`; `undefined` is a deletion, strictly distinct from an empty file (`""`). `threeWayMerge` resolves every delete case deterministically (§3.1) before the line-level diff3 walk ever sees a deletion.
 2. **Real-time automatic merging.** Clean divergences are auto-merged into the working tree on pull and pushed through the same pipeline — "real-time" is approximate (git polling), but local edits propagate via event triggers within one ~1.5 s coalesce window (§5).
-3. **`.mugs-trash` (`trash.ts`).** Before any file is removed during sync, its content is recorded at the clone root's trash store — `<cloneRoot>/.mugs-trash/<mappingId>/<path>` with a versioned suffix (`.mugs-v<ts>-<hash>`), so repeated deletions never overwrite an earlier recovery copy — making the deletion recoverable and distinguishable from a user delete.
+3. **`.mugs-trash` (`trash.ts`).** Before any file is removed during sync, its content is recorded at the clone root's trash store — `<cloneRoot>/.mugs-trash/<mappingId>/<path>` with a versioned suffix (`.mugs-v<ts>-<hash>`), so repeated deletions never overwrite an earlier recovery copy — making the deletion recoverable and distinguishable from a user delete. `<path>` is always **repo-relative**: one canonical namespace shared by every recorder (clone-side deletes, mirror-pull vault deletes, reconciliation deletes, and the conflict resolver's `<mappingId>:vault` vault-side copies), so two different files can never collide on one key. Keys and paths are validated before any disk access and rejected — never sanitized — so an unrecordable deletion cannot proceed.
 
 **Safe applier (`applier.ts`).** **Ordering** keeps write-backs from corrupting the tree: writes before deletes; writes parents-before-children, deletes children-before-parents (`orderApplyOps`, used by every production apply). The pure `ApplyGuard` per-path re-entrancy serializer is unit-tested but unwired; in production, stacking is prevented by the single in-flight pass guard and by suppressing vault events the plugin itself caused (`internalWritePaths`, main.ts).
 
@@ -288,7 +288,7 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 ## 5. Validation & testing
 
-All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **980 tests across 83 files** at 0.4.7, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
+All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **987 tests across 83 files** at 0.4.8, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
 
 - **Merge correctness (Area 3):** same-change accept/keep; modify/delete both directions; delete/delete; delete/add; empty-vs-deleted distinction — `merge.test.ts`, `conflict.test.ts`.
 - **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; the canonical binary-extension guard (all-lowercase invariant + case-insensitive lookups, pinned after the capitalized-`"Drawing"` entry silently never matched); safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.
@@ -308,7 +308,7 @@ All new logic lives in pure modules and is covered by **vitest with fakes** (no 
 
 ```bash
 npm run build     # tsc --noEmit --skipLibCheck && node esbuild.config.min.js  (bundles CSS into main.js)
-npx vitest run    # full suite (980 tests / 83 files at 0.4.7, incl. real-git e2e)
+npx vitest run    # full suite (987 tests / 83 files at 0.4.8, incl. real-git e2e)
 npm run dev       # esdev watch build for iteration
 ```
 

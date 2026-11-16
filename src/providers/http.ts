@@ -189,36 +189,3 @@ export function safeExtractNextLink(link: string | null | undefined, base: strin
   const raw = extractNextLink(link);
   return safeResolveNext(raw, base);
 }
-
-/**
- * Secure pagination that validates every next link against the configured base
- * and never forwards auth headers cross-origin. Redacts URLs in error messages.
- */
-export async function paginateAllSafe(
-  transport: HttpTransport,
-  url: string,
-  headers: Record<string, string>,
-  baseForOrigin: string,
-): Promise<unknown[]> {
-  const acc: unknown[] = [];
-  let next: string | null = url;
-  let pages = 0;
-  while (next) {
-    if (++pages > MAX_PAGES) {
-      throw new Error(`provider pagination exceeded ${MAX_PAGES} pages — aborting (${redactUrl(url)})`);
-    }
-    // Only forward auth headers when the URL is within the approved origin.
-    const u = new URL(next);
-    const baseOrigin = new URL(baseForOrigin).origin;
-    const sendHeaders = u.origin === baseOrigin ? headers : { Accept: headers.Accept || "application/json" };
-    const res = await transport.get<unknown>(next, { headers: sendHeaders });
-    if (res.status >= 400) {
-      throw new Error(`provider API ${res.status} error paginating${res.message ? ` — ${res.message}` : ""} (${redactUrl(next)})`);
-    }
-    if (Array.isArray(res.body)) acc.push(...(res.body as unknown[]));
-    // Resolve relative links against the current page URL.
-    const candidate = safeExtractNextLink(res.linkHeader, next);
-    next = candidate;
-  }
-  return acc;
-}
