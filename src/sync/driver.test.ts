@@ -5,7 +5,7 @@ import type { ProviderInput } from "../providers/factory";
 import type { GitRunner, GitResult } from "../git/types";
 import type { ConflictStore, WorkingTreeWriter } from "./cloneManager";
 import { cloneDir } from "./cloneManager";
-import { syncAllMappings, storeWritableAccessor, storeConflictAccessor } from "./driver";
+import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, resolveRepo } from "./driver";
 import { identityCloneDir, canonicalizeRemote } from "./repoIdentity";
 import { EditorOpenGuard } from "./editorOpen";
 import { resumeKey } from "./resume";
@@ -216,6 +216,21 @@ describe("syncAllMappings — skips", () => {
       lastSync: spyAccessor().accessor,
     });
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: /repo not found/ });
+  });
+});
+
+describe("resolveRepo — mapping → repository resolution", () => {
+  it("matches a pinned repoRef, a legacy id match, and the single-repo fallback; never guesses among several", () => {
+    const repos = [fakeRepo("alpha"), fakeRepo("beta")];
+    // Pinned repoRef (scoped links sharing one clone) resolves directly.
+    expect(resolveRepo(repos, { id: "random-mapping-id", repoRef: "beta" })).toMatchObject({ id: "beta" });
+    // Legacy whole-repo link: the mapping id IS the repo id.
+    expect(resolveRepo(repos, { id: "alpha" })).toMatchObject({ id: "alpha" });
+    // Legacy folder-scoped link with a random id: exactly ONE visible repo is
+    // unambiguous — the credential can only be pointing there.
+    expect(resolveRepo([fakeRepo("only")], { id: "random-uuid" })).toMatchObject({ id: "only" });
+    // Several visible repos and no match: unresolved rather than guessed.
+    expect(resolveRepo(repos, { id: "random-uuid" })).toBeUndefined();
   });
 });
 

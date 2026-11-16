@@ -7,7 +7,6 @@
 import { z } from "zod";
 import { DEFAULT_SYNC_POLICY } from "./types";
 import type {
-  MugsSettings,
   FolderMapping,
   LastSyncState,
   ProviderKind,
@@ -288,11 +287,6 @@ export type PendingOperationSchemaType = z.infer<typeof pendingOperationSchema>;
 export function parseSettings(raw: unknown): Settings {
   // Coerce null/undefined to an empty object so defaults fill in the rest.
   return mugsSettingsSchema.parse(raw ?? {});
-}
-
-/** Coerce an unknown settings blob to the domain interface (best-effort). */
-export function toDomain(raw: unknown): MugsSettings {
-  return parseSettings(raw) as unknown as MugsSettings;
 }
 
 /** Mask a token so only the last 4 chars are visible (if long enough). */

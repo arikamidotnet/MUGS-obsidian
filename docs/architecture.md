@@ -290,7 +290,7 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 ## 5. Validation & testing
 
-All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **965 tests across 80 files** at 0.4.9, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
+All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **966 tests across 80 files** at 0.4.9, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
 
 - **Merge correctness (Area 3):** same-change accept/keep; modify/delete both directions; delete/delete; delete/add; empty-vs-deleted distinction — `merge.test.ts`, `conflict.test.ts`.
 - **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; the canonical binary-extension guard (all-lowercase invariant + case-insensitive lookups, pinned after the capitalized-`"Drawing"` entry silently never matched); safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.

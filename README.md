@@ -189,9 +189,9 @@ src/
   providers/          backend adapters: contract, GitLab v4, HTTP transport, schema + provider factory
   sync/               sync driver (syncAllMappings orchestration), clone manager (identity-keyed shared clones), and the merge contract: classifier, rebase policy, exclusion, merge/conflict, reconciliation (path-level ownership proof)
   runtime/            app-runtime transactions: manual conflict resolution, status reporting,
-                      staged rollout/canary gating, saved-evidence preflight, bulk review
+                      bulk review, settings draft/Apply, clone locks, adapter path safety
   membership/         multi-user membership merge (roster + local activity -> summary)
-  ui/                 Obsidian views (Overview, Changes, Review, Conflicts, Preflight & rollout)
+  ui/                 Obsidian views (Overview, Changes, Review, Conflicts)
                       + pure models + data seams
 bench/              performance benchmarks (npm run bench)
 ```
@@ -453,8 +453,7 @@ never credentials.
    starts paused automatically; unpause only after reviewing the connection.
 3. Review the mapping, backup and Start new connections with setting; unpause and
    Apply only when safe. Background sync then runs without a routine Sync now click.
-   Teams preferring per-folder enablement can use the
-   [Preflight & staged rollout](docs/rollout.md) flow instead of a global unpause.
+   For a staged team rollout, see the [guided rollout checklist](docs/rollout.md).
 4. Watch the status bar: `⟳` while syncing (with live phase text), `✓ synced HH:MM`, `⚠ needs merge`,
 `✗ sync issues` / `✗ failed`, `⏸ paused`, `👁 hidden`. **Clicking it** opens the Conflicts panel when
 something needs a manual merge; the Review tab when repository files need decisions; otherwise the

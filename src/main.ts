@@ -15,7 +15,7 @@ import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
 import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
-import { ReconciliationView } from "./ui/reconciliationView";
+import { ReconciliationView, MUGS_RECONCILIATION_VIEW_TYPE } from "./ui/reconciliationView";
 import type { ReconciliationReviewDeps, ReconciliationReviewRow } from "./ui/reconciliationReview";
 import { setMugsContext } from "./ui/dataSources";
 import {
@@ -226,7 +226,7 @@ export default class MugsPlugin extends Plugin {
           this.uiListeners.add(listener);
           return () => { this.uiListeners.delete(listener); };
         },
-        openReview: () => void this.openView("mugs-reconciliation"),
+        openReview: () => void this.openView(MUGS_RECONCILIATION_VIEW_TYPE),
         openSettings: () => this.openSettings(),
         getState: () => ({
           paused: this.store.getSettings().sync.paused,
@@ -238,7 +238,7 @@ export default class MugsPlugin extends Plugin {
     this.registerView("mugs-map", (leaf) => new MapView(leaf));
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
     this.registerView(MUGS_CONFLICTS_VIEW_TYPE, (leaf) => new MugsConflictsPanel(leaf));
-    this.registerView("mugs-reconciliation", (leaf) => new ReconciliationView(this, leaf));
+    this.registerView(MUGS_RECONCILIATION_VIEW_TYPE, (leaf) => new ReconciliationView(this, leaf));
     this.registerView("mugs-review", (leaf) => new ReviewQueueView(this, leaf));
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
@@ -314,7 +314,7 @@ export default class MugsPlugin extends Plugin {
     this.addCommand({
       id: "reconcile-remote-only",
       name: "Review repository files",
-      callback: () => void this.openView("mugs-reconciliation"),
+      callback: () => void this.openView(MUGS_RECONCILIATION_VIEW_TYPE),
     });
 
   }
@@ -935,7 +935,8 @@ export default class MugsPlugin extends Plugin {
 
   /** Durable retry record (contract §1): failed operations land in the mapping's
    *  lastSync.pendingOps so they surface in counts and block correspondence advance
-   *  (the sync engine honors pendingOps once sync-core's planner lands — flagged seam). */
+   *  (the engine replans and re-verifies pendingOps on every pass — see
+   *  cloneManager.recoverPendingOps). */
   private recordPendingOp(mappingId: string, op: PendingOperation): void {
     try {
       const cur = this.store.getSettings().lastSync[mappingId] ?? { mappingId };
@@ -1181,7 +1182,7 @@ export default class MugsPlugin extends Plugin {
       return;
     }
     if (this.reconciliationRows().length) {
-      void this.openView("mugs-reconciliation");
+      void this.openView(MUGS_RECONCILIATION_VIEW_TYPE);
       return;
     }
     void this.openView("mugs-map");
