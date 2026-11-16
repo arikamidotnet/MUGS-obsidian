@@ -97,6 +97,9 @@ jobs:
           (cd dist && sha256sum --check checksums.txt)
           NOTES_FILE="$(mktemp)"
 
+          # NOTE: the --title below and the Highlights list inside the heredoc are
+          # VERSION-SPECIFIC — update them as part of each release commit. If they
+          # drift after publication, `gh release edit` can correct the release.
           cat > "$NOTES_FILE" <<EOF
           MUGS — Multi-User Git Sync v${VERSION}
 
@@ -110,17 +113,12 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Company-wide release polish: documentation corrected against the shipped code (architecture notes, module map, status-bar routing, review-surface references and test counts), provider walkthroughs updated for the automatic first-connection pause, and package metadata completed (repository, homepage, issues, engines).
-          - Deep-audit fixes folded in before publication: the .drawing extension now really matches the binary guard (its set entry was capitalized, so case-insensitive lookups missed it); a rename out of a mapped folder triggers a pass immediately instead of waiting for the next poll; the plugin and its live diagnostics share one canonical binary-extension set; dead CSS selectors, a dead export and stale comments removed. Otherwise plugin behavior is unchanged from 0.4.6.
-          - Simpler backup acknowledgment on the Preflight & rollout page: the single page-level checkbox that armed every canary is gone. Each folder's detail pane now carries its own acknowledgment directly beside the Run canary button it arms — one decision, one place, per folder.
-          - .aseprite joined the binary-extension guard (from 0.4.5): Aseprite sprite files (and their remote twins) are excluded from sync scope up front, so a diverged binary file no longer produces a blocked outcome on every pass — which also unblocked staged-rollout canaries for folders carrying such files (the NUL-byte merge guard remains the fail-safe for any unlisted binary type).
-          - Blocked-file notices tell the truth about binary exclusions (from 0.4.5): an ok pass with only binary-content blocks says "not synced — binary content is excluded from text sync" instead of pointing at a Review queue that never contained an entry for them; mixed cases mention both surfaces. Wording lives in a pure, tested helper (statusReport).
-          - Preflight & rollout page rebuilt to match the Review page's layout and visual language (from 0.4.4): a folder sidebar with live status dots and a search filter beside a detail pane showing saved evidence, blockers, rollout state and per-folder actions.
-          - Live sync status on the rollout surface: each folder row and detail pane shows its last recorded sync status (synced, up to date, conflict needs review, sync failed, sync pending) with the driver-recorded skip reason when a pass could not complete — saved evidence only, refreshed via pushed UI updates instead of polling.
-          - Staged rollout with guarded canaries (from 0.4.3): staged mode starts with nothing automatic; a one-shot canary per folder must pass verifiably clean (no conflicts, deferred changes, pending work or review backlog) and persist before the folder joins automatic sync. Failures fail closed with the reason recorded; unsavable rollout decisions pause automatic sync.
-          - Multi-client soak gate: a release-gate test drives two full independent clients against one shared repository — distinct and non-overlapping edits converge automatically, same-region conflicts surface with both sides intact, one-click resolution converges everyone, deletions propagate, converged passes are verified no-ops.
-          - Bulk repository-file review: on-demand, read-only analysis groups review entries into exact-content duplicate/move candidates, filename-only candidates, no-match and inconclusive scans; batch decisions with path lists, diff comparisons and explicit confirmation.
-          - Deletion safeguards unchanged: revision-bound decisions, recovery backups before deletion, push-only cannot delete, filenames never imply identity.
+          - Second deep-audit sweep: a full re-read of the sync core, data plane, git layer, providers, runtime and UI against the shipped code, with every finding fixed and pinned by tests before publication.
+          - Trash namespace collision fixed: mirror-pull vault deletions and overwrites recorded their recovery copies under vault-root-relative keys while every other recorder used repo-relative keys — two different files could collide on one .mugs-trash key whenever a repository folder shares the mapping's local-folder name, and a remote-driven deletion's restore could recover an empty copy. All recorders now share the repo-relative namespace, pinned by a new real-git end-to-end test.
+          - Trash key validation: the trash store validates mapping ids and paths before any disk access (reject, never sanitize). Recording and clearing throw on unsafe input — an unrecordable deletion cannot proceed and the recursive remove never sees an escaped path — while reads degrade to empty results.
+          - unlock() truly never throws: corrupt persisted key-derivation parameters (for example an invalid salt in data.json) resolve to a failed unlock instead of throwing out of the settings flow; credentials simply stay locked.
+          - Dead code and stale comments removed: unused paginateAllSafe, redactCredential and renderDiffText; the autoResolvedPaths merge vestige; a misleading mirrorPull parameter name; pre-S06 comments claiming genuine conflicts were auto-resolved (they are always surfaced for review).
+          - Live-suite hardening: the real-vault resolution suite's leftover cleanup now scans the whole repository, and the real-vault rollout gate asserts structural fail-closed invariants instead of a point-in-time snapshot of the vault's saved state.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -133,7 +131,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — company-wide release polish (docs + packaging)" \
+            --title "${VERSION} — second deep-audit sweep (trash namespace + validation, unlock robustness)" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \
