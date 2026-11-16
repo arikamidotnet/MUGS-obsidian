@@ -1,4 +1,4 @@
-import type { MugsSettings } from "../types";
+import type { MugsSettings, SyncStatus } from "../types";
 
 export interface MappingPreflight {
   id: string;
@@ -9,6 +9,10 @@ export interface MappingPreflight {
   reviewCount: number;
   conflictCount: number;
   pendingCount: number;
+  /** Last recorded sync status for this mapping (saved evidence only). */
+  status?: SyncStatus;
+  /** Why the last pass could not complete, when recorded. */
+  skipReason?: string;
 }
 
 /** Saved evidence only. No Git fetch, filesystem write, or implicit authorization. */
@@ -32,5 +36,6 @@ export function mappingPreflight(settings: MugsSettings, id: string, clonePresen
     id, label: mapping.label || id, blockers, cloneDir: state?.cloneDir,
     lastObservedAt: Math.max(state?.lastPullAt ?? 0, state?.lastPushAt ?? 0) || undefined,
     reviewCount, conflictCount, pendingCount,
+    status: state?.status, skipReason: state?.skipReason,
   };
 }

@@ -110,14 +110,12 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Staged rollout with guarded canaries: the new Preflight & rollout page switches a vault to staged mode (nothing automatic until individually enabled) and runs a one-shot canary per folder — a real targeted sync pass that must be verifiably clean (no conflicts, deferred changes, pending work or review backlog) and persisted before the folder joins automatic sync. Failures fail closed with the reason recorded; unsavable rollout decisions pause automatic sync.
-          - Multi-client soak gate: a new release-gate test drives two full independent clients against one shared repository — distinct and non-overlapping edits converge automatically, same-region conflicts surface with both sides intact, one-click resolution converges everyone, deletions propagate, converged passes are verified no-ops.
-          - Review analysis sized for real vaults: scan budgets raised to 20,000 files / 8 MiB per file / 512 MiB total; budget-limited scans still report unmatched results as inconclusive, never as proof of absence. .apk joined the binary-extension guard.
-          - Bulk repository-file review: on-demand, read-only analysis groups review entries into exact-content duplicate/move candidates, filename-only candidates, no-match and inconclusive scans; batch decisions with path lists, diff comparisons and explicit confirmation (one folder, one sync pass, up to 500 files).
-          - Deletion safeguards unchanged: revision-bound decisions, recovery backups before deletion, Download only cannot delete, filenames never imply identity.
-          - Review intent that cannot persist is rolled back instead of applying later; sync locks always release; analysis can be cancelled before deciding.
-          - Revision-bound pending recovery, merged deletion protection, guarded editor mutations, exclusive clone locks and accurate pending/blocked status reporting.
-          - Docs: new guided-rollout guide (staged enablement, canaries, company checklist, Obsidian Sync comparison) plus updated install/provider walkthroughs.
+          - Preflight & rollout page rebuilt to match the Review page's layout and visual language: a folder sidebar with live status dots and a search filter beside a detail pane showing saved evidence, blockers, rollout state and per-folder actions — both decision surfaces now read the same way.
+          - Live sync status on the rollout surface: each folder row and detail pane shows its last recorded sync status (synced, up to date, conflict needs review, sync failed, sync pending) with the driver-recorded skip reason when a pass could not complete — saved evidence only, refreshed via pushed UI updates instead of polling.
+          - Staged rollout with guarded canaries (from 0.4.3): staged mode starts with nothing automatic; a one-shot canary per folder must pass verifiably clean (no conflicts, deferred changes, pending work or review backlog) and persist before the folder joins automatic sync. Failures fail closed with the reason recorded; unsavable rollout decisions pause automatic sync.
+          - Multi-client soak gate: a release-gate test drives two full independent clients against one shared repository — distinct and non-overlapping edits converge automatically, same-region conflicts surface with both sides intact, one-click resolution converges everyone, deletions propagate, converged passes are verified no-ops.
+          - Bulk repository-file review: on-demand, read-only analysis groups review entries into exact-content duplicate/move candidates, filename-only candidates, no-match and inconclusive scans; batch decisions with path lists, diff comparisons and explicit confirmation.
+          - Deletion safeguards unchanged: revision-bound decisions, recovery backups before deletion, push-only cannot delete, filenames never imply identity.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -130,7 +128,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — staged rollout with guarded canaries" \
+            --title "${VERSION} — Preflight & rollout page rebuilt around the Review layout with live status" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

@@ -822,28 +822,41 @@ describe("PreflightView — staged rollout controls, canary gating, refresh", ()
     };
   };
 
-  const clean = (id: string, label: string) => ({ id, label, blockers: [], reviewCount: 0, conflictCount: 0, pendingCount: 0, lastObservedAt: 1 });
-  const blocked = (id: string, label: string) => ({ id, label, blockers: [`${id}: 3 repository files need review`], reviewCount: 3, conflictCount: 0, pendingCount: 0 });
+  const clean = (id: string, label: string) => ({ id, label, blockers: [], reviewCount: 0, conflictCount: 0, pendingCount: 0, lastObservedAt: 1, status: "ok" });
+  const blocked = (id: string, label: string) => ({ id, label, blockers: [`${id}: 3 repository files need review`], reviewCount: 3, conflictCount: 0, pendingCount: 0, status: "pending" });
+
+  const folderRow = (view: any, label: string) =>
+    findButtons(view.contentEl).find(b => collectText(b).includes(label))!;
 
   it("staged mode arms the canary only behind backup acknowledgment and only for blocker-free mappings", async () => {
     const { plugin, evidenceCalls } = preflightPlugin([clean("m1", "Notes"), blocked("m2", "Docs")]);
     const v = new PreflightView(plugin, {} as any);
     await v.onOpen();
     expect(evidenceCalls()).toBe(1);
+
+    // Default selection is the first folder: status shows, canary gated by ack.
+    expect(collectText(v.contentEl)).toContain("Synced");
     const canary = findButtons(v.contentEl).find(b => b.textContent === "Run canary and enable automatic sync")!;
     expect(canary).toBeDefined();
     expect((canary as any).disabled).toBe(true); // gated until the backup is acknowledged
 
-    // The blocked mapping shows its evidence but never a canary control.
+    // The blocked mapping's detail shows its evidence, status and never a canary.
+    fire(folderRow(v, "Docs"), "click");
     expect(collectText(v.contentEl)).toContain("3 repository files need review");
-    expect(findButtons(v.contentEl).filter(b => b.textContent === "Run canary and enable automatic sync")).toHaveLength(1);
+    expect(collectText(v.contentEl)).toContain("Sync pending");
+    expect(findButtons(v.contentEl).filter(b => b.textContent === "Run canary and enable automatic sync")).toHaveLength(0);
 
+    // Back on the clean folder: exactly one canary, still gated by the ack.
+    fire(folderRow(v, "Notes"), "click");
+    expect(findButtons(v.contentEl).filter(b => b.textContent === "Run canary and enable automatic sync")).toHaveLength(1);
+    const canary2 = findButtons(v.contentEl).find(b => b.textContent === "Run canary and enable automatic sync")! as any;
+    expect(canary2.disabled).toBe(true);
     const ack = findInputs(v.contentEl).find(i => (i as any).type === "checkbox")! as any;
     ack.checked = true;
     fire(ack, "change");
-    expect((canary as any).disabled).toBe(false);
+    expect(canary2.disabled).toBe(false);
 
-    fire(canary, "click");
+    fire(canary2, "click");
     await flush();
     expect(plugin.runMappingCanary).toHaveBeenCalledWith("m1");
     await v.onClose();
@@ -881,6 +894,9 @@ describe("PreflightView — staged rollout controls, canary gating, refresh", ()
     const v = new PreflightView(plugin, {} as any);
     await v.onOpen();
     expect(collectText(v.contentEl)).toContain("Legacy scheduling applies to all mappings");
+    // The folder list and per-folder status still render in legacy mode.
+    expect(collectText(v.contentEl)).toContain("Synced");
+    expect(collectText(v.contentEl)).toContain("Automatic: legacy scheduling");
     expect(findButtons(v.contentEl).some(b => b.textContent === "Run canary and enable automatic sync")).toBe(false);
     const start = findButtons(v.contentEl).find(b => b.textContent === "Start staged rollout (all disabled)")! as any;
     expect(start.disabled).toBe(true);
