@@ -38,11 +38,11 @@ describe("formatDraftMessage — on-behalf-of composition", () => {
 
 describe("draftAuthor — recorded author identity", () => {
   it("includes the committer email when present", () => {
-    expect(draftAuthor(draft(), agent())).toEqual({ name: "Research Bot", email: "bot@local" });
+    expect(draftAuthor(agent())).toEqual({ name: "Research Bot", email: "bot@local" });
   });
 
   it("drops the email when the agent has no committer email", () => {
-    expect(draftAuthor(draft(), agent({ committerEmail: undefined }))).toEqual({ name: "Research Bot" });
+    expect(draftAuthor(agent({ committerEmail: undefined }))).toEqual({ name: "Research Bot" });
   });
 });
 

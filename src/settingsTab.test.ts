@@ -254,7 +254,7 @@ describe("MugsSettingTab — display() renders every section (blank-UI regressio
     const text = collectText(tab.containerEl);
     expect(text).toContain("Work (local)"); // masked credential row
     expect(text).toContain("Notes"); // mapping label
-    expect(text).toContain("Both ways"); // directionText for push-pull
+    expect(text).toContain("Both ways"); // directionLabel for push-pull
     expect(text).toContain(".trash/"); // whole-vault trash toggle appears
   });
 
