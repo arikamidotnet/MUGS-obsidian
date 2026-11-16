@@ -12,12 +12,27 @@ locked; use `npm ci` for repeatable installs.
 - [Install MUGS (BRAT or manual), connect your first folder and verify automatic sync](docs/getting-started.md)
 - [Set up a GitLab account and project](docs/gitlab.md)
 - [Set up a GitHub account and repository](docs/github.md)
-- [Roll out to a team safely: staged enablement, canaries and the Obsidian Sync comparison](docs/rollout.md)
+- [Roll out to a team safely: steady-state behavior, the review workflow and the Obsidian Sync comparison](docs/rollout.md)
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.8.
+The latest verified publication when these instructions were written is 0.4.9.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.9 highlights
+
+- **Preflight & staged rollout removed.** The opt-in staged-enablement feature
+  (the Preflight page, per-folder canaries before a mapping joined automatic
+  sync, rollout records in the sync policy) is gone: every folder syncs
+  automatically whenever the vault is not globally paused — one scheduling
+  model, no enablement state to manage. The removal follows a real-vault
+  incident where a killed session left the vault frozen in staged mode: the
+  mode had no exit, a recorded pass failure permanently blocked the canary
+  that could clear it, and a shutdown abort was written into durable state as
+  a blocked entry. Saved `sync.rollout` state in existing `data.json` files
+  is ignored on load and dropped on the next save. The global pause remains
+  the maintenance switch; conflict surfacing, the Review workflow and the
+  multi-client soak gate are unchanged.
 
 ## 0.4.8 highlights
 
@@ -201,7 +216,7 @@ Implemented features:
 - **Overview** (`mugs-map`, the ribbon default). One aligned row per connected
   folder — folder, direction, repository, last sync times and honest status —
   with Sync now, Review files and Settings actions, plus shared
-  Overview / Changes / Review / Preflight / Conflicts navigation on every
+  Overview / Changes / Review / Conflicts navigation on every
   page. (`src/ui/mapView.ts`, `src/ui/navigation.ts`)
 - **Changes view** (`mugs-diff`). Select a folder and comparison mode, then
   browse changed files with addition/deletion counts, line numbers, collapsible
@@ -234,21 +249,13 @@ clickable status bar, opt-in passphrase
 encryption, serialized settings saves, cancellation on plugin unload, and the
 repository-file Review tab (the user surface for reconciliation review rows,
 with a file list, preview pane and explicit per-file decisions).
-- **Preflight & staged rollout** (`mugs-preflight`). Review-page layout: a
-  folder sidebar with live status dots and a search filter beside a detail
-  pane of saved evidence, blockers and rollout state. Staged mode (nothing
-  automatic until explicitly enabled), the guarded one-shot canary with its
-  per-folder backup acknowledgment co-located beside the button, durable
-  enable/disable with fail-closed persistence, and one-click disable.
-  (`src/ui/preflightView.ts`, `src/runtime/rollout.ts`)
-
 Remaining work (not claiming completeness): binary attachment and full
 configuration-directory synchronization, mobile support (desktop-only for now),
 vault-content end-to-end encryption, accessible bulk history/restore, per-hunk
 blame granularity, agent worktree isolation (pure module exists, unwired) and a
 view for the membership data layer. Multi-client behavior is pinned by the
-driver-level soak; per-vault, in-app canary evidence on production mappings
-remains part of the rollout checklist for each team.
+driver-level soak; validating a new release on a scratch vault before company
+rollout remains part of the checklist for each team.
 
 ## Sync flow and directions (current behavior)
 

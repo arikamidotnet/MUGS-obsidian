@@ -89,13 +89,6 @@ export class MugsStore {
     this.settings = structuredClone(DEFAULT_SETTINGS);
   }
 
-  private blockStagedMapping(id: string, reason: string): void {
-    const rollout = this.settings.sync.rollout;
-    if (rollout?.mode !== "staged" || !rollout.enabledMappingIds.includes(id)) return;
-    rollout.enabledMappingIds = rollout.enabledMappingIds.filter(candidate => candidate !== id);
-    rollout.blocked[id] = { reason, at: Date.now() };
-  }
-
   /** Why the last load failed, when it did (corrupt/unreadable data.json). */
   get loadError(): string | undefined {
     return this.loadErrorMessage;
@@ -475,11 +468,6 @@ export class MugsStore {
     }
     // Metadata-only: keep the prior durable token; only the metadata fields change.
     const cred = isMetadataOnly && prior ? { ...input, token: prior.token } : { ...input };
-    if (prior && JSON.stringify(prior) !== JSON.stringify(cred)) {
-      for (const mapping of this.settings.mappings.filter(m => m.providerId === input.id)) {
-        this.blockStagedMapping(mapping.id, "account settings changed — recheck before automatic sync");
-      }
-    }
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
     if (!isMetadataOnly) {
@@ -491,9 +479,6 @@ export class MugsStore {
   }
 
   removeCredential(id: string): void {
-    for (const mapping of this.settings.mappings.filter(m => m.providerId === id)) {
-      this.blockStagedMapping(mapping.id, "account removed");
-    }
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== id);
     this.runtimeTokens.delete(id);
   }
@@ -508,27 +493,18 @@ export class MugsStore {
       mapping.localFolder,
       this.settings.sync.obsidianConfig.enabled,
     );
-    if (prior && JSON.stringify(prior) !== JSON.stringify(mapping)) {
-      this.blockStagedMapping(mapping.id, "mapping changed — recheck before automatic sync");
-    }
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== mapping.id);
     this.settings.mappings.push(mapping);
     return structuredClone(mapping);
   }
 
   removeMapping(id: string): void {
-    this.blockStagedMapping(id, "mapping removed");
     this.settings.mappings = this.settings.mappings.filter((m) => m.id !== id);
     // Prune the mapping's keyed records so megabytes of stale conflict content
     // don't linger (and grow data.json) forever after a mapping is deleted.
     delete this.settings.lastSync[id];
     delete this.settings.conflicts[id];
     delete this.settings.staging[id];
-    const rollout = this.settings.sync.rollout;
-    if (rollout?.mode === "staged") {
-      delete rollout.blocked[id];
-      delete rollout.lastResult[id];
-    }
   }
 
   setLastSync(state: MugsSettings["lastSync"][string]): void {

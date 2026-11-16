@@ -113,12 +113,10 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Second deep-audit sweep: a full re-read of the sync core, data plane, git layer, providers, runtime and UI against the shipped code, with every finding fixed and pinned by tests before publication.
-          - Trash namespace collision fixed: mirror-pull vault deletions and overwrites recorded their recovery copies under vault-root-relative keys while every other recorder used repo-relative keys — two different files could collide on one .mugs-trash key whenever a repository folder shares the mapping's local-folder name, and a remote-driven deletion's restore could recover an empty copy. All recorders now share the repo-relative namespace, pinned by a new real-git end-to-end test.
-          - Trash key validation: the trash store validates mapping ids and paths before any disk access (reject, never sanitize). Recording and clearing throw on unsafe input — an unrecordable deletion cannot proceed and the recursive remove never sees an escaped path — while reads degrade to empty results.
-          - unlock() truly never throws: corrupt persisted key-derivation parameters (for example an invalid salt in data.json) resolve to a failed unlock instead of throwing out of the settings flow; credentials simply stay locked.
-          - Dead code and stale comments removed: unused paginateAllSafe, redactCredential and renderDiffText; the autoResolvedPaths merge vestige; a misleading mirrorPull parameter name; pre-S06 comments claiming genuine conflicts were auto-resolved (they are always surfaced for review).
-          - Live-suite hardening: the real-vault resolution suite's leftover cleanup now scans the whole repository, and the real-vault rollout gate asserts structural fail-closed invariants instead of a point-in-time snapshot of the vault's saved state.
+          - Preflight & staged rollout removed: the opt-in staged-enablement feature (the Preflight page, per-folder canaries before a mapping joined automatic sync, rollout records in the sync policy) is gone. Every folder now syncs automatically whenever the vault is not globally paused — one scheduling model, no enablement state to manage.
+          - Why: a killed session left a real vault frozen in staged mode — the mode had no exit, a recorded pass failure permanently blocked the canary that could clear it, and the shutdown abort was written into durable state as a blocked entry. The feature was removed rather than patched.
+          - Migration: saved sync.rollout state in existing data.json files is ignored on load (the schema no longer defines it) and dropped on the next save; vaults previously frozen in staged mode resume normal automatic sync after upgrading.
+          - Unchanged: the global pause remains the maintenance switch; clean three-way auto-merge, genuine-conflict surfacing, the Review workflow, reconciliation proof and the multi-client soak gate all behave exactly as in 0.4.8.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -131,7 +129,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — second deep-audit sweep (trash namespace + validation, unlock robustness)" \
+            --title "${VERSION} — Preflight & staged rollout removed (one automatic scheduling model)" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

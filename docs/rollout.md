@@ -1,9 +1,9 @@
-# Guided rollout and staged enablement
+# Guided rollout for a team
 
 How to take a MUGS connection from *paused and unproven* to *automatic like
 Obsidian Sync* — without betting shared company content on an unverified
 mapping. Read [getting started](getting-started.md) first; this page assumes
-mappings exist and covers the enablement workflow.
+mappings exist and covers the rollout workflow.
 
 ## The model: automatic by default, gated where bytes are at stake
 
@@ -23,7 +23,7 @@ two full independent clients against one shared repository:
 - Genuine conflicts get a one-click **ours / theirs / both** decision in the
   Conflicts panel; the engine never picks a winner silently.
 
-Four cases are deliberately **not** automatic, because automatic action there
+Three cases are deliberately **not** automatic, because automatic action there
 can lose or duplicate shared content:
 
 | Case | What MUGS does | Why not automatic |
@@ -31,52 +31,22 @@ can lose or duplicate shared content:
 | Same-region edits to one file | Surfaces the conflict with both sides intact | Only a human can know which edit is wanted; silent picks lose bytes |
 | Repository files this vault never received | Review tab: copy into the vault or delete from the repository | Cannot distinguish a teammate's new file from your own unpropagated deletion |
 | Deleting shared repository files | Explicit confirmation, recovery backup first | Affects every other user; a name match is not consent |
-| Joining automatic sync (staged mode) | One clean canary pass per folder | One-time proof the folder syncs safely before it runs unattended |
 
-The first three are rare in steady state; most appear once, when a mapping is
+The first two are rare in steady state; most appear once, when a mapping is
 first connected over repositories that already contain history.
 
-## Preflight & rollout page
+## First-connection safety
 
-Open it from any MUGS page's navigation (**Preflight**) or the command palette
-(**MUGS: Open preflight and rollout**). The page uses the same layout as the
-Review tab: a folder sidebar — each row carrying a live sync-status dot and a
-search filter — beside a detail pane for the selected folder. It shows, per
-folder:
+A mapping created with a new plugin candidate starts **paused** after Apply
+(the settings banner explains this). While paused nothing syncs automatically —
+inspect the connected-folder card, verify the route and direction, and decide
+the first-sync direction (**Download from repository** or **Upload from this
+device**; see getting started). When you are satisfied, turn
+**Pause automatic sync** off and Apply: the next tick (≤15 s) starts syncing.
 
-- saved local evidence only: last recorded sync status and skip reason,
-  review / conflict / pending counts, last sync timestamp, recorded clone —
-  no remote access happens by just opening it;
-- blockers that must be resolved before a folder can be enabled (unproven
-  clone, no baseline, review backlog, unresolved conflicts, pending work, held
-  changes, prior rollout failures).
-
-**Start staged rollout** switches the vault from legacy scheduling (all
-mappings automatic when unpaused) to staged mode: *every* folder stops
-automatic syncing until individually enabled. The global pause still takes
-precedence over everything.
-
-## The one-shot canary
-
-For each blocker-free folder, the folder's detail pane offers **Run canary
-and enable automatic sync**, gated by a per-folder backup acknowledgment
-sitting directly beside the button — check it and the canary arms; no other
-control stands between you and the pass. A canary:
-
-1. re-checks saved state (any blocker aborts before syncing);
-2. runs one real targeted sync pass for that folder only — this is the live
-   evidence: it reaches the remote, revalidates the clone, merges and pushes;
-3. evaluates the outcome and the durable state, never just "the pass didn't
-   throw": deferred changes, blocked files, pending operations, review
-   entries, unresolved conflicts or an unsaved state each fail the canary;
-4. enables the folder for automatic sync only if the pass is verifiably clean
-   **and** the result persisted.
-
-Any failure leaves the folder disabled with the reason recorded on the page —
-a failed canary is retryable once the underlying problem is fixed. Disabling a
-folder is always one click and never requires a canary. A rollout decision
-that cannot be saved fails closed: automatic sync is paused rather than left
-running on an unpersisted decision.
+The global pause remains the maintenance switch for the whole vault: bulk
+edits, upgrades and investigations happen with automatic sync paused, and a
+manual **Sync now** remains available even while paused.
 
 ## Review backlog (existing repositories)
 
@@ -95,18 +65,17 @@ budget, unmatched results are reported as inconclusive, never as "no match".
 ## Company rollout checklist
 
 1. **Back up** the vault, `.obsidian/plugins/mugs-obsidian/` (including
-   `data.json`) and `.mugs-clones/` — and keep the backup until step 6.
+   `data.json`) and `.mugs-clones/` — and keep the backup until step 5.
 2. Install a **frozen published release** via BRAT (see
    [getting started](getting-started.md)); verify the version in Settings.
-3. Open **Preflight** and **Start staged rollout**. Nothing syncs
-   automatically now, even unpaused.
-4. **Clear the Review backlog** folder by folder, and **canary each folder**
-   once its blockers are gone. Only canary-passed folders join automatic sync.
-5. Soak: with a second device or scratch vault, confirm the steady-state
+3. **Connect folders one at a time, paused**: clear each folder's Review
+   backlog, then run one manual **Sync now** and confirm a clean outcome on
+   the Overview before moving to the next.
+4. Soak: with a second device or a scratch vault, confirm the steady-state
    behaviors above hold for your team's edit patterns.
-6. When every folder you intend to automate has a clean canary, leave staged
-   mode on (recommended) or return to legacy scheduling; unpause globally.
-7. Rollback: restore the previous plugin assets **and compatible state**; see
+5. When every folder you intend to automate is clean, **unpause globally** —
+   from here the vault syncs automatically.
+6. Rollback: restore the previous plugin assets **and compatible state**; see
    the upgrade/rollback notes in the README. Never force-push as recovery.
 
 ## How this compares with Obsidian Sync

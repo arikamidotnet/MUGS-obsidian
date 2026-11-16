@@ -14,7 +14,7 @@ The guiding architectural invariant, repeated throughout, is:
 
 > **All correctness-sensitive logic lives in pure, dependency-free, unit-tested modules under `src/sync/` (and a few under `src/ui/`, `src/providers/`, `src/membership/`). The Obsidian/glue layer (`main.ts`, `settingsTab.ts`, the views) is thin: it wires injected seams and renders data — it never contains merge, scope, or policy logic.**
 
-This invariant is what makes the vitest suite (987 tests across 83 files at 0.4.8, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
+This invariant is what makes the vitest suite (965 tests across 80 files at 0.4.9, plus a quarantined live-diagnostic suite; the count drifts as tests land) possible without a real git binary, network, or Obsidian runtime (plus real-git end-to-end suites that do use the binary).
 
 ### 1.1 The sync pipeline
 
@@ -112,9 +112,9 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 | Clone/driver | `src/sync/cloneManager.ts`, `src/sync/driver.ts` | Per-mapping pass + cross-mapping driver over identity-keyed shared clones |
 | Vault mirror | `src/sync/mirror.ts` | repo↔vault path mapping + the pure pull planner (`planMirrorPull`) |
 | Editor guard | `src/sync/editorOpen.ts` | Open-editor write/delete deferral (any open file = unsafe) |
-| Runtime | `src/runtime/{conflictResolver,statusReport,rollout,preflight,reconciliationBulk,cloneLock,pathSafety}.ts` | Manual resolution transaction; aggregate status report + advisory notice wording; staged-rollout/canary gating; saved-evidence preflight; bulk review analysis/decisions; clone locks; adapter path safety |
+| Runtime | `src/runtime/{conflictResolver,statusReport,reconciliationBulk,cloneLock,pathSafety,settingsDraft}.ts` | Manual resolution transaction; aggregate status report + advisory notice wording; bulk review analysis/decisions; clone locks; adapter path safety; settings draft/Apply model |
 | Diff model (A7) | `src/ui/diffModel.ts` | Unified-diff parse, per-file attribution, author colors |
-| Views (glue) | `src/ui/{mapView,diffView,diffPanel,diffRender,mapModel,dataSources,defaultDataSources,reviewQueueView,reconciliationView,reconciliationReview,reconciliationBulk,preflightView,navigation}.ts` | Registered Obsidian views (Overview, Changes, Review, Conflicts, Preflight & rollout) + data sources + shared navigation |
+| Views (glue) | `src/ui/{mapView,diffView,diffPanel,diffRender,mapModel,dataSources,defaultDataSources,reviewQueueView,reconciliationView,reconciliationReview,reconciliationBulk,navigation}.ts` | Registered Obsidian views (Overview, Changes, Review, Conflicts) + data sources + shared navigation |
 
 ---
 
@@ -284,11 +284,13 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 **Owner mapping local-vs-remote.** Local commits attribute to the agent; pushed history records the owner via an `On-behalf-of` trailer (`attribution.ts`, commit/driver wiring).
 
+**Staged rollout removed (0.4.9).** The opt-in staged-enablement layer — the Preflight page, per-folder canaries, and rollout records inside the sync policy — was removed after a real-vault incident: a killed session froze the vault in staged mode with no exit, a recorded pass failure permanently blocked the canary that was the only way to clear it, and a shutdown abort was persisted as blocked state. Scheduling is again ONE model: every mapping syncs automatically whenever the vault is not globally paused (`schedule.ts`'s pause gate remains the maintenance switch), and any saved `sync.rollout` state is ignored on load (the schema no longer defines it) and dropped on the next save.
+
 ---
 
 ## 5. Validation & testing
 
-All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **987 tests across 83 files** at 0.4.8, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
+All new logic lives in pure modules and is covered by **vitest with fakes** (no real git/network/Obsidian), plus real-git end-to-end suites (first-sync push/pull init, divergence push, conflict surfacing, trash scoping, roundtrips) and a live-diagnostic harness. The suite has **965 tests across 80 files** at 0.4.9, plus a quarantined live-diagnostic suite (counts drift as tests land). High-value coverage, mapped to areas:
 
 - **Merge correctness (Area 3):** same-change accept/keep; modify/delete both directions; delete/delete; delete/add; empty-vs-deleted distinction — `merge.test.ts`, `conflict.test.ts`.
 - **Scope & integrity (Area 1):** full-repo vs subtree scoping with include/exclude globs; rename detection via git identity; path collisions → `conflictPath`; the canonical binary-extension guard (all-lowercase invariant + case-insensitive lookups, pinned after the capitalized-`"Drawing"` entry silently never matched); safe applier ordering + idempotent writes — `exclusion.test.ts`, `applier.test.ts`.
@@ -300,7 +302,7 @@ All new logic lives in pure modules and is covered by **vitest with fakes** (no 
 - **Agent sub-users (Area 10):** `AuthorRef` human/agent attribution + `On-behalf-of` trailer generation; worktree isolation under parallel agents; draft→message composition; MCP contract parity; owner mapping on push; zero-agents behavior unchanged — `attribution.test.ts`, `worktrees.test.ts`, `mcp/draft.test.ts`, `mcp/server.test.ts`, driver attribution tests.
 - **Scheduling (Area 5/8):** interval honored, pause-on-hidden/resume-on-visible, debounced event trigger — `schedule.test.ts`.
 
-**Gate before each phase:** TypeScript typecheck clean (`tsc --noEmit`), full suite passing (`npx vitest run`), and `npm run build` succeeding. **Final acceptance (Area 11 + render):** reinstall `main.js`/`manifest.json`/`styles.css` into a test vault, enable the plugin, and confirm every surface renders (settings sections, Overview, Changes, Review, Conflicts, Preflight & rollout, MCP registration, status bar); then review this document for accuracy against shipped code.
+**Gate before each phase:** TypeScript typecheck clean (`tsc --noEmit`), full suite passing (`npx vitest run`), and `npm run build` succeeding. **Final acceptance (Area 11 + render):** reinstall `main.js`/`manifest.json`/`styles.css` into a test vault, enable the plugin, and confirm every surface renders (settings sections, Overview, Changes, Review, Conflicts, MCP registration, status bar); then review this document for accuracy against shipped code.
 
 ---
 
@@ -308,7 +310,7 @@ All new logic lives in pure modules and is covered by **vitest with fakes** (no 
 
 ```bash
 npm run build     # tsc --noEmit --skipLibCheck && node esbuild.config.min.js  (bundles CSS into main.js)
-npx vitest run    # full suite (987 tests / 83 files at 0.4.8, incl. real-git e2e)
+npx vitest run    # full suite (965 tests / 80 files at 0.4.9, incl. real-git e2e)
 npm run dev       # esdev watch build for iteration
 ```
 

@@ -109,7 +109,7 @@ export interface MugsContext {
   conflicts: ConflictDataSource;
   /** Runtime actions, kept optional for data-only consumers and tests. */
   actions?: {
-    openView: (view: "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts" | "mugs-preflight") => void;
+    openView: (view: "mugs-map" | "mugs-diff" | "mugs-reconciliation" | "mugs-conflicts") => void;
     syncNow: () => Promise<void>;
     openReview: () => void;
     openSettings: () => void;

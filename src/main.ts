@@ -8,7 +8,7 @@
  * (`sync/schedule.ts`); everything here is thin Obsidian glue.
  */
 import { Plugin, Notice, type EventRef } from "obsidian";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { MugsStore, MemoryIO, type SaveResult } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
@@ -16,7 +16,6 @@ import { DiffView } from "./ui/diffView";
 import { MugsConflictsPanel, MUGS_CONFLICTS_VIEW_TYPE } from "./ui/diffPanel";
 import { ReviewQueueView } from "./ui/reviewQueueView";
 import { ReconciliationView } from "./ui/reconciliationView";
-import { PreflightView, MUGS_PREFLIGHT_VIEW_TYPE } from "./ui/preflightView";
 import type { ReconciliationReviewDeps, ReconciliationReviewRow } from "./ui/reconciliationReview";
 import { setMugsContext } from "./ui/dataSources";
 import {
@@ -47,8 +46,6 @@ import { createConflictResolver } from "./runtime/conflictResolver";
 import { acquireCloneLock } from "./runtime/cloneLock";
 import { assertSafeAdapterPath, isMissingFile } from "./runtime/pathSafety";
 import { advisoryNotices, buildStatusReport } from "./runtime/statusReport";
-import { automaticMappings, recordCanary, recordRollout, rolloutFailure } from "./runtime/rollout";
-import { mappingPreflight, type MappingPreflight } from "./runtime/preflight";
 import type { PendingOperation, FileConflict } from "./types";
 import type { ConflictDataSource, ConflictQuery, ConflictResolutionQuery, ConflictResolutionResult } from "./ui/dataSources";
 import { MCP_SERVER_NAME } from "./mcp/server";
@@ -117,9 +114,6 @@ export default class MugsPlugin extends Plugin {
   private currentRunController?: AbortController;
   /** Epoch ms of the newest successful sync — renders the "✓ synced HH:MM" state. */
   private lastSyncedAt?: number;
-  /** Outcomes of the most recent completed pass, read by the one-shot canary.
-  *  Written only under syncInFlight; cleared when a new pass starts. */
-  private lastOutcomes: SyncOutcome[] = [];
   /** Last terminal status-bar state (synced/conflict/skipped/error/paused/idle) —
    *  what the bar restores to when the window becomes visible again. */
   private lastTerminalBarState?: BarState;
@@ -245,7 +239,6 @@ export default class MugsPlugin extends Plugin {
     this.registerView("mugs-diff", (leaf) => new DiffView(leaf));
     this.registerView(MUGS_CONFLICTS_VIEW_TYPE, (leaf) => new MugsConflictsPanel(leaf));
     this.registerView("mugs-reconciliation", (leaf) => new ReconciliationView(this, leaf));
-    this.registerView(MUGS_PREFLIGHT_VIEW_TYPE, (leaf) => new PreflightView(this, leaf));
     this.registerView("mugs-review", (leaf) => new ReviewQueueView(this, leaf));
 
     // --- Phase 8: status bar + automatic scheduler -------------------------
@@ -324,12 +317,6 @@ export default class MugsPlugin extends Plugin {
       callback: () => void this.openView("mugs-reconciliation"),
     });
 
-    this.addCommand({
-      id: "show-preflight",
-      name: "Open preflight and rollout",
-      callback: () => void this.openView(MUGS_PREFLIGHT_VIEW_TYPE),
-    });
-
   }
 
   private openSettings(): void {
@@ -361,133 +348,6 @@ export default class MugsPlugin extends Plugin {
    */
   async runSync(quiet = false): Promise<void> {
     await this.executeSync(quiet);
-  }
-
-  /** Local saved evidence only; no remote access and no clone mutation. */
-  preflightMappings(): MappingPreflight[] {
-    const settings = this.store.getSettings();
-    return settings.mappings.map(mapping => {
-      const dir = settings.lastSync[mapping.id]?.cloneDir;
-      let clonePresent = false;
-      try {
-        clonePresent = !!dir && statSync(dir).isDirectory() && existsSync(`${dir}/.git`);
-      } catch { /* Missing/unreadable clone is never proof of readiness. */ }
-      return mappingPreflight(settings, mapping.id, clonePresent);
-    });
-  }
-
-  /** Staging starts disabled. Never implicitly unpause a vault. */
-  async startStagedRollout(): Promise<void> {
-    if (this.unloaded || this.store.loadError || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
-      throw new Error("another operation is running or settings are unavailable");
-    }
-    const previous = this.store.getSettings().sync;
-    if (previous.rollout?.mode === "staged") return;
-    this.store.setSync({ rollout: { mode: "staged", enabledMappingIds: [], blocked: {}, lastResult: {} } });
-    try {
-      const saved = await this.store.save();
-      if (!saved.ok) throw new Error("could not save staged rollout");
-    } catch (error) {
-      this.store.setSync({ rollout: previous.rollout });
-      throw error;
-    }
-    this.notifyUi();
-  }
-
-  /** Disabling is allowed without a canary and never resumes another mapping.
-   *  A user disable is an intent, not a fault: it removes the mapping from the
-   *  automatic set and is recorded in lastResult — it must NOT poison the
-   *  `blocked` map, or a later canary could never re-enable the mapping. */
-  async disableStagedMapping(id: string): Promise<void> {
-    if (this.unloaded || this.store.loadError || this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
-      throw new Error("another operation is running or settings are unavailable");
-    }
-    const current = this.store.getSettings().sync.rollout;
-    if (current?.mode !== "staged") throw new Error("staged rollout is not active");
-    const next = structuredClone(current);
-    next.enabledMappingIds = next.enabledMappingIds.filter(candidate => candidate !== id);
-    next.lastResult[id] = { status: "blocked", at: Date.now(), reason: "disabled by user" };
-    this.store.setSync({ rollout: next });
-    const saved = await this.store.save();
-    if (!saved.ok) {
-      // Keep the DISABLED rollout in memory (the user said off) and pause the
-      // session, then try to persist pause+disable so a restart cannot resume a
-      // mapping the user turned off. If this save fails too, the Notice is the
-      // only remaining channel — persistence itself is broken.
-      this.store.setSync({ paused: true });
-      await this.store.save().catch(() => undefined);
-      new Notice("MUGS: could not save the disabled mapping — automatic sync is paused. Keep it paused until settings can be saved.", 0);
-      throw new Error("could not save disabled mapping; automatic sync paused");
-    }
-    this.notifyUi();
-  }
-
-  /** One-shot canary for a single mapping: saved-state preflight, one targeted
-   *  sync pass, and automatic enablement ONLY when the pass is verifiably clean
-   *  and the result persisted. The pass itself is the live evidence — it reaches
-   *  the remote, revalidates the clone, merges and pushes. Its save-success
-   *  boolean alone is NEVER treated as a clean outcome: the outcome AND the
-   *  durable state (review entries, conflicts, pending ops, deferred changes)
-   *  decide. Fail closed on every failure path; enable nothing implicitly. */
-  async runMappingCanary(id: string): Promise<{ enabled: boolean; reason?: string }> {
-    if (this.unloaded || this.store.loadError || this.store.isLocked() ||
-      this.syncInFlight || this.reviewInFlight || this.resolutionInFlight) {
-      throw new Error("another operation is running, credentials are locked, or settings are unavailable");
-    }
-    const settings = this.store.getSettings();
-    const rollout = settings.sync.rollout;
-    if (rollout?.mode !== "staged") throw new Error("staged rollout is not active");
-    if (!settings.mappings.some(m => m.id === id)) throw new Error("mapping no longer exists");
-
-    // Preflight on saved local evidence: an unproven clone, missing baseline,
-    // review backlog, unresolved conflicts, pending work or held changes must be
-    // resolved by the user first — never by a pass.
-    const dir = settings.lastSync[id]?.cloneDir;
-    let clonePresent = false;
-    try {
-      clonePresent = !!dir && statSync(dir).isDirectory() && existsSync(`${dir}/.git`);
-    } catch { /* an unreadable clone is a blocker, not an error */ }
-    const evidence = mappingPreflight(settings, id, clonePresent);
-    if (evidence.blockers.length) {
-      const reason = `canary not run — ${evidence.blockers.join("; ")}`;
-      this.store.setSync({ rollout: recordCanary(rollout, id, reason) });
-      const saved = await this.store.save();
-      if (!saved.ok) new Notice(`MUGS: could not record the canary result — ${saved.reason}`, 8000);
-      this.notifyUi();
-      return { enabled: false, reason };
-    }
-
-    // The targeted pass (quiet=false so the user sees per-mapping detail). A
-    // concurrent automatic pass for OTHER mappings cannot corrupt this: the
-    // outcome is matched by mapping id, and a missing outcome fails closed.
-    this.lastOutcomes = [];
-    const saveOk = await this.executeSync(false, id);
-    const after = this.store.getSettings();
-    const current = after.sync.rollout;
-    if (current?.mode !== "staged") {
-      return { enabled: false, reason: "staged rollout was interrupted" };
-    }
-    const outcome = this.lastOutcomes.find(o => o.mappingId === id);
-    // A thrown pass yields no outcome (fail closed first); a completed pass whose
-    // state could not be persisted is next-worst; otherwise the durable outcome
-    // itself decides (deferred/blocked/pending/review/conflict checks).
-    const reason = !outcome ? "canary pass returned no outcome"
-      : !saveOk ? "canary pass state could not be saved"
-        : rolloutFailure(outcome, after);
-    this.store.setSync({ rollout: recordCanary(current, id, reason) });
-    const saved = await this.store.save();
-    if (!saved.ok) {
-      // Enablement must be durable before any automatic pass can run. Keep the
-      // PRE-canary rollout (mapping still disabled), pause, and try to persist
-      // the pause so a restart cannot act on the unsaved result.
-      this.store.setSync({ rollout: current, paused: true });
-      await this.store.save().catch(() => undefined);
-      new Notice("MUGS: could not save the canary result — automatic sync paused. Resolve persistence before enabling.", 0);
-      this.notifyUi();
-      return { enabled: false, reason: "could not save the canary result" };
-    }
-    this.notifyUi();
-    return reason ? { enabled: false, reason } : { enabled: true };
   }
 
   /** Subscribe to UI refresh notifications; returns an unsubscribe function. */
@@ -527,9 +387,7 @@ export default class MugsPlugin extends Plugin {
 
     const cloneRoot = this.cloneRoot();
     const settings = this.store.getSettings();
-    const automatic = quiet && !mappingId;
-    const selected = mappingId ? settings.mappings.filter(m => m.id === mappingId)
-      : automatic ? automaticMappings(settings) : settings.mappings;
+    const selected = mappingId ? settings.mappings.filter(m => m.id === mappingId) : settings.mappings;
     if (selected.length === 0) return false;
     // Mappings with no baseline yet — used to report first-sync completion.
     const firstTimers = new Set(settings.mappings.filter((m) => !settings.lastSync[m.id]).map((m) => m.id));
@@ -582,18 +440,6 @@ export default class MugsPlugin extends Plugin {
     // A completed (non-thrown) pass has re-verified content: the startup
     // uncertainty window is over for subsequent passes.
     if (!syncThrown && !mappingId) this.startupUncertain = false;
-    // Publish the pass outcomes for the one-shot canary (which matches by
-    // mapping id and fails closed when its mapping has no outcome here).
-    this.lastOutcomes = outcomes;
-    if (automatic && settings.sync.rollout?.mode === "staged") {
-      const current = this.store.getSettings();
-      const seen = new Set(outcomes.map(o => o.mappingId));
-      const missing: SyncOutcome[] = selected.filter(m => !seen.has(m.id)).map(m => ({
-        mappingId: m.id, label: m.label, status: "blocked", reason: "automatic pass did not return an outcome",
-      }));
-      const updated = recordRollout(current.sync, [...outcomes, ...missing], current, syncThrown ? "automatic pass failed" : undefined);
-      if (updated) this.store.setSync({ rollout: updated });
-    }
 
     // Persist under ownership. Contract: syncInFlight releases only after save resolves.
     // Consume SaveResult: {ok:false} is failure — do not let status become "synced".
@@ -608,15 +454,6 @@ export default class MugsPlugin extends Plugin {
       saveResult = { ok: false, reason: "load-error" };
       new Notice(`MUGS: could not persist sync state — ${err instanceof Error ? err.message : String(err)}`, 8000);
     }
-    if (automatic && !saveResult.ok && settings.sync.rollout?.mode === "staged") {
-      this.store.setSync({ paused: true, rollout: {
-        ...this.store.getSettings().sync.rollout!,
-        enabledMappingIds: [],
-      } });
-      new Notice("MUGS: staged rollout stopped — sync state could not be saved. Keep this vault paused until persistence is repaired.", 0);
-      await this.store.save().catch(() => undefined);
-    }
-
     // Reporting + terminal state. All under the in-flight guard.
     if (syncThrown) {
       const msg = syncThrown instanceof Error ? syncThrown.message : String(syncThrown);
@@ -1188,7 +1025,7 @@ export default class MugsPlugin extends Plugin {
   private async tickSync(eventTriggered = false): Promise<void> {
     if (this.unloaded) return;
     const settings = this.automaticSettings();
-    if (automaticMappings(settings).length === 0) return;
+    if (settings.mappings.length === 0) return;
     const decision = decideRun({
       now: Date.now(),
       intervalMs: Math.max(1_000, settings.sync.intervalSeconds * 1000),
@@ -1236,8 +1073,7 @@ export default class MugsPlugin extends Plugin {
    */
   private onVaultChange(path: string, kind: "modify" | "create" | "delete" | "rename" = "modify"): void {
     const settings = this.automaticSettings();
-    const enabled = automaticMappings(settings);
-    if (!enabled.length || !this.relevantMapping(path, enabled)) return;
+    if (!settings.mappings.length || !this.relevantMapping(path)) return;
 
     // Feedback guard: suppress our own adapter writes.
     if ((kind === "modify" || kind === "create") && this.internalWritePaths.has(path)) {

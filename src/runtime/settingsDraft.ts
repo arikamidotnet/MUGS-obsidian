@@ -228,10 +228,7 @@ function applySnapshot(store: SettingsDraftTarget, snapshot: MugsSettings): void
   for (const m of snapshot.mappings) store.upsertMapping(structuredClone(m));
 
   store.setSecurity(structuredClone(snapshot.security));
-  // Store setters can disable a canary when its mapping/account changes.
-  // Do not restore the stale draft whitelist over those safety decisions.
-  const rollout = store.getSettings().sync.rollout;
-  store.setSync({ ...structuredClone(snapshot.sync), rollout: rollout ?? snapshot.sync.rollout });
+  store.setSync(structuredClone(snapshot.sync));
   store.setObsidianConfig(structuredClone(snapshot.sync.obsidianConfig));
 }
 

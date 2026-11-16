@@ -29,36 +29,36 @@ const mapping = (over: Partial<FolderMapping> = {}): FolderMapping => ({
 });
 
 describe("MugsStore persistence + redaction", () => {
-  it("disables a staged canary when its mapping or credential changes, including after restart", async () => {
-    const io = new MemoryIO();
-    const store = new MugsStore(io);
-    await store.load();
-    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "test-token" });
-    store.upsertMapping(mapping());
-    const staged = () => ({
-      mode: "staged" as const, enabledMappingIds: ["m1"], blocked: {}, lastResult: {},
-    });
-    store.setSync({ rollout: staged() });
-    store.upsertMapping(mapping());
-    expect(store.getSettings().sync.rollout?.enabledMappingIds).toEqual(["m1"]);
-    store.upsertMapping(mapping({ remotePath: "other" }));
-    expect(store.getSettings().sync.rollout?.enabledMappingIds).toEqual([]);
-    expect(store.getSettings().sync.rollout?.blocked.m1.reason).toContain("mapping changed");
-    store.setSync({ rollout: staged() });
-    store.upsertCredential({ id: "c1", label: "renamed", kind: "gitlab", token: store.getDisplaySettings().credentials[0].token });
-    expect(store.getSettings().sync.rollout?.blocked.m1.reason).toContain("account settings changed");
-    expect(store.getToken("c1")).toBe("test-token");
-    expect((await store.save()).ok).toBe(true);
-    const restarted = new MugsStore(io);
-    await restarted.load();
-    expect(restarted.getSettings().sync.rollout?.enabledMappingIds).toEqual([]);
-  });
-
   it("loads defaults from empty IO", async () => {
     const store = new MugsStore(new MemoryIO(null));
     const s = await store.load();
     expect(s.credentials).toEqual([]);
     expect(s.mappings).toEqual([]);
+  });
+
+  it("drops legacy staged-rollout state from older data.json on load (feature removed in 0.4.9)", async () => {
+    // A vault saved by 0.4.3–0.4.8 may carry sync.rollout; the schema no longer
+    // defines it, so it is stripped on load — every mapping resumes normal
+    // automatic scheduling (gated only by the global pause) and the field never
+    // returns to disk.
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [],
+      mappings: [],
+      lastSync: {},
+      conflicts: {},
+      sync: { paused: false, rollout: { mode: "staged", enabledMappingIds: [], blocked: { m1: { reason: "stale abort", at: 1 } }, lastResult: {} } } as any,
+      agents: [],
+      staging: {},
+      security: { encryptCredentials: false },
+    });
+    const store = new MugsStore(io);
+    const s = await store.load();
+    expect((s.sync as any).rollout).toBeUndefined(); // stripped: no enablement state survives the upgrade
+    expect(store.loadError).toBeUndefined();
+    await store.save();
+    const onDisk = (await io.read()) as any;
+    expect(onDisk.sync.rollout).toBeUndefined();    // and it never returns to disk
   });
 
   it("reloads a local mapping with no token instead of disabling the entire vault", async () => {

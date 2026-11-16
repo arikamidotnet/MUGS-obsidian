@@ -227,12 +227,6 @@ export const syncPolicySchema = z.object({
   sameChangeAccept: z.boolean().default(true),
   recencyWins: z.boolean().default(true),
   paused: z.boolean().default(false),
-  rollout: z.object({
-    mode: z.enum(["legacy", "staged"]),
-    enabledMappingIds: z.array(z.string().min(1)),
-    blocked: z.record(z.string(), z.object({ reason: z.string(), at: z.number() })),
-    lastResult: z.record(z.string(), z.object({ status: z.enum(["ok", "blocked"]), at: z.number(), reason: z.string().optional() })),
-  }).optional(),
   intervalSeconds: z.number().int().positive().default(300),
   /** Which side wins a mapping's first initialization; "pull" = remote populates
    *  the vault (historic default), "push" = vault uploads without downloading history. */

@@ -18,7 +18,7 @@ Choose your provider: [GitLab](gitlab.md) · [GitHub](github.md).
 BRAT reads **GitHub releases**, not the GitLab source repository or a developer's
 local build. The verified public distribution repository is
 [`arikamidotnet/MUGS-obsidian`](https://github.com/arikamidotnet/MUGS-obsidian/releases).
-At the time this guide was written, **0.4.7 is the latest published release**.
+At the time this guide was written, **0.4.9 is the latest published release**.
 Choose only a version that appears on the linked Releases page and has matching
 `main.js`, `manifest.json`, and `styles.css` assets. Do not interpret a local
 version number or a GitLab tag as proof that BRAT can install it.
@@ -108,12 +108,12 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    immediately checks for work; no routine **Sync now** click is needed.
 
 Use **MUGS Overview** to inspect each folder, **Changes** for committed
-snapshots, **Review** for unknown repository files, **Preflight** for rollout
-readiness and staged enablement, and **Conflicts** for genuine merge decisions.
+snapshots, **Review** for unknown repository files, and **Conflicts** for
+genuine merge decisions.
 A row showing **needs review**, **pending**, **skipped** or **failed** is *not*
 fully in sync. Review decisions are manual; neither a same-name file nor a
 completed pass authorizes an automatic deletion. See
-[guided rollout](rollout.md) for the per-folder enablement workflow.
+[guided rollout](rollout.md) for the team rollout workflow.
 
 ## Confirm background sync, then leave it alone
 

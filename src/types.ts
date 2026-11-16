@@ -116,14 +116,6 @@ export interface SyncPolicy {
   recencyWins: boolean;
   /** Global maintenance pause (Area 8). While true, poll/event/auto-push/pull are suppressed. */
   paused: boolean;
-  /** Legacy mode preserves existing automatic behavior; staged mode only runs
-   * explicitly enabled mapping IDs. Missing state means legacy (upgrade-safe). */
-  rollout?: {
-    mode: "legacy" | "staged";
-    enabledMappingIds: string[];
-    blocked: Record<string, { reason: string; at: number }>;
-    lastResult: Record<string, { status: "ok" | "blocked"; at: number; reason?: string }>;
-  };
   /** Adaptive remote-drift poll interval in seconds (~300 default; UI presets refine it). */
   intervalSeconds: number;
   /** Which side wins a mapping's FIRST initialization (no lastSync baseline yet):
