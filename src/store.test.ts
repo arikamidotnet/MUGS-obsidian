@@ -36,6 +36,25 @@ describe("MugsStore persistence + redaction", () => {
     expect(s.mappings).toEqual([]);
   });
 
+  it("degrades to defaults when data.json is unreadable (io.read throws) and refuses to save", async () => {
+    // In real Obsidian, loadData() JSON.parses data.json and THROWS on corrupt
+    // JSON, so a corrupt file makes io.read() reject — not just parseSettings.
+    // load() must catch that, flag loadError, and save() must refuse to overwrite.
+    let wrote = false;
+    const io = {
+      read: async () => { throw new SyntaxError("Unexpected token } in JSON at position 2"); },
+      write: async () => { wrote = true; },
+    };
+    const store = new MugsStore(io);
+    const s = await store.load();
+    expect(s.credentials).toEqual([]);
+    expect(s.mappings).toEqual([]);
+    expect(store.loadError).toMatch(/Unexpected token/);
+    const result = await store.save();
+    expect(result).toEqual({ ok: false, reason: "load-error" });
+    expect(wrote).toBe(false); // the corrupt file is never overwritten
+  });
+
   it("drops legacy staged-rollout state from older data.json on load (feature removed in 0.4.9)", async () => {
     // A vault saved by 0.4.3–0.4.8 may carry sync.rollout; the schema no longer
     // defines it, so it is stripped on load — every mapping resumes normal

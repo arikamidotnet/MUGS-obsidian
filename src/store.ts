@@ -94,17 +94,21 @@ export class MugsStore {
   }
 
   async load(): Promise<MugsSettings> {
-    const raw = await this.io.read();
     this.unreadableTokens.clear();
     this.loadErrorMessage = undefined;
     try {
+      // The read AND the parse are both guarded: in real Obsidian, loadData()
+      // JSON.parses data.json and THROWS on corrupt JSON, so a corrupt file makes
+      // io.read() reject — not just parseSettings. Either failure must degrade to
+      // defaults, never brick the plugin.
+      const raw = await this.io.read();
       this.settings = parseSettings(raw ?? null) as unknown as MugsSettings;
     } catch (err) {
       // A corrupted or partial data.json must not brick the plugin: start from
       // defaults, record the failure, and refuse to save (below) so the corrupt
       // file is never silently overwritten with empty settings.
       this.loadErrorMessage = err instanceof Error ? err.message : String(err);
-      console.error("MUGS: data.json could not be parsed — starting from defaults", err);
+      console.error("MUGS: data.json could not be read/parsed — starting from defaults", err);
       this.settings = structuredClone(DEFAULT_SETTINGS);
       this.runtimeTokens.clear();
       return this.getSettings();
