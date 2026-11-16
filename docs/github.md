@@ -58,9 +58,8 @@ account and repository, choose matching *top-level* folders, set direction
 and the existing branch (or leave blank for default), then press
 **Connect selected folders** and **Apply settings**. Set **Sync → Start new
 connections with** after comparing the two sides. A first mapping made
-with the current candidate stays paused until you inspect it and resume
-automatic sync. Published 0.4.2 users should pause explicitly before
-connecting for the same safety gate. Confirm event-driven upload without
+with the current release stays paused until you inspect it and resume
+automatic sync. Confirm event-driven upload without
 Sync now using a disposable file as in the [setup guide](getting-started.md#confirm-background-sync-then-leave-it-alone).
 
 If the repository is missing, confirm the token's resource owner, selected

@@ -56,10 +56,9 @@ Under **Connected folders → Connect another folder**, select the GitLab
 account, pick the project, check only intended top-level matching folders,
 choose the direction and branch, and press **Connect selected folders**.
 Choose **Sync → Start new connections with** after comparing the two sides;
-Apply the settings. A new connection in the current candidate starts paused,
-so review the route and backups before resuming **Pause automatic sync**.
-For the released 0.4.2 build, explicitly pause first if you want a guarded
-setup. Use a disposable note and verify automatic upload as described in the
+Apply the settings. A new connection starts paused, so review the route and
+backups before resuming **Pause automatic sync**. Use a disposable note and
+verify automatic upload as described in the
 [setup guide](getting-started.md#confirm-background-sync-then-leave-it-alone).
 
 If the project does not appear, check host/API URL, project membership and

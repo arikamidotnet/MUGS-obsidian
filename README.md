@@ -16,11 +16,16 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.6.
+The latest verified publication when these instructions were written is 0.4.7.
 Back up the vault and plugin state before upgrading or making a first connection.
 
-## 0.4.6 highlights (0.4.4–0.4.6)
+## 0.4.7 highlights (0.4.4–0.4.7)
 
+- **Company-wide release polish.** Documentation and packaging finalized for
+  rollout: architecture notes corrected against the shipped code, provider
+  walkthroughs updated for the automatic first-connection pause, and package
+  metadata (repository, homepage, issues, engines) completed. Plugin behavior
+  is unchanged from 0.4.6.
 - **Preflight & rollout page, restyled to match the Review page.** A folder
   sidebar with live sync-status dots and a search filter sits beside a detail
   pane carrying saved evidence, blockers, rollout state and per-folder
@@ -131,9 +136,11 @@ src/
   git/                thin git client over the system `git` binary + child-process runner
   providers/          backend adapters: contract, GitLab v4, HTTP transport, schema + provider factory
   sync/               sync driver (syncAllMappings orchestration), clone manager (identity-keyed shared clones), and the merge contract: classifier, rebase policy, exclusion, merge/conflict, reconciliation (path-level ownership proof)
-  runtime/            app-runtime transactions: manual conflict resolution, aggregate status reporting
+  runtime/            app-runtime transactions: manual conflict resolution, status reporting,
+                      staged rollout/canary gating, saved-evidence preflight, bulk review
   membership/         multi-user membership merge (roster + local activity -> summary)
-  ui/                 Obsidian views (Overview, Changes, Review, Conflicts) + pure models + data seams
+  ui/                 Obsidian views (Overview, Changes, Review, Conflicts, Preflight & rollout)
+                      + pure models + data seams
 bench/              performance benchmarks (npm run bench)
 ```
 
