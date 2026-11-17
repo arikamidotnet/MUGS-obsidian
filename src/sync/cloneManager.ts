@@ -766,26 +766,34 @@ export class CloneManager {
       await baseForDir.clone(repo.httpUrlToRepo, dir, { filter: "blob:none", noCheckout: firstPush });
       freshClone = true;
     }
+    // A remote with NO branches at all is empty (unborn HEAD): the first sync must
+    // PUSH to create the branch, whatever the configured first-sync direction — a
+    // pull-first first sync against an empty remote has nothing to pull, and the
+    // branch-not-found guard below would misreport it as "deleted or renamed".
+    // Only checked on a fresh first sync (base === ""); a non-empty remote's
+    // missing branch still falls through to the error path.
+    if (!firstPush && base === "" && mapping.direction !== "pull-only") {
+      let remoteHasBranches = true;
+      try {
+        remoteHasBranches = (await c.lsRemoteHeads()).length > 0;
+      } catch {
+        remoteHasBranches = true; // can't tell — fall through to the normal path
+      }
+      if (!remoteHasBranches) {
+        status?.("first sync: remote is empty — pushing to create the branch");
+        // Name the local branch after the mapping's branch (works on an unborn
+        // HEAD) so the first commit lands on it and `push origin <branch>` works.
+        if (branch !== "HEAD") await c.run(["checkout", "-B", branch]);
+        return this.finishFirstPush(mapping, branch, c, dir, status, committer, reconciliation);
+      }
+    }
     // S03: a branch-keyed worktree must actually BE that branch — a fresh clone
     // defaults to the remote's HEAD branch, so re-point it at the mapping's branch.
     if (freshClone && !firstPush && branch !== "HEAD") {
       await c.run(["checkout", "-B", branch, `origin/${branch}`]);
     }
     if (firstPush) {
-      const result = await this.firstSyncPush(mapping, branch, c, dir, status, committer);
-      if (reconciliation && result.newRemoteSha) {
-        const verified = await this.verifyReconciliation(mapping, c, result.newRemoteSha, reconciliation);
-        this.syncs.recordReconciliation?.(mapping.id, verified.state);
-        if (verified.blocked.length === 0) {
-          this.syncs.recordVaultSync?.(mapping.id);
-          this.syncs.recordCorrespondence?.(mapping.id, result.newRemoteSha);
-        } else {
-          this.syncs.clearCorrespondence?.(mapping.id);
-        }
-        result.blocked = verified.blocked;
-        if (verified.blocked.length > 0) result.kind = "retry-pending";
-      }
-      return result;
+      return this.finishFirstPush(mapping, branch, c, dir, status, committer, reconciliation);
     }
 
     // Push-only mappings still fetch — the remote tip is what a push must build
@@ -1120,6 +1128,35 @@ export class CloneManager {
     // A completed init supersedes any previously recorded conflicts for the mapping.
     if (this.conflicts) this.conflicts.setConflicts(mapping.id, []);
     return { mappingId: mapping.id, pull: "none", push: pushed, needsConflictResolution: false, newRemoteSha: newHead, conflicts: [], renames: [] };
+  }
+
+  /** Run the first-sync push and record reconciliation/correspondence for the new
+   *  remote tip. Shared by the explicit push-first path and the empty-remote
+   *  fallback (a remote with no branches must be initialized by a push, whatever
+   *  the configured first-sync direction). */
+  private async finishFirstPush(
+    mapping: FolderMapping,
+    branch: string,
+    c: GitClient,
+    dir: string,
+    status?: (m: string) => void,
+    committer?: Author,
+    reconciliation?: ReconciliationState,
+  ): Promise<SyncResult> {
+    const result = await this.firstSyncPush(mapping, branch, c, dir, status, committer);
+    if (reconciliation && result.newRemoteSha) {
+      const verified = await this.verifyReconciliation(mapping, c, result.newRemoteSha, reconciliation);
+      this.syncs.recordReconciliation?.(mapping.id, verified.state);
+      if (verified.blocked.length === 0) {
+        this.syncs.recordVaultSync?.(mapping.id);
+        this.syncs.recordCorrespondence?.(mapping.id, result.newRemoteSha);
+      } else {
+        this.syncs.clearCorrespondence?.(mapping.id);
+      }
+      result.blocked = verified.blocked;
+      if (verified.blocked.length > 0) result.kind = "retry-pending";
+    }
+    return result;
   }
 
   /** The recorded last-sync SHA when present, else the true merge-base of the two

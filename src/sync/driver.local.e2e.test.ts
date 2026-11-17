@@ -372,6 +372,37 @@ describe("vault mirror + first-sync direction — real git end-to-end", () => {
     rmSync(f.base, { recursive: true, force: true });
   });
 
+  it("pull-first init against an EMPTY remote (unborn HEAD) pushes to create the branch", async () => {
+    // Regression: a remote with no branches at all (a freshly created empty repo —
+    // the most natural first-time setup) made the first sync fail with the
+    // misleading "branch was not found on the remote (deleted or renamed upstream?)".
+    // A pull-first first sync against an empty remote has nothing to pull; the
+    // branch must be created by a push, whatever the configured first-sync direction.
+    const f = fixture("empty-remote-init");
+    // A truly empty bare remote: no commits, no branches (unborn HEAD).
+    execSync(`git init -q --bare -b main "${f.remotePlain}"`);
+
+    // Vault: content the user wants to publish.
+    mkdirSync(join(f.syncedVault, "Notes"), { recursive: true });
+    writeFileSync(join(f.syncedVault, "Notes", "diary.md"), "# Diary\n\nfirst note\n");
+    writeFileSync(join(f.syncedVault, "new-note.md"), "brand new\n");
+
+    const store = new MugsStore(new MemoryIO());
+    const outcomes = await syncAllMappings(depsFor(f, store, "pull")); // pull-first (default)
+    expect(outcomes[0].status).toBe("ok");
+    expect(outcomes[0].reason).toBeUndefined();
+
+    // The remote now has a main branch carrying the vault content.
+    const check = join(f.base, "check");
+    execSync(`git clone -q "${f.remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "Notes", "diary.md"), "utf8")).toContain("first note");
+    expect(readFileSync(join(check, "new-note.md"), "utf8")).toBe("brand new\n");
+    // A second pass is a clean no-op (baseline recorded, nothing to do).
+    const outcomes2 = await syncAllMappings(depsFor(f, store, "pull"));
+    expect(outcomes2[0].status).toBe("ok");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
   it("push-first init uploads the vault without downloading history; vault wins overlaps, remote-only files kept", async () => {
     const f = fixture("push-init");
     // Remote: a STALE version of diary.md plus a file the vault does not have.

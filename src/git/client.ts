@@ -286,6 +286,16 @@ export class GitClient {
     return r.code === 0 ? r.stdout.trim() : "";
   }
 
+  /** The remote's branch refs, or [] when the remote has no branches (empty repo).
+   *  Distinguishes an empty remote (first sync must push to create the branch)
+   *  from a genuinely missing branch (an error). Read-only; used only on the
+   *  branch-not-found path. */
+  async lsRemoteHeads(): Promise<string[]> {
+    const r = await this.run(["ls-remote", "--heads", "origin"]);
+    if (r.code !== 0) throw new Error(`git ls-remote failed (${r.code}): ${r.stderr.trim()}`);
+    return r.stdout.split("\n").filter((l) => l.length > 0);
+  }
+
   /** True when `ancestor` is an ancestor of any SHA in `descendants`. */
   async isAncestor(ancestor: string, descendants: string[]): Promise<boolean> {
     for (const d of descendants) {

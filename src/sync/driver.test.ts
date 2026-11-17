@@ -113,7 +113,11 @@ function makeRunner(o: { head: string; remote: string; ancestor: boolean; cloned
       }
       if (cmd === "log") return { code: 0, stdout: o.pathLogTimeSecs !== undefined ? String(o.pathLogTimeSecs) : "", stderr: "" };
       if (cmd === "ls-files") return { code: 0, stdout: (o.lsFiles ?? []).join("\n"), stderr: "" };
-      return { code: 0, stdout: "", stderr: "" }; // clone / fetch / ls-files / reset / add / commit / push
+      // A non-empty remote (these scenarios all have a remote SHA) advertises its
+      // branch to `ls-remote --heads` — the empty-remote first-sync fallback keys
+      // off this being non-empty.
+      if (cmd === "ls-remote") return { code: 0, stdout: `${o.remote}\trefs/heads/main`, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" }; // clone / fetch / reset / add / commit / push
     },
   };
   return { runner, calls, callOpts };
