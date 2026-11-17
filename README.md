@@ -16,8 +16,26 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.11.
+The latest verified publication when these instructions were written is 0.4.12.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.12 highlights
+
+- **Bug fix: a brand-new empty file is no longer silently dropped from sync.**
+  The merge engine's "is there anything to write?" check treated an *absent*
+  side (a file that does not exist on that side) the same as an *empty* file,
+  so a newly created empty note merged to "equal to the absent side", produced
+  no write, and never reached the remote. An absent side is not a current state
+  — the file must be created there, so it can never make the pass a no-op.
+- **Bug fix: first sync against an empty remote now works.** Pointing a mapping
+  at a freshly created empty repository (no commits, no branches — the most
+  natural first-time setup) failed with the misleading "branch was not found on
+  the remote (deleted or renamed upstream?)" in both push-first and pull-first.
+  A remote with no branches is now recognized as empty and the first sync
+  pushes to create the branch, whatever the configured first-sync direction
+  (including a non-default branch). A non-empty remote whose branch is missing
+  still reports the error.
+  - Unchanged: everything else behaves exactly as in 0.4.11.
 
 ## 0.4.11 highlights
 
