@@ -151,8 +151,17 @@ export function applyMerge(entries: FileVersions[]): { applied: AppliedChange[];
       // The remote deleted a file we did not touch -> take the deletion instead
       // of writing our (unchanged) copy back over it.
       applied.push({ path: e.path });
-    } else if (merged.content !== (e.ours ?? "") || merged.content !== (e.theirs ?? "")) {
-      applied.push({ path: e.path, content: merged.content });
+    } else {
+      // A write is needed unless the merged result already equals every side that
+      // is PRESENT. An absent side (undefined) is not a "current state" — the file
+      // must be created/propagated there, so it can never make the pass a no-op.
+      // (The old `?? ""` here conflated an absent side with an empty file, silently
+      // dropping brand-new empty files: merged "" === (undefined ?? "").)
+      const oursUnchanged = e.ours !== undefined && merged.content === e.ours;
+      const theirsUnchanged = e.theirs !== undefined && merged.content === e.theirs;
+      if (!(oursUnchanged && theirsUnchanged)) {
+        applied.push({ path: e.path, content: merged.content });
+      }
     }
   }
   return { applied, conflicts };

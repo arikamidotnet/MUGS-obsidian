@@ -144,5 +144,38 @@ describe("applyMerge — clean vs divergent per file", () => {
       expect(applied).toEqual([]);
       expect(conflicts).toEqual([{ path: "c.md", base: undefined, ours: "L", theirs: "R" }]);
     });
+
+    it("writes a brand-new EMPTY file (absent side is not a no-op, distinct from empty)", () => {
+      // Regression: the old `merged.content !== (e.theirs ?? "")` check conflated an
+      // absent side (undefined) with an empty file (""), so a new empty file
+      // (base=undefined, ours="", theirs=undefined) produced no write op and was
+      // silently dropped from the remote.
+      const entries: FileVersions[] = [
+        { path: "empty.md", base: undefined, ours: "", theirs: undefined },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(conflicts).toEqual([]);
+      expect(applied).toEqual([{ path: "empty.md", content: "" }]);
+    });
+
+    it("propagates a file emptied on one side while absent on the other", () => {
+      // base had content; local emptied it, remote never had it (new-then-emptied
+      // locally). The empty content must be written, not dropped.
+      const entries: FileVersions[] = [
+        { path: "emptied.md", base: "x", ours: "", theirs: undefined },
+      ];
+      const { applied, conflicts } = applyMerge(entries);
+      expect(conflicts).toEqual([]);
+      expect(applied).toEqual([{ path: "emptied.md", content: "" }]);
+    });
+
+    it("still no-ops when the merged result equals every PRESENT side", () => {
+      // Both sides present and equal to the merge -> unchanged -> no write.
+      const entries: FileVersions[] = [
+        { path: "same.md", base: J(["a"]), ours: J(["a"]), theirs: J(["a"]) },
+      ];
+      const { applied } = applyMerge(entries);
+      expect(applied).toEqual([]);
+    });
   });
 });
