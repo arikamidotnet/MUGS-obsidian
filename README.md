@@ -16,8 +16,22 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.13.
+The latest verified publication when these instructions were written is 0.4.14.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.14 highlights
+
+- **Improvement: genuine conflicts now auto-resolve when the engine is confident.**
+  When two people edit the same lines, MUGS previously always asked for a manual
+  ours/theirs/both decision. Now, with **Prefer newer edits** on (the default),
+  a conflict is auto-resolved to the clearly newer side when the two saves
+  clearly differ in time — the winner is committed, pushed and mirrored like any
+  clean merge, so all clients converge with no click. When the engine cannot tell
+  which side is newer (near-equal or missing timestamps, or the setting off), the
+  conflict is still surfaced for an explicit decision — the engine never guesses
+  a winner it cannot justify, so the no-silent-data-loss guarantee is preserved.
+  - Unchanged: clean (non-overlapping) edits were already auto-merged; everything
+    else behaves exactly as in 0.4.13.
 
 ## 0.4.13 highlights
 
