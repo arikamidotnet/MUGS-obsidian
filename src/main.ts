@@ -406,9 +406,10 @@ export default class MugsPlugin extends Plugin {
         lastSync: storeWritableAccessor(this.store),
         workingTree: this.workingTreeWriter(),
         conflicts: storeConflictAccessor(this.store),
-        // Conflict-handling policy (S06): autoMerge enables CLEAN three-way auto-merge;
-        // genuine conflicts are always surfaced for review — recency/tie-break settings
-        // feed the conflict UI's one-click suggestions, never a silent engine winner.
+        // Conflict-handling policy (S06): autoMerge enables CLEAN three-way auto-merge,
+        // plus auto-resolution of a genuine conflict when recency-wins is confident
+        // (a clear winner). Near-equal/missing timestamps or recencyWins off surface
+        // the conflict for an explicit human decision — the engine never guesses.
         policy: settings.sync,
         obsidianConfig: settings.sync.obsidianConfig,
         editorOpen: this.editorOpen,

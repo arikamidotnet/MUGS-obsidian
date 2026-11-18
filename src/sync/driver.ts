@@ -70,9 +70,9 @@ export interface SyncDriverDeps {
   /** Optional: durable per-mapping conflict store, so conflicts survive across sessions. */
   conflicts?: ConflictStore;
   /** Optional: conflict-handling policy (S06): autoMerge enables CLEAN three-way
-   *  auto-merge ONLY — genuine conflicts are always surfaced for review. recencyWins
-   *  merely attaches recency timestamps to surfaced conflicts for the UI's one-click
-   *  suggestions; the engine never silently picks a winner. */
+   *  auto-merge, plus auto-resolution of a genuine conflict when recency-wins is
+   *  confident (a clear winner). Near-equal/missing timestamps or recencyWins off
+   *  surface the conflict for an explicit human decision — the engine never guesses. */
   policy?: SyncPolicy;
   /** Optional: tracks paths open with unsaved changes so writes never clobber an edit. */
   editorOpen?: EditorOpenGuard;

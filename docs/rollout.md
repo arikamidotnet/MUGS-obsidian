@@ -20,15 +20,17 @@ two full independent clients against one shared repository:
 - New remote files download automatically; deletions propagate; identical
   changes on both sides collapse (the same-change rule).
 - A fully converged pass is a verified no-op: no reads, commits or pushes.
-- Genuine conflicts get a one-click **ours / theirs / both** decision in the
-  Conflicts panel; the engine never picks a winner silently.
+- A genuine conflict is auto-resolved to the clearly newer side when the two
+  saves differ in time (recency-wins, on by default); when the engine cannot
+  tell which is newer, it gets a one-click **ours / theirs / both** decision in
+  the Conflicts panel. The engine never guesses a winner it cannot justify.
 
 Three cases are deliberately **not** automatic, because automatic action there
 can lose or duplicate shared content:
 
 | Case | What MUGS does | Why not automatic |
 | --- | --- | --- |
-| Same-region edits to one file | Surfaces the conflict with both sides intact | Only a human can know which edit is wanted; silent picks lose bytes |
+| Same-region edits where the engine can't tell which is newer (near-equal or missing timestamps) | Surfaces the conflict with both sides intact | Only a human can know which edit is wanted when recency gives no clear winner; a guessed pick loses bytes |
 | Repository files this vault never received | Review tab: copy into the vault or delete from the repository | Cannot distinguish a teammate's new file from your own unpropagated deletion |
 | Deleting shared repository files | Explicit confirmation, recovery backup first | Affects every other user; a name match is not consent |
 
@@ -86,7 +88,7 @@ budget, unmatched results are reported as inconclusive, never as "no match".
 | Cost | Your git host + tokens | Subscription |
 | Steady-state automation | Same: edits sync in the background without clicks | Same |
 | Clean concurrent edits | Three-way merge, all clients converge | Merged |
-| Conflicting edits | One explicit decision, both sides preserved | "Conflict copy" duplicates |
+| Conflicting edits | Auto-resolved to the clearly newer side; otherwise one explicit decision, both sides preserved | "Conflict copy" duplicates |
 | Unknown/ambiguous files | One explicit decision | Downloaded |
 | Deletions | Propagate, recoverable via trash store | Propagate, version history |
 | Content encryption | Token encryption at rest only; repository holds plaintext | End-to-end encrypted |

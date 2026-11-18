@@ -344,13 +344,13 @@ export class MugsSettingTab extends PluginSettingTab {
     this.section(containerEl, "Conflicts", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "Separate edits can combine automatically. If the same lines change in both places, you choose what to keep.",
+        text: "Separate edits combine automatically. If the same lines change in both places, MUGS keeps the more recent edit when it can tell which is newer; otherwise you choose what to keep.",
       });
 
       const sync = this.view().sync;
       new Setting(card)
         .setName("Combine non-conflicting edits")
-        .setDesc("Combine edits to different lines. Conflicting edits always need your review.")
+        .setDesc("Combine edits to different lines automatically. Conflicting edits are auto-resolved when a newer edit is clear, otherwise they need your review.")
         .addToggle((t) => {
           t.setValue(sync.autoMerge).onChange(async (v) => {
             this.edit((d) => d.setSync({ autoMerge: v }));
@@ -359,7 +359,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Preferred conflict choice")
-        .setDesc("A preference only. MUGS won't choose for you.")
+        .setDesc("A preference only, used when MUGS can't tell which edit is newer. MUGS won't choose for you in that case.")
         .addDropdown((d) => {
           d.setValue(sync.defaultResolution).onChange(async (v) => {
             this.edit((d) => d.setSync({ defaultResolution: v as "both" | "theirs" | "ours" }));
@@ -371,7 +371,7 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Prefer newer edits")
-        .setDesc("A preference only. Conflicting edits still need your review.")
+        .setDesc("When on, a conflicting edit is auto-resolved to the more recent side when the two saves clearly differ in time. Near-equal or missing timestamps still need your review.")
         .addToggle((t) => {
           t.setValue(sync.recencyWins).onChange(async (v) => {
             this.edit((d) => d.setSync({ recencyWins: v }));

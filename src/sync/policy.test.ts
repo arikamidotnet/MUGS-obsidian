@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clearlyNewer, sameChange, resolveConflictAuto, canAutoResolve, autoResolvedContent, RECENCY_NEAR_EQUAL_MS } from "./policy";
+import { clearlyNewer, sameChange, resolveConflictAuto, canAutoResolve, autoResolvedContent, confidentAutoResolution, RECENCY_NEAR_EQUAL_MS } from "./policy";
 import type { SyncPolicy, FileConflict } from "../types";
 
 const policy = (over: Partial<SyncPolicy> = {}): SyncPolicy => ({
@@ -110,5 +110,31 @@ describe("autoResolvedContent — resolves to the chosen side's text", () => {
     const c = conflict({ base: ["a", "b", "c"].join("\n"), ours: ["A", "b", "c"].join("\n"), theirs: ["a", "b", "C"].join("\n") });
     const r = resolveConflictAuto(c, policy({ defaultResolution: "both" }));
     expect(autoResolvedContent(c, r!)).toBe(["A", "b", "C"].join("\n"));
+  });
+});
+
+describe("confidentAutoResolution — engine auto-resolves only when recency is confident", () => {
+  it("picks ours when ours was saved clearly later", () => {
+    const r = confidentAutoResolution(conflict({ oursSavedAt: 2_000_000, theirsModifiedAt: 1_000_000 }), policy());
+    expect(r).toEqual({ choice: "ours", reason: "recency — ours saved later" });
+  });
+
+  it("picks theirs when theirs was saved clearly later", () => {
+    const r = confidentAutoResolution(conflict({ oursSavedAt: 1_000_000, theirsModifiedAt: 2_000_000 }), policy());
+    expect(r).toEqual({ choice: "theirs", reason: "recency — theirs saved later" });
+  });
+
+  it("returns undefined when saves are near-equal (not confident -> surface for a human)", () => {
+    expect(confidentAutoResolution(conflict({ oursSavedAt: 1_000_000, theirsModifiedAt: 1_000_000 + RECENCY_NEAR_EQUAL_MS - 10 }), policy())).toBeUndefined();
+  });
+
+  it("returns undefined when a timestamp is missing (not confident -> surface for a human)", () => {
+    expect(confidentAutoResolution(conflict({ oursSavedAt: 2_000_000 }), policy())).toBeUndefined();
+    expect(confidentAutoResolution(conflict({ theirsModifiedAt: 2_000_000 }), policy())).toBeUndefined();
+    expect(confidentAutoResolution(conflict(), policy())).toBeUndefined();
+  });
+
+  it("returns undefined when recencyWins is off, even with a clear winner", () => {
+    expect(confidentAutoResolution(conflict({ oursSavedAt: 2_000_000, theirsModifiedAt: 1_000_000 }), policy({ recencyWins: false }))).toBeUndefined();
   });
 });

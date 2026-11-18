@@ -475,9 +475,11 @@ describe("syncAllMappings — sync outcomes", () => {
   });
 
   it("auto-resolves an overlapping divergence by recency and stages the winner for push (mirror mode)", async () => {
-    // Regression: recencyWins never fired because ours/theirs timestamps were never
-    // populated in the sync path, and auto-resolved winners were never staged in
-    // mirror mode — the same conflict would resurface on every later sync.
+    // The engine auto-resolves a genuine conflict when recency-wins is confident
+    // (the two saves clearly differ in time): the winner is applied as a clean
+    // change — written to the clone working tree, committed and pushed — so it
+    // converges on every client. Here the vault copy was just saved (recent) and
+    // the remote edit is ancient, so recency picks "ours".
     const OURS_MS = Date.now();
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = {
@@ -510,16 +512,16 @@ describe("syncAllMappings — sync outcomes", () => {
       policy: { ...DEFAULT_SYNC_POLICY }, // autoMerge + recencyWins on, "both" fallback
       vaultMirror,
     });
-    // S06 (contract §4): the engine NEVER silently auto-resolves. The genuine
-    // add/add divergence is recorded and surfaced; the recency INPUTS are still
-    // gathered (both timestamps) so the UI can offer one-click suggestions.
-    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "conflict" });
-    expect(store.getState()).toEqual([
-      { path: "todo.md", base: undefined, ours: "a\nLOCAL\nc\n", theirs: "a\nREMOTE\nc\n", oursSavedAt: OURS_MS, theirsModifiedAt: 1_000_000_000 },
-    ]);
-    // Nothing was auto-written into the clone and nothing was committed/pushed.
-    expect(writes).toEqual([]);
-    expect(calls.some((cl) => cl.includes("commit"))).toBe(false);
+    // Confident recency auto-resolution: the pass completes cleanly (no conflict
+    // surfaced), the "ours" winner is written into the clone working tree, and a
+    // commit + push are issued so the winner converges on the remote.
+    expect(outcomes[0]).toMatchObject({ mappingId: "m1", status: "ok" });
+    expect(store.getState()).toEqual([]);
+    const winner = writes.find(([, content]) => content === "a\nLOCAL\nc\n");
+    expect(winner).toBeDefined();
+    expect(winner![0].endsWith("todo.md")).toBe(true);
+    expect(calls.some((cl) => cl.includes("commit-tree"))).toBe(true);
+    expect(calls.some((cl) => cl.includes("push"))).toBe(true);
   });
 
   it("skips per-file reads and shows entirely on an unchanged push-only pass (steady-state shortcut)", async () => {
@@ -918,7 +920,7 @@ describe("syncAllMappings — local provider (existing local clone)", () => {
 });
 
 describe("syncAllMappings — sync outcomes", () => {
-  it("surfaces a genuine conflict even with an injected policy (S06: no silent auto-resolution)", async () => {
+  it("surfaces a genuine conflict when recency is not confident (no save timestamp to compare)", async () => {
     const writes: Array<[string, string]> = [];
     const workingTree: WorkingTreeWriter = { writeFile: (p, c) => { writes.push([p, c]); return Promise.resolve(); } };
     const store = memoryConflictStore();
@@ -944,10 +946,10 @@ describe("syncAllMappings — sync outcomes", () => {
       workingTree,
       policy: { ...DEFAULT_SYNC_POLICY, defaultResolution: "theirs" },
     });
-    // S06 (contract §4): even with an injected policy (autoMerge + "theirs"), the
-    // engine surfaces the genuine conflict instead of silently resolving it —
-    // resolution is an explicit one-click user action (conflictActions), never a
-    // silent engine default.
+    // No vault mirror is injected, so the engine has no "ours" save timestamp and
+    // recency-wins is NOT confident — the genuine conflict is surfaced for an
+    // explicit human decision rather than auto-resolved. (With a mirror and a clear
+    // recency winner, the same divergence would auto-resolve; see the recency test.)
     expect(writes).toEqual([]);
     expect(store.getState()).toEqual([
       { path: "notes/todo.md", base: J(["a", "shared", "c"]), ours: J(["a", "LOCAL", "c"]), theirs: J(["a", "REMOTE", "c"]) },

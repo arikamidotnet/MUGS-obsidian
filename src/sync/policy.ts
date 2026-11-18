@@ -84,6 +84,24 @@ export function canAutoResolve(c: FileConflict, policy: SyncPolicy): boolean {
   return resolveConflictAuto(c, policy) !== undefined;
 }
 
+/**
+ * Decide how the ENGINE auto-resolves a genuine conflict, or undefined when it is not
+ * confident enough to pick a winner without a human. Unlike {@link resolveConflictAuto}
+ * (a UI suggestion that always falls back to `defaultResolution`), this returns a choice
+ * ONLY when recency-wins has a clear winner — the two saves differ by more than the
+ * near-equal margin. Near-equal or missing timestamps, or `recencyWins` off, yield
+ * undefined so the conflict is surfaced for an explicit human decision. This is the
+ * "auto-resolve when confident" engine behavior: automatic for the common case (one side
+ * clearly saved later), safe for the ambiguous one. Never throws, never blocks.
+ */
+export function confidentAutoResolution(c: FileConflict, policy: SyncPolicy): AutoResolution | undefined {
+  if (!policy.recencyWins) return undefined;
+  const newer = clearlyNewer(c.oursSavedAt, c.theirsModifiedAt);
+  if (newer === "ours") return { choice: "ours", reason: "recency — ours saved later" };
+  if (newer === "theirs") return { choice: "theirs", reason: "recency — theirs saved later" };
+  return undefined;
+}
+
 /** The resolved text for an automatic choice — same as a manual {@link resolveConflict}. */
 export function autoResolvedContent(c: FileConflict, resolution: AutoResolution): string {
   return resolveConflict(c, resolution.choice);

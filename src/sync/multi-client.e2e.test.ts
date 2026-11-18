@@ -6,16 +6,18 @@
  * - first-sync pull populates both clients from the same seed
  * - distinct edits on each client converge on both sides
  * - non-overlapping edits to one file merge automatically (three-way)
- * - same-region edits are a GENUINE conflict: surfaced for review, never silently
- *   merged — each client keeps its own bytes, the conflict is recorded, nothing
- *   is published over the other side, and a user-style resolution converges both
+ * - same-region edits are a GENUINE conflict: auto-resolved to the clearly
+ *   newer side when recency-wins is confident, otherwise surfaced for review —
+ *   each client keeps its own bytes when not confident, the conflict is
+ *   recorded, nothing is published over the other side, and a user-style
+ *   resolution converges both
  * - a deletion on one client propagates to the other
  * - a fully converged pass is a verified idle no-op (no new commits)
  * - with automatic resolution OFF, the same conflict surfaces identically — the
  *   autoMerge flag never changes what is lost (nothing) or surfaced (both sides)
  */
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -125,11 +127,12 @@ describe("multi-client soak — two real clients through one shared git remote",
       expect(merged).toContain("bravo");
       expect(merged).toContain("CHARLIE-B");
 
-      // Same-region edits from the same base are a GENUINE conflict. Design (S06):
-      // surfaced for review, never silently merged — even with autoMerge on and
-      // defaultResolution "both". Neither side loses bytes: A keeps BRAVO-A, B
-      // keeps BRAVO-B, B publishes nothing over A, and the conflict is recorded
-      // in B's store so the Conflicts panel can offer one-click resolution.
+      // Same-region edits from the same base are a GENUINE conflict. This soak
+      // runs with recency-wins OFF (the default here), so the engine is not
+      // confident and surfaces the conflict for review rather than auto-resolving
+      // it. Neither side loses bytes: A keeps BRAVO-A, B keeps BRAVO-B, B
+      // publishes nothing over A, and the conflict is recorded in B's store so
+      // the Conflicts panel can offer one-click resolution.
       a.write("base.md", merged.replace("bravo", "BRAVO-A"));
       b.write("base.md", merged.replace("bravo", "BRAVO-B"));
       expect((await a.sync())[0].status).toBe("ok"); // A publishes its side
@@ -190,6 +193,34 @@ describe("multi-client soak — two real clients through one shared git remote",
       expect(a.read("base.md")).toContain("BRAVO-A");
       expect(b.read("base.md")).toContain("BRAVO-B");
       expect(b.read("base.md")).not.toContain("BRAVO-A");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("with recency-wins on, a same-region conflict auto-resolves to the clearly newer side and both clients converge", async () => {
+    const { base, a, b } = setup({ recencyWins: true });
+    try {
+      await a.sync(); await b.sync();
+      a.write("base.md", "alpha\nBRAVO-A\ncharlie\n");
+      await a.sync(); // A publishes its side; the remote commit is now the "theirs" baseline.
+      b.write("base.md", "alpha\nBRAVO-B\ncharlie\n");
+      // Make B's save clearly newer than A's commit (beyond the 5s near-equal margin)
+      // by stamping B's file mtime ahead of the commit time. The recency inputs are a
+      // real fs mtime and a real git commit time, so fake timers can't drive them —
+      // utimesSync sets the mtime directly, deterministically, with no real wait.
+      utimesSync(join(b.vault, "base.md"), 0, Date.now() / 1000 + 60);
+      const outcomes = await b.sync();
+      // B's save is clearly newer than A's commit -> auto-resolved to B's side, no
+      // conflict surfaced, and the winner is published.
+      expect(outcomes[0].status).toBe("ok");
+      expect(b.store.getConflicts("soak")).toEqual([]);
+      expect(b.read("base.md")).toContain("BRAVO-B");
+      expect(b.read("base.md")).not.toContain("BRAVO-A");
+      // A's next pass pulls the winner (A's side is unchanged vs its base) and converges.
+      await a.sync();
+      expect(a.read("base.md")).toBe(b.read("base.md"));
+      expect(a.read("base.md")).toContain("BRAVO-B");
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

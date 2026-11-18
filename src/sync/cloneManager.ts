@@ -19,7 +19,8 @@ import { authorRefForAgent } from "./attribution";
 import type { RepoSummary } from "../providers/types";
 import { decideSyncAction, type SyncAction } from "./rebase-policy";
 import { formatCommitMessage } from "./commit-message";
-import { applyMerge, type AppliedChange, type FileVersions } from "./conflict";
+import { applyMerge, resolveConflict, type AppliedChange, type AppliedFile, type FileVersions } from "./conflict";
+import { confidentAutoResolution } from "./policy";
 import type { SyncPlanKind, PendingOperation, RepoIdentity, ReconciliationState } from "../types";
 import { emptyReconciliation, gitBlobId, parseReconciliationTree, reconciliationFingerprint } from "./reconciliation";
 import { checkRelPath } from "../git/safePath";
@@ -258,10 +259,10 @@ export class CloneManager {
       fetchedDirs?: Set<string>;
       workingTree?: WorkingTreeWriter;
       conflicts?: ConflictStore;
-      /** Conflict-handling policy (S06): autoMerge enables CLEAN three-way auto-merge
-       *  ONLY — genuine conflicts are always surfaced for review. recencyWins merely
-       *  attaches per-side recency timestamps to surfaced conflicts for the UI's
-       *  one-click suggestions; the engine never silently picks a winner. */
+      /** Conflict-handling policy (S06): autoMerge enables CLEAN three-way auto-merge,
+       *  plus auto-resolution of a genuine conflict when recency-wins is confident
+       *  (a clear winner). Near-equal/missing timestamps or recencyWins off surface
+       *  the conflict for an explicit human decision — the engine never guesses. */
       policy?: SyncPolicy;
       /** Tracks paths open with unsaved changes so writes never clobber an in-progress edit. */
       editorOpen?: EditorOpenGuard;
@@ -1500,25 +1501,42 @@ export class CloneManager {
         }
       }
 
-      // S06 (contract §4): autoMerge now means CLEAN three-way auto-merge ONLY.
-      // Genuine conflicts (unresolved hunks, delete/modify, divergent add/add,
-      // binary) are RECORDED and SURFACED — never silently auto-resolved.
-      // recencyWins / defaultResolution:"both" are one-click UI suggestions
-      // (conflictActions) requiring explicit user choice, not engine defaults.
-      const batchSurfaced = conflicts;
+      // S06 (contract §4): autoMerge means CLEAN three-way auto-merge, PLUS
+      // auto-resolution of a genuine conflict when the engine is CONFIDENT —
+      // recency-wins has a clear winner (the two saves differ by more than the
+      // near-equal margin). A confident winner is applied as a clean change
+      // (written to the working tree, pushed, mirrored) exactly like a clean
+      // merge, so it converges on every client. Near-equal or missing
+      // timestamps, or recencyWins off, are NOT confident: those conflicts are
+      // RECORDED and SURFACED for an explicit human ours/theirs/both decision —
+      // the engine never guesses which side is newer when it cannot tell.
+      const batchAutoResolved: AppliedFile[] = [];
+      const batchSurfaced: FileConflict[] = [];
+      for (const cf of conflicts) {
+        const auto = this.policy ? confidentAutoResolution(cf, this.policy) : undefined;
+        if (auto) {
+          batchAutoResolved.push({ path: cf.path, content: resolveConflict(cf, auto.choice) });
+        } else {
+          batchSurfaced.push(cf);
+        }
+      }
       // Best-effort recoverable content for deletes: the clone's current (theirs) content,
       // so a deletion is recorded in `.mugs-trash` before the working-tree removal.
       const priorByPath = new Map(resolved.map((e) => [e.path, e.theirs]));
-      const toApply: Array<ApplyOp & { content?: string; priorContent?: string }> = applied.map((a) => {
-        const op: ApplyOp & { content?: string; priorContent?: string } = toWriteOp(a);
-        if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
-        return op;
-      });
+      const toApply: Array<ApplyOp & { content?: string; priorContent?: string }> = [
+        ...applied.map((a) => {
+          const op: ApplyOp & { content?: string; priorContent?: string } = toWriteOp(a);
+          if (op.kind === "delete") op.priorContent = priorByPath.get(a.path);
+          return op;
+        }),
+        ...batchAutoResolved.map((a) => ({ path: a.path, kind: "write" as const, content: a.content })),
+      ];
 
       // Safe applier ordering: writes before deletes, parents before children.
       await this.applyOrdered(dir, orderApplyOps(toApply), mapping.id, c);
       for (const op of toApply) if (op.kind === "delete") deleted.add(op.path);
       for (const a of applied) appliedPaths.push(a.path);
+      for (const a of batchAutoResolved) appliedPaths.push(a.path);
       surfacedConflicts.push(...batchSurfaced);
       // Batch contents are unreachable from here — memory stays bounded.
     }

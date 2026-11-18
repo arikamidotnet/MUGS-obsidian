@@ -130,19 +130,19 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 
 **Tradeoffs.** gitignore semantics are well-understood and expressive (`!` negation, `*`/`**`/`?`, directory trailing slash). The cost is that globs can surprise users; the settings UI documents each field's meaning.
 
-### Area 2 — Conflict resolution: clean auto-merge, human-decided conflicts
+### Area 2 — Conflict resolution: clean auto-merge, auto-resolve-when-confident, human-decided otherwise
 
-**Problem.** Users want sync to feel continuous (like Obsidian Sync / Figma), yet never lose a side of a genuine conflict to a silent winner.
+**Problem.** Users want sync to feel continuous (like Obsidian Sync / Figma), yet never lose a side of a genuine conflict to a *guessed* winner — the engine may pick a side only when it has a sound basis (a clearly newer save), not when it cannot tell.
 
-**Options considered.** A manual conflict UI for everything (rejected: clean changes need no human); last-write-wins on genuine conflicts (rejected: loses content); **clean auto-merge + explicit resolution for genuine conflicts, reversible via git history / `.mugs-trash`** (chosen).
+**Options considered.** A manual conflict UI for everything (rejected: clean changes need no human); last-write-wins on every genuine conflict (rejected: loses content when the engine cannot tell which side is newer); **clean auto-merge + auto-resolve-when-confident (recency) + explicit human resolution when not confident, reversible via git history / `.mugs-trash`** (chosen).
 
 **Chosen.** A top-level `sync` policy (`SyncPolicy`) with:
 - `autoMerge` (default true): every divergence runs the 3-way merge; clean results apply without prompting.
 - `defaultResolution` ("both" | "theirs" | "ours", default "both"): the *suggested* tie-break for overlapping hunks — offered by the panel and settings, never applied by the engine.
 - `sameChangeAccept` (default true): jj's same-change rule. The identical-change collapse is inherent to `threeWayMerge`; the toggle is persisted but not consulted by the engine.
-- `recencyWins` (default true): when on, the engine attaches each side's timestamps (vault mtime vs the last commit touching the path) to conflict records so the panel can offer a one-click suggested winner; near-equal or missing timestamps leave the suggestion to `defaultResolution` only.
+- `recencyWins` (default true): when on, the engine attaches each side's timestamps (vault mtime vs the last commit touching the path) and **auto-resolves a genuine conflict to the clearly newer side** when the two saves differ by more than the near-equal margin (`confidentAutoResolution`). Near-equal or missing timestamps are not confident, so the conflict is surfaced for a human decision.
 
-Genuine conflicts (overlapping edits, divergent add/add) are **recorded and surfaced**: the Conflicts panel asks for an explicit ours/theirs/both choice, and the settings UI labels the tie-break/recency options as suggestions that are "never applied silently". The pure decision helper (`policy.resolveConflictAuto`) exists and is pinned by tests, but no production path calls it — a resolution is applied only by a human click (panel or Diff view) through the runtime resolution transaction (`runtime/conflictResolver.ts`: identity check → originals preserved → clone + vault writes → save-acknowledged). Reversibility (git history + trash + `.mugs-origin` sidecars) is what makes explicit resolution safe.
+Genuine conflicts (overlapping edits, divergent add/add) are handled in two tiers. When `recencyWins` is on and the two saves clearly differ in time, the engine **auto-resolves to the newer side** (`confidentAutoResolution`) and applies the winner as a clean change — written, committed, pushed, and mirrored — so it converges on every client with no human in the loop. When the engine is not confident (near-equal or missing timestamps, or `recencyWins` off), the conflict is **recorded and surfaced**: the Conflicts panel asks for an explicit ours/theirs/both choice. The panel's one-click resolution runs through the runtime resolution transaction (`runtime/conflictResolver.ts`: identity check → originals preserved → clone + vault writes → save-acknowledged). Reversibility (git history + trash + `.mugs-origin` sidecars) is what makes both the automatic and the explicit path safe.
 
 ### Area 3 — Deletes as first-class values (.mugs-trash) + real-time automatic merging + safe applier
 
@@ -262,7 +262,7 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 **False-conflict avoidance on deletes.** The delete matrix (§3.1) guarantees a delete is resolved by content identity, not treated as an empty-file edit. `collectConflicts`/`applyMerge` only record a conflict when `threeWayMerge.conflict` is true.
 
-**Clean auto-merge; genuine conflicts always prompt.** Clean divergences merge automatically and coalesced event triggers propagate local edits fast; overlapping conflicts are surfaced for an explicit ours/theirs/both choice — recency/tie-break settings are suggestions, never silent winners (Area 2, §5). Caveat: approximate, not zero-latency.
+**Clean auto-merge; auto-resolve-when-confident; human decision otherwise.** Clean divergences merge automatically and coalesced event triggers propagate local edits fast. A genuine conflict is auto-resolved to the clearly newer side when recency-wins is confident (the two saves differ by more than the near-equal margin); near-equal or missing timestamps surface it for an explicit ours/theirs/both choice — the engine never guesses which side is newer when it cannot tell (Area 2, §5). Caveat: approximate, not zero-latency.
 
 **Path-level ownership (reconciliation).** A filename or mtime does not prove a vault received a remote file — a matching Git blob does. Every pass verifies vault bytes against the published blob IDs from the remote tree; unknown remote-only paths land in a review (never auto-deleted, never blocking the pass), and deletion propagation is per-path (blob-proven only). The fingerprint over repo identity + mapping shape means proof is never carried across re-scoped links. Review items do not change the outcome status — a pass with items awaiting review reports `ok` (plan kind `retry-pending`) and carries the review list as advisory data (Area 3, §3.1).
 

@@ -285,13 +285,13 @@ Implemented features:
   browse changed files with addition/deletion counts, line numbers, collapsible
   changes, and file-level Git author names where available. Compact cards state
   plainly that only saved Git history is shown.
-- **Conflict resolution.** Clean three-way changes auto-merge; genuine conflicts
-  (overlapping edits, divergent add/add) are recorded and surfaced in the
-  **Conflicts panel** for an explicit ours / theirs / both choice — the
-  recency and tie-break settings are one-click suggestions in the panel,
-  never applied silently. Writes and deletes touching a file open in an editor
-  defer into durable pending operations that block proven completion until
-  they are applied and verified.
+- **Conflict resolution.** Clean three-way changes auto-merge. A genuine conflict
+  (overlapping edits, divergent add/add) is auto-resolved to the clearly newer
+  side when the two saves differ in time (recency-wins, on by default); when the
+  engine cannot tell which is newer, it is recorded and surfaced in the
+  **Conflicts panel** for an explicit ours / theirs / both choice. Writes and
+  deletes touching a file open in an editor defer into durable pending
+  operations that block proven completion until they are applied and verified.
 - **Reconciliation (path-level ownership).** Neither a filename nor an mtime
   proves a vault received a remote file — a matching Git blob does. Every pass
   verifies vault bytes against the published blob IDs from the remote tree;
