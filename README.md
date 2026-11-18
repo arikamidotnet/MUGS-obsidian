@@ -16,8 +16,21 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.12.
+The latest verified publication when these instructions were written is 0.4.13.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.13 highlights
+
+- **Improvement: provider errors are now diagnosable.** When a sync pass could
+  not reach the provider, the status bar and Overview showed the generic
+  "could not reach provider" — the same message for a bad/expired token
+  (401/403), a rate limit (429), a server error (5xx), and a plain network
+  outage. The real (already-redacted, token-free) provider error is now
+  surfaced, and the status report buckets it correctly: 401/403 →
+  "check your credentials", 429/5xx → "will retry", network failure →
+  "offline". For a company-wide rollout this turns "why is it not syncing?"
+  from a guess into a one-line answer.
+  - Unchanged: everything else behaves exactly as in 0.4.12.
 
 ## 0.4.12 highlights
 
