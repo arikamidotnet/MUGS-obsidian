@@ -825,10 +825,13 @@ describe("syncAllMappings — skipped passes persist an honest status", () => {
       async listDirectories() { return []; },
     };
     const skipped = await syncAllMappings({ ...deps(), buildProvider: () => unreachable });
-    expect(skipped[0]).toMatchObject({ status: "skipped", reason: "could not reach provider" });
+    // The actual provider error is surfaced (not a generic "could not reach
+    // provider") so the user can tell a bad token from a rate limit from a
+    // network outage.
+    expect(skipped[0]).toMatchObject({ status: "skipped", reason: "provider unreachable" });
     const afterSkip = store.getLastSync("m1")!;
     expect(afterSkip.status).toBe("pending");
-    expect(afterSkip.skipReason).toBe("could not reach provider");
+    expect(afterSkip.skipReason).toBe("provider unreachable");
     expect(afterSkip.correspondenceSha).toBe("C1"); // proven history is not erased
 
     const outcomes = await syncAllMappings(deps());

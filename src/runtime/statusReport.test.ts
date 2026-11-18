@@ -83,6 +83,19 @@ describe("status reporting", () => {
     expect(classifySkipReason(undefined)).toBe("skipped");
   });
 
+  it("surfaced provider API errors classify by status code (401/403 auth, 429/5xx offline)", () => {
+    // The driver now surfaces the real provider error instead of a generic
+    // "could not reach provider", so the classifier must bucket by status code.
+    expect(classifySkipReason("provider API 401 error paginating — Bad credentials (https://api.github.com/user/repos)")).toBe("auth");
+    expect(classifySkipReason("GitHub 403 error fetching repository a/b")).toBe("auth");
+    expect(classifySkipReason("provider API 429 error paginating — rate limit exceeded (https://api.github.com/user/repos)")).toBe("offline");
+    expect(classifySkipReason("provider API 503 error paginating (https://api.github.com/user/repos)")).toBe("offline");
+    // A repo named like a status code must NOT be misread as an auth error.
+    expect(classifySkipReason("provider API 404 error paginating — Not Found (https://api.github.com/repos/issue-401/x)")).toBe("skipped");
+    // A plain network failure (no API status) stays offline.
+    expect(classifySkipReason("fetch failed")).toBe("offline");
+  });
+
   it("counts actual files and never reports deferred work as synced", () => {
     const r = buildStatusReport({ outcomes: [{
       ...ok("a"), counts: { publish: 7, apply: 5, deferred: 2, conflicted: 0 },

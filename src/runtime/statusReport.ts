@@ -44,7 +44,15 @@ export interface StatusReport {
 /** Classify a skip reason string into a ReportKind. Conservative: unknown → "skipped". */
 export function classifySkipReason(reason: string | undefined): ReportKind {
   const r = (reason ?? "").toLowerCase();
-  if (r.includes("reach provider") || r.includes("network") || r.includes("offline") || r.includes("timeout")) return "offline";
+  // Provider API errors (surfaced verbatim from the driver, e.g. "provider API
+  // 401 error …" / "GitHub 403 error fetching repository …"): 401/403 are
+  // credential problems (fix the token/scope), 429/5xx are retryable (rate
+  // limit / server-side) — both distinct from a plain network outage. The
+  // status code is anchored to the "API/GitHub/GitLab <code>" prefix so a repo
+  // named e.g. "issue-401" in a 404 message is not misread as an auth error.
+  if (/(api|github|gitlab) (401|403)\b/.test(r)) return "auth";
+  if (/(api|github|gitlab) (429|5\d\d)\b/.test(r)) return "offline";
+  if (r.includes("reach provider") || r.includes("network") || r.includes("offline") || r.includes("timeout") || r.includes("fetch failed")) return "offline";
   if (r.includes("token") || r.includes("credential") || r.includes("auth") || r.includes("locked")) return "auth";
   return "skipped";
 }

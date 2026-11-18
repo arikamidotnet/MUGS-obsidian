@@ -228,8 +228,12 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
         const cached = repoCache.get(credential.id);
         repos = cached ?? await provider.listRepos();
         if (!cached) repoCache.set(credential.id, repos);
-      } catch {
-        skip(mapping, "could not reach provider"); continue;
+      } catch (error) {
+        // Surface the actual provider error (already redacted — no tokens in the
+        // message) so the user can tell a bad token (401/403) from a rate limit
+        // (429) from a network outage. The generic "could not reach provider"
+        // hid all three, which is unhelpful for a company-wide rollout.
+        skip(mapping, errorMessage(error)); continue;
       }
     }
     const repo = resolveRepo(repos, mapping);
