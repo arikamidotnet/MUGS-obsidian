@@ -225,4 +225,42 @@ describe("multi-client soak — two real clients through one shared git remote",
       rmSync(base, { recursive: true, force: true });
     }
   }, 120_000);
+
+  it("recovers from a force-reset remote: re-initializes from the vault instead of blocking", async () => {
+    const { base, remote, a } = setup();
+    try {
+      // First sync: A pulls the seed. A's recorded base = the seed commit.
+      expect((await a.sync())[0].status).toBe("ok");
+      expect(a.read("base.md")).toBe("alpha\nbravo\ncharlie\n");
+
+      // Force-reset the remote to an orphan commit (simulates "reset remote
+      // history"). The new tip is NOT a descendant of A's recorded base — the
+      // condition that, without recovery, makes the 3-way merge read every vault
+      // file as "remote deleted it" and block the whole mapping.
+      const resetDir = join(base, "reset-work");
+      mkdirSync(resetDir);
+      git(resetDir, "init", "-q", "-b", "main");
+      writeFileSync(join(resetDir, "reset.md"), "reset marker\n");
+      git(resetDir, "add", "-A");
+      git(resetDir, "commit", "-q", "-m", "reset remote history");
+      git(resetDir, "remote", "add", "origin", `file://${remote}`);
+      git(resetDir, "push", "-q", "-f", "origin", "main");
+
+      // A's next sync detects the reset (base is not an ancestor of the new tip)
+      // and re-initializes: it pushes A's vault content onto the new tip
+      // (additive — the reset marker is kept), instead of blocking.
+      const outcomes = await a.sync();
+      expect(outcomes[0].status).toBe("ok");
+      expect(a.store.getConflicts("soak")).toEqual([]);
+
+      // The vault content is back on the remote, and the reset marker survived
+      // (additive re-init never deletes remote-only files).
+      const remoteFiles = git(remote, "ls-tree", "-r", "--name-only", "main").split("\n").filter(Boolean);
+      expect(remoteFiles).toContain("base.md");
+      expect(remoteFiles).toContain("reset.md");
+      expect(git(remote, "show", "main:base.md")).toBe("alpha\nbravo\ncharlie"); // git() trims the trailing newline
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

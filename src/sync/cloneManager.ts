@@ -827,6 +827,37 @@ export class CloneManager {
     // localSha, [remoteSha]); precompute it so the pure contract stays synchronous.
     const localContainsRemote = await c.isAncestor(localSha, [remoteSha]);
 
+    // Force-reset detection: the recorded baseline (base) no longer descends into
+    // the current remote tip. In normal operation the remote tip always descends
+    // from base (a fast-forward, or a divergence where both sides built on base).
+    // When it does NOT, the remote history was force-reset (or rewound) underneath
+    // us — the 3-way merge would read every vault file as "remote deleted it" and
+    // block the whole mapping (the "changes blocked" / not-syncing state). Recover
+    // by re-initializing: push the vault content onto the new remote tip
+    // (additive — keeps remote-only files, never deletes), exactly like a first
+    // sync. The vault is the source of truth; the reset remote is the new base.
+    // Push-capable mappings only — a pull-only mapping must never push; for those
+    // the reset is rare and the (safe, no-data-loss) block stands.
+    // A reset CHANGES the remote tip, so when the tip is unchanged since the last
+    // sync no reset could have happened — skip the ancestry check (keeps the
+    // verified-idle pass within its strict git-call cost bound).
+    if (base !== "" && mapping.direction !== "pull-only" && !opts.dryRun &&
+        this.syncs.lastRemoteSha(mapping.id) !== remoteSha &&
+        !(await c.isAncestor(base, [remoteSha]))) {
+      status?.("remote history was reset — re-initializing from the vault");
+      // The recorded reconciliation/correspondence points at the old (now-gone)
+      // history; clear it so the re-init verifies against the new tip instead of
+      // blocking on stale proven entries.
+      this.syncs.clearCorrespondence?.(mapping.id);
+      const freshRecon = this.vaultMirror && this.syncs.recordReconciliation
+        ? emptyReconciliation(fingerprint)
+        : undefined;
+      // Re-point the local branch at the new remote tip so the additive push
+      // builds on it (the local branch still sits on the old, now-orphaned line).
+      if (branch !== "HEAD") await c.run(["checkout", "-B", branch, `origin/${branch}`]);
+      return this.finishFirstPush(mapping, branch, c, dir, status, committer, freshRecon);
+    }
+
     const decision = planSync({
       direction: mapping.direction,
       base,

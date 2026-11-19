@@ -278,6 +278,8 @@ This file. Produced during Phase K to capture the whole system so it can be unde
 
 **Resumable sync state.** Resume key = `<baseSha>\0<opId>`; offline sessions resume from the stored base SHA and reconcile forward, never re-deriving from a wall-clock timestamp (`resume.ts`).
 
+**Force-reset remote recovery.** If the remote branch is force-reset (or rewound) underneath a mapping, the recorded baseline no longer descends into the new remote tip — the 3-way merge would read every vault file as "remote deleted it" and block the whole mapping (the "changes blocked" / not-syncing state). The pass detects this (`base` is not an ancestor of the remote tip, checked only when the tip actually moved since the last sync so verified-idle passes stay within their git-call cost bound) and recovers by re-initializing: the local branch is re-pointed at the new tip and the vault content is pushed onto it additively (keeps remote-only files, never deletes), exactly like a first sync. The vault is the source of truth; the reset remote becomes the new base. Push-capable mappings only — a pull-only mapping must never push, so for those the (safe, no-data-loss) block stands.
+
 **Vault-global status.** The status bar renders one vault-global state (per-mapping status lives in the Overview); `resolveMappingForPath` scopes vault file events to their mapping so irrelevant edits never trigger sync (§6).
 
 **Isolated multi-agent edits (designed).** Per-agent branch naming + isolation checks exist as a pure module (`worktrees.ts`); they are not yet wired into the sync path.
