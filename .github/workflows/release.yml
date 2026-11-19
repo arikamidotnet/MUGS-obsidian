@@ -113,8 +113,8 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Improvement: genuine conflicts now auto-resolve when the engine is confident. With "Prefer newer edits" on (the default), a conflict is auto-resolved to the clearly newer side when the two saves clearly differ in time — the winner is committed, pushed and mirrored like any clean merge, so all clients converge with no click. When the engine cannot tell which side is newer (near-equal or missing timestamps, or the setting off), the conflict is still surfaced for an explicit decision — the engine never guesses a winner it cannot justify.
-          - Unchanged: clean (non-overlapping) edits were already auto-merged; everything else behaves exactly as in 0.4.13.
+          - Fix: a force-reset remote no longer wedges your sync. If the remote branch is force-reset (or rewound) underneath a mapping, the recorded baseline no longer matched the new remote tip and the merge read every vault file as "remote deleted it", blocking the whole mapping. The pass now detects the reset and recovers by re-initializing: re-point the branch at the new tip and re-push the vault content onto it (additive — remote-only files kept, nothing deleted). Push-capable mappings only; a pull-only mapping still blocks.
+          - Unchanged: everything else behaves exactly as in 0.4.14.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -127,7 +127,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — conflicts auto-resolve when the engine is confident" \
+            --title "${VERSION} — a force-reset remote no longer wedges your sync" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

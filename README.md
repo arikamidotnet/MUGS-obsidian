@@ -16,8 +16,23 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.14.
+The latest verified publication when these instructions were written is 0.4.15.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.15 highlights
+
+- **Fix: a force-reset remote no longer wedges your sync.** If the remote branch
+  is force-reset (or rewound) underneath a mapping — e.g. someone runs
+  `git push --force` or resets the repo history — the plugin's recorded baseline
+  no longer matched the new remote tip, so the merge read every vault file as
+  "remote deleted it" and **blocked the whole mapping** (the "changes blocked /
+  not syncing" state). Now the pass detects the reset and recovers by
+  re-initializing: it re-points the branch at the new tip and re-pushes your
+  vault content onto it (additive — remote-only files are kept, nothing is
+  deleted). The vault is the source of truth; the reset remote becomes the new
+  base. Push-capable mappings only; a pull-only mapping still blocks (it must
+  never push).
+  - Unchanged: everything else behaves exactly as in 0.4.14.
 
 ## 0.4.14 highlights
 
