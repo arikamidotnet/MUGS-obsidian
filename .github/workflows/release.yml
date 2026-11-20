@@ -113,8 +113,8 @@ jobs:
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
           Highlights:
-          - Fix: a force-reset remote no longer wedges your sync. If the remote branch is force-reset (or rewound) underneath a mapping, the recorded baseline no longer matched the new remote tip and the merge read every vault file as "remote deleted it", blocking the whole mapping. The pass now detects the reset and recovers by re-initializing: re-point the branch at the new tip and re-push the vault content onto it (additive — remote-only files kept, nothing deleted). Push-capable mappings only; a pull-only mapping still blocks.
-          - Unchanged: everything else behaves exactly as in 0.4.14.
+          - Fix: settings dropdowns now display the saved value. Every settings dropdown set its value before adding its options, which Obsidian's DropdownComponent ignores (no matching option yet) — so the dropdown always showed the first option even when a different value was saved. "Start new connections with" (first-sync direction) looked like it "didn't toggle when saved" even though the value was persisted. Options are now added before the value is set, in all seven affected dropdowns.
+          - Unchanged: everything else behaves exactly as in 0.4.15.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -127,7 +127,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — a force-reset remote no longer wedges your sync" \
+            --title "${VERSION} — settings dropdowns now display the saved value" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

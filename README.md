@@ -16,8 +16,21 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.15.
+The latest verified publication when these instructions were written is 0.4.16.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.16 highlights
+
+- **Fix: settings dropdowns now display the saved value.** Every settings
+  dropdown set its value *before* adding its options, which Obsidian's
+  `DropdownComponent` ignores (no matching option yet) — so the dropdown always
+  showed the first option even when a different value was saved. "Start new
+  connections with" (first-sync direction) looked like it "didn't toggle when
+  saved" even though the value was persisted. Options are now added before the
+  value is set, in all seven affected dropdowns (first-sync direction, preferred
+  conflict choice, check-for-changes interval, mapping direction, credential
+  provider, and the add-mapping form's provider + direction).
+  - Unchanged: everything else behaves exactly as in 0.4.15.
 
 ## 0.4.15 highlights
 
