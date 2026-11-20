@@ -361,12 +361,12 @@ export class MugsSettingTab extends PluginSettingTab {
         .setName("Preferred conflict choice")
         .setDesc("A preference only, used when MUGS can't tell which edit is newer. MUGS won't choose for you in that case.")
         .addDropdown((d) => {
-          d.setValue(sync.defaultResolution).onChange(async (v) => {
-            this.edit((d) => d.setSync({ defaultResolution: v as "both" | "theirs" | "ours" }));
-          });
           for (const [value, text] of [["both", "Both versions"], ["theirs", "Repository"], ["ours", "This device"]]) {
             d.addOption(value, text);
           }
+          d.setValue(sync.defaultResolution).onChange(async (v) => {
+            this.edit((d) => d.setSync({ defaultResolution: v as "both" | "theirs" | "ours" }));
+          });
         });
 
       new Setting(card)
@@ -390,12 +390,12 @@ export class MugsSettingTab extends PluginSettingTab {
       new Setting(card)
         .setName("Check for changes")
         .addDropdown((d) => {
-          d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
-            this.edit((d2) => d2.setSync({ intervalSeconds: resolveIntervalSeconds(v) }));
-          });
           for (const [value, text] of INTERVAL_PRESETS.map((p) => [p.id, p.label]) as Array<[string, string]>) {
             d.addOption(value, text);
           }
+          d.setValue(presetIdForSeconds(sync.intervalSeconds)).onChange(async (v) => {
+            this.edit((d2) => d2.setSync({ intervalSeconds: resolveIntervalSeconds(v) }));
+          });
         });
 
       new Setting(card)
@@ -414,11 +414,11 @@ export class MugsSettingTab extends PluginSettingTab {
           "Download starts with repository files. Upload starts with this device's files. Back up both copies before the first sync.",
         )
         .addDropdown((d) => {
+          d.addOption("pull", "Download from repository (default)");
+          d.addOption("push", "Upload from this device");
           d.setValue(sync.firstSyncDirection).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ firstSyncDirection: v as "pull" | "push" }));
           });
-          d.addOption("pull", "Download from repository (default)");
-          d.addOption("push", "Upload from this device");
         });
 
       // Whole-vault mappings expose a per-mapping .trash/ toggle (draft view).
@@ -571,13 +571,13 @@ export class MugsSettingTab extends PluginSettingTab {
         .setName("Direction")
         .setDesc("Upload, download, or sync both ways.")
         .addDropdown((d) => {
+          for (const value of ["push-pull", "pull-only", "push-only"] as const) {
+            d.addOption(value, directionLabel(value));
+          }
           d.setValue(m.direction).onChange(async (v) => {
             const direction = v as SyncDirection;
             this.edit((d2) => d2.upsertMapping({ ...m, direction }));
           });
-          for (const value of ["push-pull", "pull-only", "push-only"] as const) {
-            d.addOption(value, directionLabel(value));
-          }
         });
 
       block.appendChild(this.managePanel(
@@ -724,12 +724,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setName("Provider")
       .setDesc("Where your repositories are hosted.")
       .addDropdown((d) => {
-        d.setValue(kind).onChange((v) => {
-          kind = v as Credential["kind"];
-          setBaseUrlField(prefilledBaseUrl(kind));
-          // No markUnsaved: nothing is stored yet — the old call showed the
-          // "Unsaved changes" banner on a form the user had not filled in.
-        });
         for (const [value, text] of [
           ["gitlab", "GitLab"],
           ["github", "GitHub"],
@@ -739,6 +733,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         ] as const) {
           d.addOption(value, text);
         }
+        d.setValue(kind).onChange((v) => {
+          kind = v as Credential["kind"];
+          setBaseUrlField(prefilledBaseUrl(kind));
+          // No markUnsaved: nothing is stored yet — the old call showed the
+          // "Unsaved changes" banner on a form the user had not filled in.
+        });
       });
 
     new Setting(card)
@@ -840,6 +840,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setName("Provider")
       .setDesc("Choose the account for these folders.")
       .addDropdown((d) => {
+        for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
+          d.addOption(value, text);
+        }
         d.setValue(providerId).onChange(async (v) => {
           providerId = v; // CRITICAL: the assistant used to keep listing repos for —
           // and saving mappings against — the FIRST credential, whatever was picked.
@@ -848,9 +851,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           selectedFolders.clear();
           await refreshRepos();
         });
-        for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
-          d.addOption(value, text);
-        }
       });
 
     // --- Repository selector -------------------------------------------------
@@ -1035,10 +1035,10 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setName("Direction")
       .setDesc("Upload, download, or sync both ways.")
       .addDropdown((d) => {
-        d.setValue(direction).onChange((v) => { direction = v as SyncDirection; });
         for (const value of ["push-pull", "pull-only", "push-only"] as const) {
           d.addOption(value, directionLabel(value));
         }
+        d.setValue(direction).onChange((v) => { direction = v as SyncDirection; });
       });
 
     new Setting(card)
