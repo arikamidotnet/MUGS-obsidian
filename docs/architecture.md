@@ -18,7 +18,7 @@ This invariant is what makes the vitest suite (1016 tests across 82 files, plus 
 
 ### 1.1 The sync pipeline
 
-One **sync pass** (`syncAllMappings` in `src/sync/driver.ts`) runs over every folder mapping and, per mapping, delegates to one `CloneManager.syncMapping` pass against that mapping's clone. Clones are keyed by the resolved `RepoIdentity` (provider + repo + branch + canonical remote): every mapping pointing at the same identity shares one clone (`repoIdentity.ts`), serialized by an in-process keyed mutex plus an advisory lock file that *blocks* (never steals) a competing process. A pre-identity legacy clone holding uncommitted or unpushed work blocks the mapping for review and is never reset; a clean one migrates. Per mapping the flow is:
+One **sync pass** (`syncAllMappings` in `src/sync/driver.ts`) runs over every folder mapping and, per mapping, delegates to one `CloneManager.syncMapping` pass against that mapping's clone. Clones are keyed by the resolved `RepoIdentity` (provider + repo + branch + canonical remote): every mapping pointing at the same identity shares one clone (`repoIdentity.ts`), serialized by an in-process keyed mutex plus an advisory lock file that *blocks* a competing live process; a lock orphaned by a killed or crashed owner (its pid provably gone) is auto-reclaimed, while a live or uncertain owner is never stolen. A pre-identity legacy clone holding uncommitted or unpushed work blocks the mapping for review and is never reset; a clean one migrates. Per mapping the flow is:
 
 ```
 credential → provider (REST adapter) → find repo → ensureClone (identity-keyed)

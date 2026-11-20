@@ -2,6 +2,19 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.21 highlights
+
+- **Stale clone-lock recovery (liveness fix).** If Obsidian is killed, crashes,
+  or is reloaded mid-sync, the clone's advisory lock file was orphaned and
+  *every* mapping on that identity stayed `pending` ("clone lock unavailable")
+  until a human deleted the lock file from a shell. The lock now auto-reclaims
+  when its owner pid is provably gone (`kill(pid,0)` → ESRCH); a live or
+  uncertain owner is still never stolen. The clone working tree is MUGS-owned
+  scratch re-derived from the vault + remote each pass, and unpushed commits
+  are detected and pushed by the sync planner, so reclaiming loses nothing.
+  - Unchanged: the sync engine's conflict/deletion guarantees, the Review
+    workflow, and the "never steal a live owner" contract (covered by tests).
+
 ## 0.4.20 highlights
 
 - **First-run nudge.** A fresh install (no account, no folders yet) now shows a
