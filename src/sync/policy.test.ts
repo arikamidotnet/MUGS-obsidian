@@ -5,7 +5,6 @@ import type { SyncPolicy, FileConflict } from "../types";
 const policy = (over: Partial<SyncPolicy> = {}): SyncPolicy => ({
   autoMerge: true,
   defaultResolution: "both",
-  sameChangeAccept: true,
   recencyWins: true,
   paused: false,
   intervalSeconds: 300,

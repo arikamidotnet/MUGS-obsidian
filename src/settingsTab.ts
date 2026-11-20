@@ -106,6 +106,9 @@ export class MugsSettingTab extends PluginSettingTab {
   /** Pending debounced auto-apply timer (settings save without an explicit click). */
   private autoApplyTimer?: ReturnType<typeof setTimeout>;
 
+  /** Section cards by title, so the guided checklist can jump to one. */
+  private sectionEls = new Map<string, HTMLElement>();
+
   /** The settings snapshot edits render from and mutate: the DRAFT (never the live store). */
   private view(): MugsSettings {
     if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
@@ -286,6 +289,7 @@ export class MugsSettingTab extends PluginSettingTab {
     // rebuilds text inputs (which would steal focus). Insert at the top after empty().
     containerEl.empty();
     containerEl.classList.add("mugs-settings");
+    this.sectionEls.clear();
     if (this.unsavedBannerEl) containerEl.appendChild(this.unsavedBannerEl);
 
     // --- Getting Started (startup documentation) ----------------------------
@@ -592,16 +596,28 @@ export class MugsSettingTab extends PluginSettingTab {
     const hasSynced = Object.values(lastSync).some(
       (s) => s.status === "ok" || s.status === "up-to-date" || !!s.correspondenceSha,
     );
-    const steps: Array<[boolean, string]> = [
-      [hasAccount, "Add your account under Accounts — the API endpoint and label are filled in for you."],
-      [hasFolder, "Connect folders and choose Both ways, Upload only, or Download only."],
-      [hasSynced, "Sync runs automatically; check the status bar or open Overview to watch progress."],
+    const steps: Array<{ done: boolean; text: string; section?: string; action?: string }> = [
+      { done: hasAccount, text: "Add your account under Accounts — the API endpoint and label are filled in for you.", section: "Accounts", action: "Add account" },
+      { done: hasFolder, text: "Connect folders and choose Both ways, Upload only, or Download only.", section: "Connected folders", action: "Connect a folder" },
+      { done: hasSynced, text: "Sync runs automatically; check the status bar or open Overview to watch progress." },
     ];
     const list = card.createEl("ol", { cls: "mugs-gs-steps" });
-    for (const [done, text] of steps) {
-      const li = list.createEl("li", { cls: done ? "mugs-gs-step mugs-gs-done" : "mugs-gs-step" });
-      li.createEl("span", { cls: "mugs-gs-mark", text: done ? "✓" : "○" });
-      li.createEl("span", { text });
+    for (const step of steps) {
+      const li = list.createEl("li", { cls: step.done ? "mugs-gs-step mugs-gs-done" : "mugs-gs-step" });
+      li.createEl("span", { cls: "mugs-gs-mark", text: step.done ? "✓" : "○" });
+      li.createEl("span", { text: step.text });
+      // Jump to the section that completes an unfinished step (resolved at click
+      // time, after the sections have rendered).
+      if (!step.done && step.section && step.action) {
+        const btn = li.createEl("button", { cls: "mugs-gs-action", text: step.action });
+        btn.setAttribute("type", "button");
+        btn.addEventListener("click", () => {
+          const target = this.sectionEls.get(step.section!);
+          if (!target) return;
+          this.expandSection(target);
+          (target as unknown as { scrollIntoView?: (o?: unknown) => void }).scrollIntoView?.({ block: "start" });
+        });
+      }
     }
 
     card.createDiv({
@@ -619,6 +635,7 @@ export class MugsSettingTab extends PluginSettingTab {
     // createEl/createDiv/etc. In Obsidian 1.14.x a raw document.createElement("div")
     // element does not reliably inherit those helpers, which left every section blank.
     const card = containerEl.createDiv({ cls: "mugs-section" });
+    this.sectionEls.set(title, card);
     const header = card.createEl("div", { cls: "mugs-section-header" });
     const chevron = header.createEl("span", { cls: "mugs-section-chevron", text: "▾" });
     header.createEl("h3", { text: title });

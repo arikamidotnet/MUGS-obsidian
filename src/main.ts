@@ -137,6 +137,10 @@ export default class MugsPlugin extends Plugin {
         new Notice("MUGS: could not persist the move of account tokens to the system keychain — they remain readable this session; retry on the next start.", 10000);
       }
     }
+    // Guided nudge for a fresh install: nothing configured yet.
+    if (!this.store.loadError && this.store.getSettings().credentials.length === 0 && this.store.getSettings().mappings.length === 0) {
+      new Notice("MUGS: open Settings → MUGS to connect your first Git account and folder.", 10000);
+    }
     if (this.store.loadError) {
       // Corrupt/unreadable data.json: the store refuses to save (it will not be
       // overwritten with fresh defaults). Sync is disabled until the file is fixed

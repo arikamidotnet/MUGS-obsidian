@@ -177,7 +177,6 @@ function makePlugin() {
     sync: {
       autoMerge: true,
       defaultResolution: "both",
-      sameChangeAccept: true,
       recencyWins: true,
       paused: false,
       intervalSeconds: 300,

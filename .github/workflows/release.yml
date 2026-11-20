@@ -97,9 +97,8 @@ jobs:
           (cd dist && sha256sum --check checksums.txt)
           NOTES_FILE="$(mktemp)"
 
-          # NOTE: the --title below and the Highlights list inside the heredoc are
-          # VERSION-SPECIFIC — update them as part of each release commit. If they
-          # drift after publication, `gh release edit` can correct the release.
+          # Release notes are version-agnostic: the per-version highlights live in
+          # CHANGELOG.md so this workflow never drifts from the docs.
           cat > "$NOTES_FILE" <<EOF
           MUGS — Multi-User Git Sync v${VERSION}
 
@@ -112,9 +111,7 @@ jobs:
           This release was created by the gated release workflow.
           Required checks (typecheck + test + build + version-consistency) passed on ${SHA}.
 
-          Highlights:
-          - Fix: settings dropdowns now display the saved value. Every settings dropdown set its value before adding its options, which Obsidian's DropdownComponent ignores (no matching option yet) — so the dropdown always showed the first option even when a different value was saved. "Start new connections with" (first-sync direction) looked like it "didn't toggle when saved" even though the value was persisted. Options are now added before the value is set, in all seven affected dropdowns.
-          - Unchanged: everything else behaves exactly as in 0.4.15.
+          Highlights: see CHANGELOG.md for this version.
 
           Diff compares committed snapshots; unsynced vault edits are not included.
           Binary text reconciliation is blocked rather than risking content corruption.
@@ -127,7 +124,7 @@ jobs:
 
           gh release create "${VERSION}" \
             --target "$SHA" \
-            --title "${VERSION} — settings dropdowns now display the saved value" \
+            --title "${VERSION}" \
             --notes-file "$NOTES_FILE" \
             dist/main.js \
             dist/manifest.json \

@@ -68,7 +68,7 @@ describe("scoped first sync", () => {
         rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
         lastSync: storeWritableAccessor(store),
         conflicts: storeConflictAccessor(store),
-        policy: { autoMerge: true, defaultResolution: "both" as const, sameChangeAccept: true, recencyWins: true, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
+        policy: { autoMerge: true, defaultResolution: "both" as const, recencyWins: true, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
       };
       const out1 = await syncAllMappings(deps);
       expect(out1[0]?.status, out1[0]?.reason).toBe("ok");

@@ -114,8 +114,6 @@ export interface SyncPolicy {
   /** Tie-break for hunks the 3-way merge cannot resolve. Default "both".
    *  "ours"/"theirs" give last-write-wins if preferred. */
   defaultResolution: DefaultResolution;
-  /** jj's same-change rule: identical changes on both sides auto-resolve. */
-  sameChangeAccept: boolean;
   /** Auto-resolve genuine conflicts to the more-recently-saved side when both
    *  carry timestamps; falls back to {@link defaultResolution} otherwise. */
   recencyWins: boolean;
@@ -268,7 +266,6 @@ export interface RepoIdentity {
 export const DEFAULT_SYNC_POLICY: SyncPolicy = {
   autoMerge: true,
   defaultResolution: "both",
-  sameChangeAccept: true,
   recencyWins: true,
   paused: false,
   intervalSeconds: 30,

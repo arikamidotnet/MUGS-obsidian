@@ -97,7 +97,7 @@ function makeFixture(name: string) {
     rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
     lastSync: storeWritableAccessor(store),
     conflicts: storeConflictAccessor(store),
-    policy: { autoMerge: false, defaultResolution: "both" as const, sameChangeAccept: true, recencyWins: false, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
+    policy: { autoMerge: false, defaultResolution: "both" as const, recencyWins: false, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
   });
   const seedRemote = (files: Record<string, string>): void => {
     const work = join(base, "work");

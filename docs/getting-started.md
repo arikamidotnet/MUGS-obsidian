@@ -6,7 +6,8 @@ vault, add a Git account, connect matching folders, inspect the mapping, then
 resume automatic sync. Once configured, local edits trigger a background pass;
 the periodic check discovers remote edits in directions that permit downloads.
 
-**Before you start:** use desktop Obsidian 1.8.0 or newer, install a working
+**Before you start:** use desktop Obsidian **1.11.4 or newer** (required for
+keychain token storage), install a working
 system `git` executable, and have a GitLab or GitHub repository you can access.
 MUGS is not a mobile plugin or a full replacement for Obsidian Sync. Its Git
 transport does not use your SSH keys. Use a private repository for private notes.

@@ -2,6 +2,25 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.20 highlights
+
+- **First-run nudge.** A fresh install (no account, no folders yet) now shows a
+  one-time notice pointing at Settings → MUGS, so a new user knows where to
+  start.
+- **Clickable onboarding checklist.** The unfinished Getting Started steps now
+  carry a button that jumps straight to the section that completes them
+  (Accounts, Connected folders) and expands it.
+- **Removed the dead `sameChangeAccept` setting.** The identical-change collapse
+  is inherent to the three-way merge and the toggle was never consulted by the
+  engine; it is gone from the schema, types and docs. Existing `data.json`
+  files that still carry the key load unchanged (the key is simply ignored).
+- **Docs:** the getting-started prerequisite now states Obsidian **1.11.4 or
+  newer** (required for keychain token storage) instead of 1.8.0.
+- **Release workflow:** release notes are now version-agnostic (highlights live
+  in this changelog), so the workflow can no longer drift from the docs.
+  - Unchanged: the sync engine's conflict/deletion guarantees and the Review
+    workflow behave exactly as in 0.4.19.
+
 ## 0.4.19 highlights
 
 - **Guided in-app onboarding.** The Getting Started card is now a live three-step

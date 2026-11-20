@@ -64,7 +64,7 @@ describe.skipIf(process.env.MUGS_FBR_CANARY !== "1" || !VAULT)("isolated real-va
         buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
         cloneRoot: join(base, "clones"), runner: new ChildProcessRunner(), workingTree: writer, vaultMirror: mirror,
         lastSync: storeWritableAccessor(store), conflicts: storeConflictAccessor(store),
-        policy: { autoMerge: false, defaultResolution: "both" as const, sameChangeAccept: true, recencyWins: false, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
+        policy: { autoMerge: false, defaultResolution: "both" as const, recencyWins: false, paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const, obsidianConfig: { enabled: false, entries: [] } },
       });
       expect((await syncAllMappings(deps()))[0].status).toBe("ok");
       expect(readFileSync(path("remote.md"), "utf8")).toBe("remote initial\n");

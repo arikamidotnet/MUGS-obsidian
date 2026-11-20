@@ -22,7 +22,6 @@ describe("DEFAULT_SETTINGS — shape & defaults", () => {
     const s = DEFAULT_SETTINGS.sync;
     expect(s.autoMerge).toBe(true);
     expect(s.defaultResolution).toBe("both");
-    expect(s.sameChangeAccept).toBe(true);
     expect(s.recencyWins).toBe(true);
     expect(s.paused).toBe(false);
     // Minimum-engagement default: near-real-time polling so remote edits appear

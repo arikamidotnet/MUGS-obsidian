@@ -78,7 +78,7 @@ function makeClient(base: string, name: string, remote: string, policy: Partial<
     cloneRoot, runner: new ChildProcessRunner(), workingTree: writer, vaultMirror: mirror,
     lastSync: storeWritableAccessor(store), conflicts: storeConflictAccessor(store),
     policy: {
-      autoMerge: true, defaultResolution: "both" as const, sameChangeAccept: true, recencyWins: false,
+      autoMerge: true, defaultResolution: "both" as const, recencyWins: false,
       paused: false, intervalSeconds: 300, firstSyncDirection: "pull" as const,
       obsidianConfig: { enabled: false, entries: [] }, ...policy,
     },
@@ -176,7 +176,7 @@ describe("multi-client soak — two real clients through one shared git remote",
   }, 120_000);
 
   it("with automatic resolution off, a same-region conflict is surfaced with both sides intact and no local file clobbered", async () => {
-    const { base, a, b } = setup({ autoMerge: false, defaultResolution: "both", sameChangeAccept: false });
+    const { base, a, b } = setup({ autoMerge: false, defaultResolution: "both" });
     try {
       await a.sync(); await b.sync();
       a.write("base.md", "alpha\nBRAVO-A\ncharlie\n");

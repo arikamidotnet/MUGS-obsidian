@@ -218,7 +218,6 @@ export const obsidianConfigSchema = z.object({
 export const syncPolicySchema = z.object({
   autoMerge: z.boolean().default(true),
   defaultResolution: z.enum(["both", "theirs", "ours"]).default("both"),
-  sameChangeAccept: z.boolean().default(true),
   recencyWins: z.boolean().default(true),
   paused: z.boolean().default(false),
   intervalSeconds: z.number().int().positive().default(30),

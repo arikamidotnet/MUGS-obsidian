@@ -199,7 +199,7 @@ function reviewPlugin(mappings: any[], staging: Record<string, any[]>) {
     lastSync: {},
     conflicts: {},
     staging,
-    sync: { autoMerge: true, defaultResolution: "both", sameChangeAccept: true, recencyWins: true, paused: false, intervalSeconds: 300, obsidianConfig: { enabled: false, entries: [] } },
+    sync: { autoMerge: true, defaultResolution: "both", recencyWins: true, paused: false, intervalSeconds: 300, obsidianConfig: { enabled: false, entries: [] } },
     agents: [],
     security: { encryptCredentials: false },
   };
