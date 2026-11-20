@@ -575,9 +575,8 @@ export class MugsSettingTab extends PluginSettingTab {
     });
   }
 
-  /** The Getting Started guide shown at the top of every settings open. This is
-   *  the plugin's startup documentation — it walks a fresh install through adding a
-   *  credential, creating a mapping, and syncing via the views/commands. */
+  /** A short, live onboarding checklist at the top of the pane. Each step ticks
+   *  itself from the current settings so a new user sees exactly what is left. */
   private gettingStarted(containerEl: HTMLElement): void {
     const card = containerEl.createDiv({ cls: "mugs-getting-started" });
     card.createEl("h3", { text: "Getting Started" });
@@ -586,14 +585,28 @@ export class MugsSettingTab extends PluginSettingTab {
       text: "Sync your folders with GitLab, GitHub, Bitbucket, Gitea/Forgejo, or a local repository.",
     });
 
-    const steps = card.createEl("ol", { cls: "mugs-gs-steps" });
-    steps.createEl("li", { text: "Add your account under Accounts — the API endpoint is filled in for you, and Test connection checks it." });
-    steps.createEl("li", { text: "Connect folders and choose Both ways, Upload only, or Download only." });
-    steps.createEl("li", { text: "Click Apply settings, review the connection, then resume automatic sync under Sync when ready." });
+    const view = this.view();
+    const lastSync = this.plugin.store.getSettings().lastSync;
+    const hasAccount = view.credentials.length > 0;
+    const hasFolder = view.mappings.length > 0;
+    const hasSynced = Object.values(lastSync).some(
+      (s) => s.status === "ok" || s.status === "up-to-date" || !!s.correspondenceSha,
+    );
+    const steps: Array<[boolean, string]> = [
+      [hasAccount, "Add your account under Accounts — the API endpoint and label are filled in for you."],
+      [hasFolder, "Connect folders and choose Both ways, Upload only, or Download only."],
+      [hasSynced, "Sync runs automatically; check the status bar or open Overview to watch progress."],
+    ];
+    const list = card.createEl("ol", { cls: "mugs-gs-steps" });
+    for (const [done, text] of steps) {
+      const li = list.createEl("li", { cls: done ? "mugs-gs-step mugs-gs-done" : "mugs-gs-step" });
+      li.createEl("span", { cls: "mugs-gs-mark", text: done ? "✓" : "○" });
+      li.createEl("span", { text });
+    }
 
     card.createDiv({
       cls: "mugs-note",
-      text: "Back up your vault and plugin settings before first sync. A first connection starts paused so nothing runs unattended until you review it.",
+      text: "Back up your vault and plugin settings before first sync. Sync starts automatically once a folder is connected; pause it any time under Sync.",
     });
   }
 

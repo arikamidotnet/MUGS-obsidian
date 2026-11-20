@@ -802,3 +802,10 @@
 .mugs-diff-file-authors { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .mugs-diff-hunk-author { display: inline-flex; align-items: center; }
 
+/* --- Guided onboarding checklist ----------------------------------------- */
+
+.mugs-gs-step { display: flex; align-items: baseline; gap: 8px; }
+.mugs-gs-mark { flex-shrink: 0; width: 1em; color: var(--text-muted); }
+.mugs-gs-done .mugs-gs-mark { color: var(--text-success, #3fb950); }
+.mugs-gs-done > span:last-child { color: var(--text-muted); }
+
