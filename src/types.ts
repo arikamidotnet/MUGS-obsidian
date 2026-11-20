@@ -26,8 +26,13 @@ export interface Credential {
   kind: ProviderKind;
   /** Optional username (GitLab exposes the acting user via the API). */
   username?: string;
-  /** The token itself — redacted on write, optionally encrypted at rest. */
+  /** The token itself — redacted on write, optionally encrypted at rest. Empty
+   *  when the secret lives in the OS keychain (see {@link secretId}). */
   token: string;
+  /** SecretStorage id (Obsidian's `app.secretStorage`, 1.11.4+) holding this
+   *  credential's token. When set, `token` is empty and the value is read from
+   *  the device-local keychain — never persisted in data.json. */
+  secretId?: string;
   /** Base URL for self-hosted instances, e.g. https://gitlab.example.com/api/v4 */
   baseUrl?: string;
   /**
@@ -319,6 +324,9 @@ export interface LastSyncState {
   mappingId: string;
   lastPushAt?: number;
   lastPullAt?: number;
+  /** Who produced this mapping's most recent push (the credential's username or
+   *  the pinned agent), for UI attribution. Optional; older records lack it. */
+  lastPushBy?: { name: string; email?: string };
   lastLocalSha?: string;
   lastRemoteSha?: string;
   /** Git base SHA this mapping's last sync was keyed on — the deterministic resume point

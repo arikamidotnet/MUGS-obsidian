@@ -31,6 +31,13 @@ export interface SettingsDraftTarget {
   save(): Promise<{ ok: true } | { ok: false; reason: "load-error" }>;
 }
 
+/** A validation problem plus the credential/mapping it belongs to (jump-to-problem). */
+export interface DraftProblem {
+  message: string;
+  /** Which draft item the problem belongs to; absent for whole-settings problems. */
+  ref?: { kind: "credential" | "mapping"; id: string };
+}
+
 /** A settings edit session. */
 export class SettingsDraft {
   /** Snapshot of the ACTIVE settings when the draft opened (rollback source). */
@@ -51,6 +58,30 @@ export class SettingsDraft {
   /** True when the draft differs from the base snapshot (cheap field-wise compare). */
   dirty(): boolean {
     return JSON.stringify(this.working) !== JSON.stringify(this.base);
+  }
+
+  /**
+   * How many distinct settings items this draft changes: added/removed/edited
+   * credentials and mappings, plus one each for a changed sync or security block.
+   * Drives the "N unsaved changes" banner.
+   */
+  changeCount(): number {
+    const changed = <T extends { id: string }>(a: T[], b: T[]): number => {
+      const before = new Map(a.map((x) => [x.id, x]));
+      const after = new Map(b.map((x) => [x.id, x]));
+      let n = 0;
+      for (const id of new Set([...before.keys(), ...after.keys()])) {
+        const x = before.get(id);
+        const y = after.get(id);
+        if (!x || !y || JSON.stringify(x) !== JSON.stringify(y)) n += 1;
+      }
+      return n;
+    };
+    let n = changed(this.base.credentials, this.working.credentials);
+    n += changed(this.base.mappings, this.working.mappings);
+    if (JSON.stringify(this.base.sync) !== JSON.stringify(this.working.sync)) n += 1;
+    if (JSON.stringify(this.base.security) !== JSON.stringify(this.working.security)) n += 1;
+    return n;
   }
 
   // --- Mutators (mirror the store API so call sites read the same) ------------
@@ -92,8 +123,8 @@ export class SettingsDraft {
   // --- Validation -------------------------------------------------------------
 
   /**
-   * Validate the COMPLETE draft. Returns human-readable problems (empty = valid).
-   * Rules (contract §5/§9/§10):
+   * Validate the COMPLETE draft, tagging each problem with the credential/mapping
+   * it belongs to so the UI can jump to it. Rules (contract §5/§9/§10):
    *  - every mapping's localFolder is a safe vault-relative path (or the whole-vault ".");
    *  - every non-empty remotePath is a safe repo-relative path;
    *  - every branch (when present) is a plausible ref name is NOT enforced here
@@ -103,25 +134,26 @@ export class SettingsDraft {
    *  - every mapping points at an existing credential;
    *  - hosted credentials have a token; local repositories need a file:// URL instead.
    */
-  validate(): string[] {
-    const problems: string[] = [];
+  validateDetailed(): DraftProblem[] {
+    const problems: DraftProblem[] = [];
     const mappings = this.working.mappings;
 
     for (const m of mappings) {
+      const ref: DraftProblem["ref"] = { kind: "mapping", id: m.id };
       if (m.localFolder !== ".") {
         const check = checkRelPath(m.localFolder);
         if (!check.ok) {
-          problems.push(`mapping "${m.label || m.id}": local folder "${m.localFolder}" rejected (${check.reason})`);
+          problems.push({ ref, message: `mapping "${m.label || m.id}": local folder "${m.localFolder}" rejected (${check.reason})` });
         }
       }
       if (m.remotePath !== "") {
         const check = checkRelPath(m.remotePath);
         if (!check.ok) {
-          problems.push(`mapping "${m.label || m.id}": remote path "${m.remotePath}" rejected (${check.reason})`);
+          problems.push({ ref, message: `mapping "${m.label || m.id}": remote path "${m.remotePath}" rejected (${check.reason})` });
         }
       }
       if (!this.working.credentials.some((c) => c.id === m.providerId)) {
-        problems.push(`mapping "${m.label || m.id}": credential missing — add or pick one before applying`);
+        problems.push({ ref, message: `mapping "${m.label || m.id}": credential missing — add or pick one before applying` });
       }
     }
 
@@ -129,25 +161,35 @@ export class SettingsDraft {
       for (let j = i + 1; j < mappings.length; j++) {
         const a = normalizeFolder(mappings[i].localFolder);
         const b = normalizeFolder(mappings[j].localFolder);
+        const ref: DraftProblem["ref"] = { kind: "mapping", id: mappings[i].id };
         if (a === b) {
-          problems.push(`mappings "${mappings[i].label || mappings[i].id}" and "${mappings[j].label || mappings[j].id}" map the same folder "${mappings[i].localFolder}"`);
+          problems.push({ ref, message: `mappings "${mappings[i].label || mappings[i].id}" and "${mappings[j].label || mappings[j].id}" map the same folder "${mappings[i].localFolder}"` });
           continue;
         }
         if (contains(a, b) || contains(b, a)) {
-          problems.push(`mappings "${mappings[i].label || mappings[i].id}" (${a}) and "${mappings[j].label || mappings[j].id}" (${b}) overlap — one folder is inside the other`);
+          problems.push({ ref, message: `mappings "${mappings[i].label || mappings[i].id}" (${a}) and "${mappings[j].label || mappings[j].id}" (${b}) overlap — one folder is inside the other` });
         }
       }
     }
 
     for (const c of this.working.credentials) {
-      if (!c.label) problems.push(`credential ${c.id}: label is required`);
-      if (c.kind !== "local" && !c.token) problems.push(`credential "${c.label || c.id}": token is required`);
+      const ref: DraftProblem["ref"] = { kind: "credential", id: c.id };
+      if (!c.label) problems.push({ ref, message: `credential ${c.id}: label is required` });
+      if (c.kind !== "local" && !c.token) problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
       if (c.kind === "local" && (!c.baseUrl || !c.baseUrl.startsWith("file://"))) {
-        problems.push(`credential "${c.label || c.id}": local repositories need a file:// URL in Base URL`);
+        problems.push({ ref, message: `credential "${c.label || c.id}": local repositories need a file:// URL in Base URL` });
       }
     }
 
     return problems;
+  }
+
+  /**
+   * Validate the COMPLETE draft. Returns human-readable problems (empty = valid).
+   * Thin wrapper over {@link validateDetailed} so existing callers keep working.
+   */
+  validate(): string[] {
+    return this.validateDetailed().map((p) => p.message);
   }
 
   /**

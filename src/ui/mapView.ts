@@ -10,6 +10,8 @@ import { buildMapGraph, describeMapRow, directionHint, type MapContext, type Map
 import { getMugsContext, type MapRow } from "./dataSources";
 import { directionLabel } from "./labels";
 import { renderNavigation } from "./navigation";
+import { resolveAvatar } from "./avatarModel";
+import { renderAvatarLabel } from "./avatarRender";
 
 /** Status icon glyph per display status (status-bar vocabulary). */
 const STATUS_ICON: Record<MapRowDisplay["label"], string> = {
@@ -198,7 +200,9 @@ export class MapView extends ItemView {
     const folderCol = card.createDiv({ cls: "mugs-map-card-folder" });
     folderCol.createEl("span", { cls: "mugs-map-card-title", text: truncate(folder.label, 30), attr: { title: folder.label } });
     if (folder.owner) {
-      folderCol.createEl("span", { cls: "mugs-map-card-owner", text: folder.owner, attr: { title: `Recent author: ${folder.owner}` } });
+      // Avatar chip + name so "who last changed this folder" reads at a glance.
+      const owner = renderAvatarLabel(folderCol, resolveAvatar({ name: folder.owner }), folder.owner, "mugs-map-card-owner");
+      owner.setAttribute("title", `Recent author: ${folder.owner}`);
     }
 
     // Direction (center column) — hover says what the arrow does NOT do.
@@ -237,6 +241,12 @@ export class MapView extends ItemView {
       const never =
         edge.direction === "push-only" ? "not uploaded yet" : edge.direction === "pull-only" ? "not downloaded yet" : "not synced yet";
       footer.createEl("span", { cls: "mugs-map-card-sync-times", text: parts.length ? parts.join(" · ") : never });
+
+      // Who produced the last push (credential username or pinned agent).
+      if (row.lastPushBy) {
+        const by = renderAvatarLabel(footer, resolveAvatar(row.lastPushBy), `pushed by ${row.lastPushBy.name}`, "mugs-map-card-pusher");
+        by.setAttribute("title", `Last pushed by ${row.lastPushBy.name}`);
+      }
 
       footer.createSpan({
         cls: `mugs-sync-status mugs-text-${display.tone}`,

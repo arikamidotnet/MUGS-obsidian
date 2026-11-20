@@ -32,21 +32,103 @@ export interface ProviderInput {
   allowedRepos?: string[];
 }
 
-/** Public-API base URLs per backend. GitLab's already includes its `/api/v4` prefix. */
-const DEFAULT_BASE_URL: Record<Exclude<ProviderKind, "local">, string> = {
-  github: "https://api.github.com",
-  gitlab: "https://gitlab.com/api/v4",
-  bitbucket: "https://api.bitbucket.org",
-  gitea: "https://gitea.com/api/v1",
-  forgejo: "https://forgejo.example.com/api/v1", // self-hosted; user should set baseUrl
-};
+/**
+ * Display + endpoint metadata for one backend, defined once so the credential
+ * dropdown, the endpoint autofill and the validator all read the same list
+ * (instead of each hard-coding its own copy).
+ */
+export interface ProviderOption {
+  kind: ProviderKind;
+  /** Human-facing label for dropdowns. */
+  label: string;
+  /** Fallback API base URL used when a credential has none (buildProvider). */
+  defaultBaseUrl: string;
+  /** Value prefilled into the credential form. "" when the provider has no
+   *  canonical SaaS endpoint and the user must supply their own instance. */
+  prefillBaseUrl: string;
+  /** Short placeholder describing the expected endpoint. */
+  endpointHint: string;
+  /** True when the provider is always self-hosted (no SaaS default to prefill). */
+  selfHostedOnly: boolean;
+}
+
+/** Single source of truth for provider labels, endpoints and form prefill values. */
+export const PROVIDER_OPTIONS: readonly ProviderOption[] = [
+  {
+    kind: "gitlab",
+    label: "GitLab",
+    defaultBaseUrl: "https://gitlab.com/api/v4",
+    prefillBaseUrl: "https://gitlab.com/api/v4",
+    endpointHint: "https://gitlab.com/api/v4",
+    selfHostedOnly: false,
+  },
+  {
+    kind: "github",
+    label: "GitHub",
+    defaultBaseUrl: "https://api.github.com",
+    prefillBaseUrl: "https://api.github.com",
+    endpointHint: "https://api.github.com",
+    selfHostedOnly: false,
+  },
+  {
+    kind: "bitbucket",
+    label: "Bitbucket",
+    defaultBaseUrl: "https://api.bitbucket.org",
+    prefillBaseUrl: "https://api.bitbucket.org",
+    endpointHint: "https://api.bitbucket.org",
+    selfHostedOnly: false,
+  },
+  {
+    kind: "gitea",
+    label: "Gitea",
+    defaultBaseUrl: "https://gitea.com/api/v1",
+    prefillBaseUrl: "https://gitea.com/api/v1",
+    endpointHint: "https://gitea.com/api/v1",
+    selfHostedOnly: false,
+  },
+  {
+    kind: "forgejo",
+    label: "Forgejo",
+    defaultBaseUrl: "https://forgejo.example.com/api/v1", // self-hosted; user sets baseUrl
+    prefillBaseUrl: "", // no SaaS endpoint — the user enters their instance
+    endpointHint: "https://your-forgejo-host/api/v1",
+    selfHostedOnly: true,
+  },
+  {
+    kind: "local",
+    label: "Local (existing clone)",
+    defaultBaseUrl: "",
+    prefillBaseUrl: "",
+    endpointHint: "file:///absolute/path/to/repo.git",
+    selfHostedOnly: false,
+  },
+];
+
+/** Public-API base URLs per backend, derived from {@link PROVIDER_OPTIONS}. */
+const DEFAULT_BASE_URL = Object.fromEntries(
+  PROVIDER_OPTIONS.filter((o) => o.kind !== "local").map((o) => [o.kind, o.defaultBaseUrl]),
+) as Record<Exclude<ProviderKind, "local">, string>;
+
+/** Metadata for a provider kind, or undefined for an unknown kind. */
+export function providerOption(kind: ProviderKind): ProviderOption | undefined {
+  return PROVIDER_OPTIONS.find((o) => o.kind === kind);
+}
 
 /**
- * Public-API base URL used to prefill the credential form for each backend.
- * `local` has no REST API, so it returns "" (the field is left blank).
+ * Public-API base URL used as the fallback when a credential has none.
+ * `local` has no REST API, so it returns "".
  */
 export function defaultBaseUrl(kind: ProviderKind): string {
   return kind === "local" ? "" : DEFAULT_BASE_URL[kind];
+}
+
+/**
+ * Endpoint value prefilled into the credential form for a backend. Differs from
+ * {@link defaultBaseUrl} only for self-hosted-only providers (Forgejo), which
+ * prefill blank so the user must enter their own instance rather than a fake host.
+ */
+export function prefillBaseUrl(kind: ProviderKind): string {
+  return providerOption(kind)?.prefillBaseUrl ?? "";
 }
 
 /** Build the `Provider` for a credential. Throws for `local` (no REST adapter). */

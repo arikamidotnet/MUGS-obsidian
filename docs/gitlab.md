@@ -32,10 +32,11 @@ empty Git directory does not exist in the repository tree.
 3. In **Settings → MUGS → Accounts → Add another account**, select
    **GitLab**, give it a recognizable **Label**, paste the token into
    **Token** and optionally supply your GitLab **Username**. The token is not
-   your GitLab login password. **Base URL** is
-   `https://gitlab.com/api/v4` for GitLab.com, or
-   `https://your-gitlab-host.example/api/v4` for a self-managed host.
-   Do not enter a project page or a Git clone URL in Base URL.
+   your GitLab login password. **Base URL** is filled in automatically as
+   `https://gitlab.com/api/v4`; for a self-managed host change it to
+   `https://your-gitlab-host.example/api/v4`. Do not enter a project page or a
+   Git clone URL in Base URL — MUGS flags a website URL inline and suggests the
+   API endpoint. Use **Test connection** to confirm the account before adding it.
 4. Optionally enter `group/project` (or `group/subgroup/project`) in
    **Allowed repositories**, one per line. This limits MUGS's repository
    picker, **not** the host token's actual privileges. It is particularly

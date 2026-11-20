@@ -30,7 +30,7 @@ export class DiffView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "MUGS Changes";
+    return "MUGS Diff";
   }
 
   getIcon(): string {
@@ -42,7 +42,7 @@ export class DiffView extends ItemView {
     this.contentEl.empty();
     renderNavigation(this.contentEl, "mugs-diff");
     this.contentEl.addClass("mugs-diff-view");
-    this.addAction("refresh", "Refresh changes", () => void this.render());
+    this.addAction("refresh", "Refresh diff", () => void this.render());
     await this.render();
   }
 

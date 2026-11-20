@@ -282,7 +282,7 @@ describe("MUGS views — onOpen() renders without throwing", () => {
     expect(v.getDisplayText()).toBe("MUGS Overview");
     expect(collectText(v.contentEl)).toContain("Automatic sync is paused");
     expect(findButtons(v.contentEl).find((b) => b.textContent === "Overview")?.attrs["aria-current"]).toBe("page");
-    fire(findButtons(v.contentEl).find((b) => b.textContent === "Changes")!, "click");
+    fire(findButtons(v.contentEl).find((b) => b.textContent === "Diff")!, "click");
     expect(actions.openView).toHaveBeenCalledWith("mugs-diff");
     fire(findButtons(v.contentEl).find((b) => b.textContent === "Review files (2)")!, "click");
     expect(actions.openReview).toHaveBeenCalledTimes(1);

@@ -170,3 +170,51 @@ describe("SettingsDraft — commit semantics", () => {
     expect(fresh.dirty()).toBe(false);
   });
 });
+
+describe("SettingsDraft — changeCount()", () => {
+  it("is 0 for an untouched draft", () => {
+    expect(new SettingsDraft(baseSettings()).changeCount()).toBe(0);
+  });
+
+  it("counts each changed credential/mapping and the sync + security blocks", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertMapping(map("m2", "Journal"));       // added mapping
+    d.setSync({ intervalSeconds: 600 });          // sync block
+    d.setSecurity({ encryptCredentials: true });  // security block
+    expect(d.changeCount()).toBe(3);
+  });
+
+  it("counts a removed credential", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.removeCredential("c1");
+    expect(d.changeCount()).toBe(1);
+  });
+
+  it("counts an edited credential once", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({ ...cred(), token: "rotated" });
+    expect(d.changeCount()).toBe(1);
+  });
+});
+
+describe("SettingsDraft — validateDetailed() refs", () => {
+  it("tags a mapping problem with the mapping id", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertMapping(map("m2", "../escape"));
+    const p = d.validateDetailed().find((x) => x.message.includes("m2"))!;
+    expect(p.ref).toEqual({ kind: "mapping", id: "m2" });
+  });
+
+  it("tags a credential problem with the credential id", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({ id: "c2", label: "", kind: "gitlab", token: "x" });
+    const p = d.validateDetailed().find((x) => x.message.includes("c2"))!;
+    expect(p.ref).toEqual({ kind: "credential", id: "c2" });
+  });
+
+  it("validate() returns exactly the detailed messages", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertMapping(map("m2", "../escape"));
+    expect(d.validate()).toEqual(d.validateDetailed().map((p) => p.message));
+  });
+});

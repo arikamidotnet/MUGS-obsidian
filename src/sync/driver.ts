@@ -296,8 +296,8 @@ export function storeWritableAccessor(store: MugsStore): LastSyncAccessor {
     // from where it left off (resume.ts). baseSha is the pre-pull remote point we advance from.
     recordPull: (id, remoteSha) =>
       persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.lastRemoteSha ?? "", lastRemoteSha: remoteSha, opId: (cur.opId ?? 0) + 1, status: "ok", skipReason: undefined, lastPullAt: Date.now() })),
-    recordPush: (id, localSha) =>
-      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", skipReason: undefined, lastPushAt: Date.now() })),
+    recordPush: (id, localSha, by) =>
+      persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, baseSha: cur.baseSha ?? "", lastLocalSha: localSha, opId: (cur.opId ?? 0) + 1, status: "ok", skipReason: undefined, lastPushAt: Date.now(), ...(by ? { lastPushBy: by } : {}) })),
     recordConflict: (id) => persistLastSync(store, id, (cur) => ({ ...cur, mappingId: id, status: "conflict", skipReason: undefined })),
     // Driver-level skip/blocked outcome: keep the row out of a stale "in sync".
     recordSkipped: (id, reason) =>

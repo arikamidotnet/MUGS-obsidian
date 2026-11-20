@@ -66,6 +66,35 @@ export class MemoryIO implements SettingsIO {
  *  accessed through this widened type until then. */
 type SecuritySettings = MugsSettings["security"] & { kdf?: KdfParams };
 
+/**
+ * Minimal secret-storage seam — mirrors Obsidian's `app.secretStorage`
+ * (SecretStorage, 1.11.4+): a device-local, OS-keychain-backed key/value store.
+ * Tokens live here (never in data.json) when it is available; the store keeps
+ * only a `secretId` reference on the credential.
+ */
+export interface SecretStore {
+  /** False when the host has no usable secret storage (older Obsidian/mobile). */
+  available(): boolean;
+  get(id: string): string | null;
+  set(id: string, value: string): void;
+}
+
+/** In-memory SecretStore for tests and non-Obsidian hosts. */
+export class MemorySecretStore implements SecretStore {
+  private readonly secrets = new Map<string, string>();
+  constructor(private readonly enabled = true) {}
+  available(): boolean { return this.enabled; }
+  get(id: string): string | null { return this.secrets.get(id) ?? null; }
+  set(id: string, value: string): void { this.secrets.set(id, value); }
+}
+
+/** Derive a valid SecretStorage id for a credential. Obsidian requires lowercase
+ *  alphanumeric with optional dashes (≤64 chars); credential ids are uuids, but
+ *  the value is sanitized defensively and namespaced to avoid collisions. */
+export function secretIdFor(credentialId: string): string {
+  return `mugs-${credentialId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
+}
+
 export class MugsStore {
   private settings: MugsSettings;
   /** Runtime tokens, keyed by credential id. Never persisted in plaintext unless encryption is off. */
@@ -82,7 +111,7 @@ export class MugsStore {
   /** True once the current passphrase-derived key is available in memory. */
   private unlockedFlag = false;
 
-  constructor(private io: SettingsIO = new MemoryIO()) {
+  constructor(private io: SettingsIO = new MemoryIO(), private secrets?: SecretStore) {
     // Clone the shared default so each store has its own mutable settings
     // (assigning by reference would let stores clobber one another's lastSync).
     this.settings = structuredClone(DEFAULT_SETTINGS);
@@ -477,6 +506,17 @@ export class MugsStore {
       // A real secret supersedes the runtime plaintext and clears an undecryptable marker.
       this.runtimeTokens.set(cred.id, cred.token);
       this.unreadableTokens.delete(cred.id);
+      // Prefer the OS keychain: move the secret out of data.json immediately.
+      if (this.secrets?.available() && cred.token && !isMasked(cred.token)) {
+        const sid = secretIdFor(cred.id);
+        try {
+          this.secrets.set(sid, cred.token);
+          cred.secretId = sid;
+          cred.token = "";
+        } catch {
+          // Keychain write failed — keep the existing storage path (below).
+        }
+      }
     }
     return { ...cred, token: redactToken(cred.token) };
   }
@@ -602,6 +642,7 @@ export class MugsStore {
           // Undecryptable stored tokens are left untouched (the right passphrase
           // on a later unlock can still recover them).
           for (const c of toWrite.credentials) {
+            if (c.secretId) { c.token = ""; continue; } // secret lives in the OS keychain
             if (this.unreadableTokens.has(c.id)) continue;
             const real = this.runtimeTokens.get(c.id) ?? c.token;
             if (!real || isMasked(real)) continue;
@@ -614,6 +655,7 @@ export class MugsStore {
           // (e.g. a credential added while locked) is replaced with an all-bullet
           // mask (isMasked-recognizable on the next load) instead of being leaked.
           for (const c of toWrite.credentials) {
+            if (c.secretId) { c.token = ""; continue; } // secret lives in the OS keychain
             if (!isStoredCipher(c.token) && !isMasked(c.token)) {
               c.token = LOCKED_PERSIST_MASK;
             }
@@ -625,6 +667,7 @@ export class MugsStore {
         // left untouched (the right key hint can still recover them).
         const key = await deriveKey(keyHint(toWrite));
         for (const c of toWrite.credentials) {
+          if (c.secretId) { c.token = ""; continue; } // secret lives in the OS keychain
           if (this.unreadableTokens.has(c.id)) continue;
           const real = this.runtimeTokens.get(c.id) ?? c.token;
           c.token = await encryptBytes(real, key);
@@ -650,9 +693,45 @@ export class MugsStore {
     if (this.unreadableTokens.has(id)) return undefined;
     const runtime = this.runtimeTokens.get(id);
     if (runtime !== undefined) return runtime;
-    const stored = this.settings.credentials.find((c) => c.id === id)?.token;
+    const cred = this.settings.credentials.find((c) => c.id === id);
+    // Prefer the OS keychain (SecretStorage) reference when the credential has one.
+    if (cred?.secretId && this.secrets?.available()) {
+      const secret = this.secrets.get(cred.secretId);
+      if (secret) return secret;
+    }
+    const stored = cred?.token;
     if (stored === undefined || isMasked(stored) || isStoredCipher(stored)) return undefined;
     return stored;
+  }
+
+  /**
+   * Move every stored plaintext/ciphertext token into SecretStorage (the OS
+   * keychain) and blank the durable field so data.json never holds a secret.
+   * Idempotent and lossless: a token is only dropped from settings AFTER the
+   * secret write succeeds; on any failure the stored form is kept for a retry.
+   * Returns the number of credentials migrated. No-op without a SecretStore.
+   */
+  async migrateTokensToSecretStorage(): Promise<number> {
+    if (!this.secrets?.available()) return 0;
+    let migrated = 0;
+    for (const c of this.settings.credentials) {
+      if (c.secretId) continue;
+      // Prefer the live plaintext (plaintext or unlocked vaults); never move a
+      // stored ciphertext/mask as if it were the secret.
+      const real = this.runtimeTokens.get(c.id) ?? (isStoredCipher(c.token) || isMasked(c.token) ? undefined : c.token);
+      if (!real) continue;
+      const sid = secretIdFor(c.id);
+      try {
+        this.secrets.set(sid, real);
+      } catch {
+        continue; // keep the stored form; retry on the next load
+      }
+      c.secretId = sid;
+      c.token = "";
+      this.runtimeTokens.set(c.id, real);
+      migrated++;
+    }
+    return migrated;
   }
 }
 

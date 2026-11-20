@@ -90,7 +90,9 @@ export interface LastSyncAccessor {
   /** Persisted remote SHA this mapping was last synced to ("" when never). */
   lastRemoteSha(mappingId: string): string | undefined;
   recordPull(mappingId: string, remoteSha: string): void;
-  recordPush(mappingId: string, localSha: string): void;
+  /** `by` is the push's acting identity (credential username or pinned agent),
+   *  recorded for UI attribution. Optional — implementers may ignore it. */
+  recordPush(mappingId: string, localSha: string, by?: { name: string; email?: string }): void;
 /** Optional: mark a mapping's persisted status as needing conflict resolution. */
   recordConflict?(mappingId: string): void;
   /** Optional: mark a mapping's persisted status as not-in-sync with a reason
@@ -366,10 +368,19 @@ export class CloneManager {
       if (held?.has(path)) { fail(path, "held for review"); continue; }
       if (pending.has(path)) continue;
       if (!names.has(path)) {
+        // A path the vault has never received (no per-path proof) is a NEW remote
+        // file for a download-permitted mapping: the merge applies it and the mirror
+        // lands it, so it is not queued for review. It still withholds proven
+        // completion (fail below) until the vault actually holds it, keeping
+        // correspondence/vaultPopulated honest. A path the vault HAD proven and then
+        // lost is ambiguous (a local deletion or a delete/modify race) and stays
+        // reviewable. Push-only mappings never download, so their remote-only files
+        // remain reviewable.
+        const reviewable = proof !== undefined || mapping.direction === "push-only";
         const reason = proof && proof.blob !== blob
           ? "remote changed after the local file was deleted"
           : "remote-only file has not been verified in this vault";
-        state.review[path] = { ref, blob, reason };
+        if (reviewable) state.review[path] = { ref, blob, reason };
         fail(path, reason);
         continue;
       }
@@ -1007,7 +1018,7 @@ export class CloneManager {
         if (committed) {
           status?.("pushing to remote");
           await c.push("origin", branch);
-          this.syncs.recordPush(mapping.id, await c.currentHead());
+          this.syncs.recordPush(mapping.id, await c.currentHead(), committer);
           pushed = true;
         } else if (decision.push) {
           // Nothing new to commit, but the branch carries unpushed commits.
@@ -1016,7 +1027,7 @@ export class CloneManager {
         }
       } else if (decision.push) {
         await c.push("origin", branch);
-        this.syncs.recordPush(mapping.id, localSha);
+        this.syncs.recordPush(mapping.id, localSha, committer);
         pushed = true;
       }
     }
@@ -1147,7 +1158,7 @@ export class CloneManager {
       }
     }
     const newHead = await c.currentHead();
-    this.syncs.recordPush(mapping.id, newHead);
+    this.syncs.recordPush(mapping.id, newHead, committer);
     this.syncs.recordPull(mapping.id, newHead);
     // E03: populated is set ONLY on real correspondence — every in-scope vault file
     // actually reached the remote. Skipped (unreadable/held) uploads leave the vault
@@ -1422,6 +1433,19 @@ export class CloneManager {
           if (b === null) continue; // blocked — surfaced per-file, never a deletion
           base = b;
         }
+        // Theirs (the remote side) is independent of ours, so compute it BEFORE the
+        // ours branch: the "never received -> treat as a new add" path below drops
+        // `base`, and `theirs` reuses `base` when the remote tip IS the baseline tree
+        // (E01 idle cost: 600 → 0 shows). Computing it first keeps the real remote
+        // content for that reuse.
+        let theirs: string | undefined;
+        if (remoteSha === pathBase && pathBase) {
+          theirs = base;
+        } else {
+          const t = await readTyped(remoteRef, path);
+          if (t === null) continue;
+          theirs = t;
+        }
         let ours: string | undefined;
         if (!this.vaultMirror) {
           // When the clone HEAD is exactly the baseline tree, ours == base by
@@ -1446,9 +1470,19 @@ export class CloneManager {
             }
           } else if (mapping.direction !== "pull-only" && (o?.approvedDeletes?.has(path) || (o?.reconciliation ? evidence !== undefined : deletable))) {
             ours = undefined; // vault had it (populated) and no longer does -> deletion
+          } else if (mapping.direction !== "push-only") {
+            // The vault never received this path and downloads are permitted, so it
+            // is a NEW (or not-yet-taken) remote file: treat it as a pure add so the
+            // merge applies it and mirrorPull lands it. The old `ours = base`
+            // "act as unchanged" left a teammate's new file un-downloaded and flagged
+            // it for review instead of syncing it. Deletion safety is intact — a file
+            // the vault HAD and deleted carries per-path proof and takes the deletion
+            // branch above — and push-only mappings (which never download) keep the
+            // old act-as-unchanged behavior.
+            base = undefined;
+            ours = undefined;
           } else if (baseSha) {
-            // not seen yet -> act as unchanged (the base content the vault has not
-            // taken yet); base was already read above — reuse it (E01).
+            // push-only: never download; leave the remote-only file for review.
             ours = base;
           } else {
             ours = undefined;
@@ -1457,16 +1491,6 @@ export class CloneManager {
         if (this.vaultMirror) {
           const rel = repoToVaultPath(mapping, path);
           preimages.set(path, rel !== null && vaultNames.has(rel) && ours !== undefined ? gitBlobId(ours) : undefined);
-        }
-        // When the remote tip IS the baseline tree, theirs == base by construction —
-        // reuse instead of a second show per file (E01 idle cost: 600 → 0 shows).
-        let theirs: string | undefined;
-        if (remoteSha === pathBase && pathBase) {
-          theirs = base;
-        } else {
-          const t = await readTyped(remoteRef, path);
-          if (t === null) continue;
-          theirs = t;
         }
         // A delete/modify race is not a clean deletion and must never resurrect
         // or discard content implicitly. Review binds a decision to this blob.

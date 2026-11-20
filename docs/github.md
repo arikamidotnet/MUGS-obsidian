@@ -32,11 +32,12 @@ already has content.
    granting an unrestricted token by default.
 3. In **Settings → MUGS → Accounts → Add another account**, choose
    **GitHub**, give it a **Label**, paste the token in **Token** and enter
-   your GitHub **Username**. **Base URL** is
-   `https://api.github.com` for GitHub.com or normally
-   `https://your-enterprise-host.example/api/v3` for GitHub Enterprise
-   Server. Verify the server's documented API base; do not paste a browser
-   repository page URL.
+   your GitHub **Username**. **Base URL** is filled in automatically as
+   `https://api.github.com`; for GitHub Enterprise Server change it to your
+   documented API base (normally
+   `https://your-enterprise-host.example/api/v3`). Do not paste a browser
+   repository page URL — MUGS flags a website URL inline and suggests the API
+   host. Use **Test connection** to confirm the account before adding it.
 4. Put `owner/repo` in **Allowed repositories**, one per line. This lets a
    repository-scoped token discover precisely the repository without
    enumerating everything under `/user/repos`. This field affects the

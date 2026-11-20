@@ -12,6 +12,8 @@
  * labels are pure presentation built on describeConflictActions / assignAuthorColors.
  */
 import { authorAccent, assignAuthorColors, type ParsedDiff, type AuthorsByFile, type DiffLine } from "./diffModel";
+import { resolveAvatar } from "./avatarModel";
+import { renderAvatar } from "./avatarRender";
 import { describeConflictActions, type ConflictAction } from "../sync/conflictActions";
 import type { FileConflict, ResolveChoice } from "../sync/conflict";
 
@@ -37,7 +39,7 @@ export function renderConflictComparison(host: HTMLElement, conflict: FileConfli
   });
 }
 
-/** Reuse the Conflicts/Changes diff presentation for a live, selected review candidate.
+/** Reuse the Conflicts/Diff presentation for a live, selected review candidate.
  *  Text is bounded before the line table is constructed; no HTML sinks are used. */
 export function renderTextComparison(
   host: HTMLElement,
@@ -219,11 +221,13 @@ export function renderFileBrowser(parsed: ParsedDiff, host: HTMLElement, authors
     const names = authors(parsed.files[index].name);
     renderDiff({ ...parsed, files: [parsed.files[index]] }, focused, palette);
     if (names.length) {
-      focused.createEl("p", {
-        text: `Authors: ${names.join(", ")}`,
+      // Avatar chip(s) + the textual author list (kept for accessibility/tooltips).
+      const line = focused.createEl("p", {
         cls: "mugs-diff-file-authors",
         attr: { title: "Git authors for this file in the selected range, not line-by-line attribution." },
       });
+      for (const n of names) renderAvatar(line, resolveAvatar({ name: n }), { size: 16, title: n });
+      line.createSpan({ text: `Authors: ${names.join(", ")}` });
     }
   };
   parsed.files.forEach((file, index) => {
@@ -345,6 +349,8 @@ function renderHunk(block: HTMLElement, hunk: ParsedDiff["files"][number]["hunks
   header.setAttribute("aria-expanded", "true");
   header.setAttribute("aria-label", `Toggle changes starting at line ${hunk.newStart}`);
   if (authorColor) header.style.borderLeftColor = authorColor;
+  // Attribute the hunk to its file's committing author, with an avatar chip.
+  if (hunk.author) renderAvatar(header, resolveAvatar({ name: hunk.author }), { size: 14, title: hunk.author });
 
   const chevron = header.createSpan({ text: "▾", cls: "mugs-diff-chevron" });
 

@@ -1,11 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
 import { MugsSettingTab } from "./settingsTab";
-vi.mock("./providers/factory", () => ({
-  buildProvider: vi.fn(() => ({
-    listRepos: async () => [{ id: "r1", pathWithNamespace: "team/repo" }],
-    listDirectories: async (_repoKey: string, _path: string) => ["Notes"],
-  })),
-}));
+// Keep the real provider metadata (PROVIDER_OPTIONS / defaultBaseUrl / validate
+// wiring) and stub only the network-facing factory, so the settings tab renders
+// its dropdown + endpoint autofill exactly as it does in Obsidian.
+vi.mock("./providers/factory", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./providers/factory")>();
+  return {
+    ...actual,
+    buildProvider: vi.fn(() => ({
+      listRepos: async () => [{ id: "r1", pathWithNamespace: "team/repo" }],
+      listDirectories: async (_repoKey: string, _path: string) => ["Notes"],
+    })),
+  };
+});
 /**
  * The Obsidian 1.14.x blank-UI bug (v0.3.5) left every settings section as an
  * empty <div> because cards were built with document.createElement instead of the
@@ -225,6 +232,16 @@ function makePlugin() {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+/** Depth-first find the first <button> whose text matches `label`. */
+function findButton(root: any, label: string): any {
+  if (root.tagName === "button" && root.textContent === label) return root;
+  for (const child of root.children ?? []) {
+    const found = findButton(child, label);
+    if (found) return found;
+  }
+  return undefined;
+}
 
 describe("MugsSettingTab — display() renders every section (blank-UI regression guard)", () => {
   const sections = [
@@ -551,5 +568,46 @@ describe("add-mapping assistant", () => {
     expect(addFormIdx).toBeGreaterThanOrEqual(0);
     expect(mappingCardIdx).toBeGreaterThanOrEqual(0);
     expect(mappingCardIdx).toBeLessThan(addFormIdx);
+  });
+});
+
+describe("settings onboarding — endpoint autofill and inline validation", () => {
+  it("prefills the Base URL field with the provider's API endpoint", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+    const inputs = tab.containerEl.querySelectorAll('input[type="text"]') as unknown as Array<{ value: string }>;
+    const values = inputs.map((i) => i.value);
+    expect(values).toContain("https://gitlab.com/api/v4");
+  });
+
+  it("renders a Test connection control in the add-account form", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+    expect(findButton(tab.containerEl, "Test connection")).toBeTruthy();
+  });
+
+  it("shows inline required-field errors when Add account is submitted empty", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+    const add = findButton(tab.containerEl, "Add account");
+    expect(add).toBeTruthy();
+    add.handlers.click[0]();
+    const text = collectText(tab.containerEl);
+    expect(text).toContain("A label is required.");
+    expect(text).toContain("A token is required for a hosted account.");
+  });
+
+  it("shows a pending-change count in the unsaved banner", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+    const toggle = tab.containerEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    toggle.click();
+    const banner = tab.containerEl.querySelector(".mugs-unsaved-banner")!;
+    expect(banner).toBeTruthy();
+    expect(collectText(banner)).toContain("unsaved change");
   });
 });

@@ -241,7 +241,7 @@ Back up the vault and plugin state before upgrading or making a first connection
   matching vault file and inconclusive scans — with bounded, cancellable scanning.
 - Batch decisions with path lists: pick a folder, category and action, inspect
   every repository path/revision and vault candidate, optionally open a lazy
-  vault-to-repository line comparison using the same diff UI as Conflicts/Changes,
+  vault-to-repository line comparison using the same diff UI as Conflicts/Diff,
   then confirm explicitly.
   Each batch covers one folder and one sync pass (up to 500 files) instead of one
   sync per file, reporting applied / re-queued / pending outcomes per path.
@@ -250,7 +250,7 @@ Back up the vault and plugin state before upgrading or making a first connection
   never imply identity or permission.
 - Review intent that cannot be persisted is rolled back instead of silently
   applying later; sync locks always release; analysis can be cancelled before a decision.
-- 0.4.1: consistent Overview/Changes/Review/Conflicts navigation, scoped first
+- 0.4.1: consistent Overview/Diff/Review/Conflicts navigation, scoped first
   downloads that survive same-name collisions, deletions that stay deleted, and
   verified idle passes that avoid content reads, rewrites, commits and pushes.
 
@@ -271,10 +271,14 @@ purely git-native.
   GitLab gets first-class v4 API support, and GitHub/Gitea/Forgejo/Bitbucket/local adapters ship today.
 - **Fine-grained folder sync.** Each mapping ties a remote path to a vault folder, so different
   users can share one repo while syncing only the folders relevant to them.
-- **Credentials live in the vault**, not the OS keychain. Tokens can be encrypted
-  at rest (`data.json`). Configuration-directory sync is not fully implemented;
-  an opt-in control is not a guarantee that `.obsidian/` files are synchronized.
-  Credential-bearing plugin data must stay excluded.
+- **Tokens live in the OS keychain**, not in `data.json`. On Obsidian 1.11.4+ the
+  plugin stores account tokens in the built-in SecretStorage (device-local,
+  OS-keychain-backed) and keeps only a reference in `data.json`; optional
+  passphrase encryption remains for the inline fallback on builds without it.
+  Secrets are device-local, so a second device must re-enter them.
+  Configuration-directory sync is not fully implemented; an opt-in control is not
+  a guarantee that `.obsidian/` files are synchronized. Credential-bearing plugin
+  data must stay excluded.
 - **Declarative data plane (ADL).** The entire persisted settings object is defined by a single Zod
   schema (`src/schema.ts`) — the single source of truth. TS types are derived from it.
 - **Recoverable conflicts.** Clean three-way changes merge automatically; genuinely
@@ -296,7 +300,7 @@ src/
   runtime/            app-runtime transactions: manual conflict resolution, status reporting,
                       bulk review, settings draft/Apply, clone locks, adapter path safety
   membership/         multi-user membership merge (roster + local activity -> summary)
-  ui/                 Obsidian views (Overview, Changes, Review, Conflicts)
+  ui/                 Obsidian views (Overview, Diff, Review, Conflicts)
                       + pure models + data seams
 bench/              performance benchmarks (npm run bench)
 ```
@@ -321,9 +325,9 @@ Implemented features:
 - **Overview** (`mugs-map`, the ribbon default). One aligned row per connected
   folder — folder, direction, repository, last sync times and honest status —
   with Sync now, Review files and Settings actions, plus shared
-  Overview / Changes / Review / Conflicts navigation on every
+  Overview / Diff / Review / Conflicts navigation on every
   page. (`src/ui/mapView.ts`, `src/ui/navigation.ts`)
-- **Changes view** (`mugs-diff`). Select a folder and comparison mode, then
+- **Diff view** (`mugs-diff`). Select a folder and comparison mode, then
   browse changed files with addition/deletion counts, line numbers, collapsible
   changes, and file-level Git author names where available. Compact cards state
   plainly that only saved Git history is shown.
@@ -336,14 +340,19 @@ Implemented features:
   operations that block proven completion until they are applied and verified.
 - **Reconciliation (path-level ownership).** Neither a filename nor an mtime
   proves a vault received a remote file — a matching Git blob does. Every pass
-  verifies vault bytes against the published blob IDs from the remote tree;
-  remote-only paths this vault never received land in the **Review tab**
-  (never auto-deleted, never blocking the pass from completing), and deletion
-  propagation is per-path: a remote file may be deleted only if its path is
-  blob-proven. (`src/sync/reconciliation.ts`, `src/ui/reconciliationReview.ts`)
+  verifies vault bytes against the published blob IDs from the remote tree.
+  A teammate's new file this vault never received is **pulled automatically**
+  for a download-permitted mapping; only a file the vault had proven and then
+  lost (a deletion or a delete/modify race) lands in the **Review tab**.
+  Deletion propagation is per-path: a remote file may be deleted only if its
+  path is blob-proven. (`src/sync/reconciliation.ts`, `src/ui/reconciliationReview.ts`)
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon, the *Run sync* command, and a gated scheduler. Manual runs report per-mapping synced / needs-merge / skipped Notices (plus first-sync completion); automatic runs report one aggregate. Recoverable stops — a dirty or unpushed legacy clone, a clone locked by another process — return a *blocked* outcome with a reason and are never auto-reset. (`src/providers/factory.ts`, `src/main.ts`)
 - **Settings controls.** Manage credentials and folder mappings, with explicit
-  Apply/Cancel drafts and validation of protected configuration scopes.
+  Apply/Cancel drafts and validation of protected configuration scopes. The
+  add-account form fills in each provider's API endpoint automatically, checks
+  the base URL / repo paths inline as you type, and offers an explicit **Test
+  connection** probe; the unsaved-changes banner shows how many changes are
+  pending and lists any problem you can click to jump to.
 
 Also shipped: first-sync policy, identity-keyed clone sharing with exclusive
 cross-process clone locks, event-driven sync (file changes coalesce into a pass
@@ -383,8 +392,9 @@ rollout remains part of the checklist for each team.
   shape invalidates all proven ownership and
   correspondence — proof is never carried across re-scoped links. After
   first-push and after normal passes, vault bytes are verified against the
-  published Git blob IDs from the remote tree. Unknown remote-only paths land
-  in the reconciliation review (never auto-deleted, never blocking the pass);
+  published Git blob IDs from the remote tree. A new remote-only path is pulled
+  automatically (never auto-deleted); only a proven-then-lost path lands in the
+  reconciliation review;
   held, pending, unreadable, or content-mismatch paths are withheld from proof
   (advisory). The "last completed sync" anchor (used by since-sync Diff) only
   advances when every path is verified. A pass that completes with items
@@ -417,8 +427,9 @@ rollout remains part of the checklist for each team.
 
 ## Credentials and encryption model (current limits)
 
-- Credentials (provider kind, base URL, token, username, optional repo allow-list) are stored in the vault's `data.json` via the plugin store.
-- **Encryption at rest is opt-in** (Settings → Security) and uses a passphrase you provide. The passphrase is **never stored** in the vault and cannot be recovered if lost.
+- Credentials (provider kind, base URL, username, optional repo allow-list) are stored in the vault's `data.json` via the plugin store. The **token** is stored in Obsidian's SecretStorage (device-local OS keychain, Obsidian 1.11.4+) and `data.json` keeps only a reference; on builds without SecretStorage it falls back to the encrypted/plaintext `data.json` field.
+- **Secrets are device-local.** They are not synced with the vault, so a second device must re-enter each account token. Requires Obsidian 1.11.4+ for keychain storage.
+- **Encryption at rest is opt-in** (Settings → Security) and uses a passphrase you provide. The passphrase is **never stored** in the vault and cannot be recovered if lost. It applies to the inline `data.json` fallback; keychain-stored tokens need no passphrase.
 - Encryption is **off by default**. Without it, tokens are stored in plaintext inside `data.json`.
 - A passphrase-encrypted vault starts every session locked; unlock it in
   Settings → Security. A wrong passphrase leaves credentials in
@@ -552,9 +563,11 @@ never credentials.
 
 1. [Install and start safely](docs/getting-started.md), using the [GitLab](docs/gitlab.md)
    or [GitHub](docs/github.md) token walkthrough. **Desktop Obsidian only.**
-2. In Settings → MUGS → Accounts, add your own token, then in Connected folders
+2. In Settings → MUGS → Accounts, add your own token (the API endpoint is
+   filled in for you; **Test connection** checks it), then in Connected folders
    choose the repository, check the intended matched folders and select direction.
-   Press Connect selected folders and **Apply settings**. A *first* mapping
+   Press Connect selected folders and **Apply settings** — the banner counts
+   pending changes and lists anything to fix first. A *first* mapping
    starts paused automatically; unpause only after reviewing the connection.
 3. Review the mapping, backup and Start new connections with setting; unpause and
    Apply only when safe. Background sync then runs without a routine Sync now click.

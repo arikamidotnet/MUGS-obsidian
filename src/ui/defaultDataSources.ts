@@ -134,6 +134,7 @@ export class StoreMapDataSource implements MapDataSource {
         mapping: m,
         status: ls?.status ?? "pending",
         owner,
+        lastPushBy: ls?.lastPushBy,
         lastPushAt: ls?.lastPushAt,
         lastPullAt: ls?.lastPullAt,
         skipReason,

@@ -267,6 +267,19 @@ describe("legacy path-level reconciliation", () => {
     expect(after?.review["G.md"]?.ref).toBe(remoteTip());
     expect(out[0].blocked?.some((b) => b.path === "G.md" && b.reason.includes("remote changed since review"))).toBe(true);
   });
+
+  it("pulls a never-received remote file into the vault (no Review entry) for a download-permitted mapping", async () => {
+    // Legacy/partial vault: G.md exists on the remote at the recorded baseline but
+    // this vault never received it. A push-pull mapping must PULL it, not leave it
+    // un-downloaded and queue it in the Review pane — the old `ours = base`
+    // "act as unchanged" behavior meant a teammate's file never arrived.
+    unlinkSync(join(f.synced, "G.md"));
+    f.store.setLastSync({ mappingId: "m", lastRemoteSha: remoteTip(), status: "ok" });
+    const out = await syncAllMappings(f.deps()); // default mapping is push-pull
+    expect(out[0].status).toBe("ok");
+    expect(readFileSync(join(f.synced, "G.md"), "utf8")).toBe("g\n");
+    expect(f.store.getSettings().lastSync.m.reconciliation?.review["G.md"]).toBeUndefined();
+  });
 });
 
 describe("S01: deferred work -> durable pendingOps; correspondence gating; restart safety", () => {

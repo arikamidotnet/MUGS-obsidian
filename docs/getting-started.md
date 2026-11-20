@@ -81,10 +81,13 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    repository, branch and which top-level folder belongs to which person.
    If both sides already contain files, compare them **before** connecting.
 2. In **Settings → MUGS → Accounts → Add another account**, select GitLab or
-   GitHub. Enter **Label**, optional **Username**, **Token**, and **Base URL**.
-   For a repository-restricted token, enter the exact `owner/repo` or
-   `group/project` under **Allowed repositories**, one per line. Press
-   **Add account**. This stages a draft; it does **not** save yet.
+   GitHub. The **Base URL** (API endpoint) is filled in automatically for the
+   chosen provider — change it only for a self-hosted instance. Enter **Label**,
+   optional **Username** and **Token**. Values are checked as you type (a
+   malformed URL or repo path is flagged inline), and **Test connection** probes
+   the account before you commit. For a repository-restricted token, enter the
+   exact `owner/repo` or `group/project` under **Allowed repositories**, one per
+   line. Press **Add account**. This stages a draft; it does **not** save yet.
 3. Under **Connected folders → Connect another folder**, select your account
    and repository. MUGS suggests matches between **top-level repository
    directories** and **top-level vault folders**. Check the intended matching
@@ -97,7 +100,9 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    for the repository default, or name the intended *existing* branch. Review
    **Only sync matching files** and **Skip matching files**; empty filters mean
    all otherwise eligible files in the mapping. Press **Connect selected
-   folders**, then **Apply settings** in the unsaved-settings banner.
+   folders**. The unsaved-settings banner counts your pending changes and lists
+   anything that must be fixed before applying; click a listed problem to jump to
+   it. When the list is clear, press **Apply settings**.
 5. A **first connection created with this candidate** automatically starts
    **paused** after Apply. Check the route on the connected-folder card and
    choose **Sync → Start new connections with**: **Download from repository**
@@ -107,9 +112,9 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    ready, turn **Pause automatic sync** off and **Apply settings**. This
    immediately checks for work; no routine **Sync now** click is needed.
 
-Use **MUGS Overview** to inspect each folder, **Changes** for committed
-snapshots, **Review** for unknown repository files, and **Conflicts** for
-genuine merge decisions.
+Use **MUGS Overview** to inspect each folder, **Diff** for committed
+snapshots, **Review** for repository files that need a decision, and **Conflicts**
+for genuine merge decisions.
 A row showing **needs review**, **pending**, **skipped** or **failed** is *not*
 fully in sync. Review decisions are manual; neither a same-name file nor a
 completed pass authorizes an automatic deletion. See
@@ -137,7 +142,8 @@ conflicts can postpone completion; keep a separate backup and check status.
 
 - **No repositories listed:** confirm the token is active and has access to
   the *same* host and repository, check the API Base URL, and enter its exact
-  namespace under Allowed repositories for a project-scoped token.
+  namespace under Allowed repositories for a project-scoped token. **Test
+  connection** in the account form reports the provider's real error.
 - **No folders suggested:** MUGS matches existing *top-level* directories on
   both sides. Check spelling/case, create the intended directories if needed,
   then reopen the mapping form. Do not select the whole-vault checkbox simply
@@ -146,21 +152,28 @@ conflicts can postpone completion; keep a separate backup and check status.
   protections/rulesets and that the target branch exists. See the host guide.
 - **Paused after setup:** first-time safety gate; inspect the mapping and
   backup, then unpause under Sync and Apply. **Sync now** bypasses this pause.
-- **Needs review:** inspect each repository path and decide whether to recover
-  or delete it; do not batch-approve unknown content. **Needs merge:** use
-  Conflicts to choose a winner. **Pending:** close open editors and let a
-  later pass verify; do not delete the clone.
+- **Needs review:** a teammate's newly added file is **pulled automatically**
+  for Both ways / Download only; Review only lists genuinely ambiguous paths (a
+  file this vault had proven and then lost while the remote changed). Inspect
+  each path and decide whether to recover or delete it; do not batch-approve
+  unknown content. **Needs merge:** use Conflicts to choose a winner.
+  **Pending:** close open editors and let a later pass verify; do not delete the
+  clone.
 - **Missing attachments or settings:** MUGS is presently a desktop text-sync
   product. Binary attachments and full `.obsidian/` configuration syncing
   are not release-ready; do not rely on MUGS as the only backup.
 
 ## Token and privacy limits
 
-MUGS stores account tokens in this vault's plugin `data.json`. **Encryption at
-rest is off by default.** In **Settings → MUGS → Security**, you can set a
-passphrase and enable **Encrypt saved tokens**, then **Apply settings**. You
-must unlock tokens after every app start; losing the passphrase requires
-re-entering tokens. This is **not vault-content end-to-end encryption**. Do
+On Obsidian 1.11.4+, MUGS stores account tokens in Obsidian's built-in
+**SecretStorage** (the OS keychain) and keeps only a reference in this vault's
+plugin `data.json`. Secrets are **device-local** — they are not synced with the
+vault, so a second device must re-enter each token. On older builds, tokens
+fall back to `data.json`, where **encryption at rest is off by default**: in
+**Settings → MUGS → Security** you can set a passphrase and enable **Encrypt
+saved tokens**, then **Apply settings**; you must unlock tokens after every app
+start, and losing the passphrase requires re-entering tokens. This is **not
+vault-content end-to-end encryption**. Do
 not put tokens in a note, terminal argument, Git remote URL, screenshot or
 issue report. Grant each teammate their own least-privilege host token and
 revoke it on departure.

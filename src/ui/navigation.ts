@@ -9,7 +9,7 @@ export function renderNavigation(host: HTMLElement, active: MugsViewId): void {
   const nav = host.createEl("nav", { cls: "mugs-navigation", attr: { "aria-label": "MUGS pages" } });
   for (const [view, label] of [
     ["mugs-map", "Overview"],
-    ["mugs-diff", "Changes"],
+    ["mugs-diff", "Diff"],
     ["mugs-reconciliation", "Review"],
     ["mugs-conflicts", "Conflicts"],
   ] as const) {

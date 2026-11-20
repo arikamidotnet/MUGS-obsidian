@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MugsStore, MemoryIO } from "./store";
+import { MugsStore, MemoryIO, MemorySecretStore, secretIdFor } from "./store";
 import { deriveKey, encryptBytes, generateSalt, derivePassphraseKey, encryptAesGcm, decryptAesGcm } from "./crypto";
 
 // Minimal copy of the legacy XOR used by store.ts's backward-compatible reader,
@@ -911,5 +911,71 @@ describe("unlock() robustness against corrupt KDF params", () => {
     // Corrupt the persisted salt in place (as a partial data.json clobber would).
     store.setSecurity({ encryptCredentials: true, kdf: badKdf } as never);
     await expect(store.unlock("right-pass")).resolves.toBe(false);
+  });
+});
+
+describe("SecretStorage migration (tokens never persisted in data.json)", () => {
+  it("moves a new credential's token into the keychain and blanks the durable field", async () => {
+    const io = new MemoryIO(null);
+    const secrets = new MemorySecretStore();
+    const store = new MugsStore(io, secrets);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-SECRET" });
+
+    // Runtime resolves from the keychain; the credential keeps only a reference.
+    expect(store.getToken("c1")).toBe("glpat-SECRET");
+    expect(store.getSettings().credentials[0].token).toBe("");
+    expect(store.getSettings().credentials[0].secretId).toBe(secretIdFor("c1"));
+    expect(secrets.get(secretIdFor("c1"))).toBe("glpat-SECRET");
+
+    await store.save();
+    const onDisk = (await io.read()) as unknown;
+    expect(JSON.stringify(onDisk)).not.toContain("glpat-SECRET");
+  });
+
+  it("migrates a pre-existing plaintext token out of data.json, idempotently", async () => {
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [{ id: "c1", label: "work", kind: "gitlab", token: "glpat-OLD" }],
+      mappings: [], lastSync: {}, conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [], staging: {}, security: { encryptCredentials: false },
+    });
+    const secrets = new MemorySecretStore();
+    const store = new MugsStore(io, secrets);
+    await store.load();
+
+    expect(await store.migrateTokensToSecretStorage()).toBe(1);
+    expect(store.getToken("c1")).toBe("glpat-OLD");
+    expect(secrets.get(secretIdFor("c1"))).toBe("glpat-OLD");
+    expect(store.getSettings().credentials[0].token).toBe("");
+    // Idempotent: a second pass has nothing left to move.
+    expect(await store.migrateTokensToSecretStorage()).toBe(0);
+
+    await store.save();
+    expect(JSON.stringify(await io.read())).not.toContain("glpat-OLD");
+  });
+
+  it("reloads a keychain-backed credential from a fresh store", async () => {
+    const io = new MemoryIO(null);
+    const secrets = new MemorySecretStore();
+    const store = new MugsStore(io, secrets);
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-KEYCHAIN" });
+    await store.save();
+
+    const reloaded = new MugsStore(io, secrets);
+    await reloaded.load();
+    expect(reloaded.getToken("c1")).toBe("glpat-KEYCHAIN");
+  });
+
+  it("falls back to data.json when the host has no secret storage (older Obsidian)", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io); // no SecretStore
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-PLAIN" });
+    expect(store.getSettings().credentials[0].token).toBe("glpat-PLAIN");
+    expect(store.getSettings().credentials[0].secretId).toBeUndefined();
+    expect(await store.migrateTokensToSecretStorage()).toBe(0);
   });
 });

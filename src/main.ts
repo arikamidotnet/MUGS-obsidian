@@ -9,7 +9,7 @@
  */
 import { Plugin, Notice } from "obsidian";
 import { rmSync } from "node:fs";
-import { MugsStore, type SaveResult } from "./store";
+import { MugsStore, type SaveResult, type SecretStore } from "./store";
 import { MugsSettingTab } from "./settingsTab";
 import { MapView } from "./ui/mapView";
 import { DiffView } from "./ui/diffView";
@@ -121,12 +121,22 @@ export default class MugsPlugin extends Plugin {
   async onload(): Promise<void> {
     this.unloaded = false;
     // In Obsidian, IO is backed by loadData/saveData; MemoryIO covers tests.
+    // Tokens live in Obsidian's SecretStorage (the OS keychain) when the build
+    // provides it, so data.json holds no plaintext secret.
     this.store = new MugsStore({
       read: () => this.loadData(),
       write: (data) => this.saveData(data as unknown),
-    });
+    }, this.secretStore());
 
     await this.store.load();
+    // One-shot, idempotent: move any stored tokens into the OS keychain. Only
+    // persists once the keychain write succeeded (the store guarantees that).
+    if (!this.store.loadError && await this.store.migrateTokensToSecretStorage() > 0) {
+      const migrated = await this.store.save();
+      if (!migrated.ok) {
+        new Notice("MUGS: could not persist the move of account tokens to the system keychain — they remain readable this session; retry on the next start.", 10000);
+      }
+    }
     if (this.store.loadError) {
       // Corrupt/unreadable data.json: the store refuses to save (it will not be
       // overwritten with fresh defaults). Sync is disabled until the file is fixed
@@ -301,7 +311,7 @@ export default class MugsPlugin extends Plugin {
 
     this.addCommand({
       id: "show-diff",
-      name: "Show changes",
+      name: "Show diff",
       callback: () => void this.openView("mugs-diff"),
     });
 
@@ -317,6 +327,23 @@ export default class MugsPlugin extends Plugin {
       callback: () => void this.openView(MUGS_RECONCILIATION_VIEW_TYPE),
     });
 
+  }
+
+  /** Obsidian's SecretStorage (1.11.4+) as a MUGS {@link SecretStore} seam.
+   *  Returns undefined on builds without it, where tokens fall back to the
+   *  existing (optionally passphrase-encrypted) data.json storage. */
+  private secretStore(): SecretStore | undefined {
+    const ss = (this.app as unknown as {
+      secretStorage?: { getSecret?(id: string): string | null; setSecret?(id: string, value: string): void };
+    }).secretStorage;
+    if (!ss || typeof ss.getSecret !== "function" || typeof ss.setSecret !== "function") return undefined;
+    const get = ss.getSecret.bind(ss);
+    const set = ss.setSecret.bind(ss);
+    return {
+      available: () => true,
+      get: (id) => { try { return get(id) ?? null; } catch { return null; } },
+      set: (id, value) => { set(id, value); },
+    };
   }
 
   private openSettings(): void {

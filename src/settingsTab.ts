@@ -11,7 +11,8 @@ import type MugsPlugin from "./main";
 import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, FolderMapping, SyncStatus, MugsSettings } from "./types";
 import type { KdfParams } from "./schema";
 import type { RepoSummary } from "./providers/types";
-import { buildProvider, defaultBaseUrl } from "./providers/factory";
+import { buildProvider, PROVIDER_OPTIONS, providerOption, prefillBaseUrl } from "./providers/factory";
+import { validateBaseUrl, validateCredentialForm, type FieldProblem } from "./providers/validate";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
@@ -93,6 +94,12 @@ export class MugsSettingTab extends PluginSettingTab {
    *  rebuilds text inputs and steals focus/caret position. */
   private unsavedBannerEl: HTMLElement | null = null;
 
+  /** Banner text node showing the pending-change count. */
+  private unsavedNoteEl: HTMLElement | null = null;
+
+  /** Banner container listing validation problems (each clickable to jump to it). */
+  private unsavedProblemsEl: HTMLElement | null = null;
+
   /** The settings snapshot edits render from and mutate: the DRAFT (never the live store). */
   private view(): MugsSettings {
     if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
@@ -111,10 +118,13 @@ export class MugsSettingTab extends PluginSettingTab {
     if (this.unsavedBannerEl) return;
     const el = this.containerEl.createDiv({ cls: "mugs-unsaved-banner" });
     el.style.display = "none"; // hidden until there are unsaved changes
-    el.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved settings" });
-    const applyBtn = el.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
+    const text = el.createDiv({ cls: "mugs-unsaved-text" });
+    this.unsavedNoteEl = text.createEl("span", { cls: "mugs-unsaved-note", text: "Unsaved settings" });
+    this.unsavedProblemsEl = el.createDiv({ cls: "mugs-banner-problems" });
+    const actions = el.createDiv({ cls: "mugs-unsaved-actions" });
+    const applyBtn = actions.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
     applyBtn.addEventListener("click", () => void this.applySettings());
-    const cancelBtn = el.createEl("button", { cls: "mugs-unsaved-cancel", text: "Cancel" });
+    const cancelBtn = actions.createEl("button", { cls: "mugs-unsaved-cancel", text: "Cancel" });
     cancelBtn.addEventListener("click", () => this.cancelSettings());
     this.unsavedBannerEl = el;
   }
@@ -126,6 +136,65 @@ export class MugsSettingTab extends PluginSettingTab {
     this.unsavedChanges = true;
     if (!this.unsavedBannerEl) this.ensureUnsavedBanner();
     if (this.unsavedBannerEl) this.unsavedBannerEl.style.display = "";
+    this.refreshBanner();
+  }
+
+  /** Update the banner's pending-change count and problem list in place (no
+   *  form rebuild), so the count is honest and problems are one click away. */
+  private refreshBanner(): void {
+    if (!this.unsavedChanges) return;
+    const count = this.draft?.changeCount() ?? 0;
+    if (this.unsavedNoteEl) {
+      this.unsavedNoteEl.textContent = count === 1 ? "1 unsaved change" : `${count} unsaved changes`;
+    }
+    const problemsEl = this.unsavedProblemsEl;
+    if (!problemsEl) return;
+    problemsEl.empty();
+    const problems = this.draft?.validateDetailed() ?? [];
+    if (problems.length === 0) return;
+    problemsEl.createEl("div", {
+      cls: "mugs-banner-problems-head",
+      text: problems.length === 1 ? "1 thing to fix before applying:" : `${problems.length} things to fix before applying:`,
+    });
+    for (const p of problems.slice(0, 5)) {
+      const link = problemsEl.createEl("button", { cls: "mugs-problem-link", text: p.message });
+      link.setAttribute("type", "button");
+      link.addEventListener("click", () => this.jumpToProblem(p.ref));
+    }
+    if (problems.length > 5) {
+      problemsEl.createEl("div", { cls: "mugs-banner-problems-more", text: `…and ${problems.length - 5} more` });
+    }
+  }
+
+  /** Expand the section holding a draft item and scroll it into view. */
+  private jumpToProblem(ref?: { kind: "credential" | "mapping"; id: string }): void {
+    if (!ref) return;
+    const target = this.containerEl.querySelector(`[data-mugs-ref="${ref.kind}:${ref.id}"]`) as HTMLElement | null;
+    if (!target) return;
+    this.expandSection(target);
+    (target as unknown as { scrollIntoView?: (opts?: unknown) => void }).scrollIntoView?.({ block: "center" });
+  }
+
+  /** Walk up to the enclosing collapsible section and open it. */
+  private expandSection(el: HTMLElement): void {
+    let cur = el as unknown as {
+      classList?: { contains(cls: string): boolean; remove(cls: string): void };
+      querySelector?: (sel: string) => HTMLElement | null;
+      parentElement?: unknown;
+      parent?: unknown;
+    } | null;
+    while (cur) {
+      if (cur.classList?.contains("mugs-section")) {
+        if (cur.classList.contains("is-collapsed")) {
+          cur.classList.remove("is-collapsed");
+          const chevron = cur.querySelector?.(".mugs-section-chevron");
+          if (chevron) chevron.textContent = "▾";
+          cur.querySelector?.(".mugs-section-header")?.setAttribute("aria-expanded", "true");
+        }
+        return;
+      }
+      cur = (cur.parentElement ?? cur.parent) as typeof cur;
+    }
   }
 
   /** U04 Apply: validate the COMPLETE draft, then commit + persist ONCE.
@@ -148,6 +217,8 @@ export class MugsSettingTab extends PluginSettingTab {
     const outcome = await this.draft.commit(target);
     if (outcome.kind === "invalid") {
       new Notice(`MUGS: settings not applied — fix these first:\n· ${outcome.problems.slice(0, 5).join("\n· ")}${outcome.problems.length > 5 ? `\n… and ${outcome.problems.length - 5} more` : ""}`, 10000);
+      this.refreshBanner();
+      this.jumpToProblem(this.draft.validateDetailed()[0]?.ref);
       return;
     }
     if (outcome.kind === "save-failed") {
@@ -191,22 +262,11 @@ export class MugsSettingTab extends PluginSettingTab {
     // --- Getting Started (startup documentation) ----------------------------
     this.gettingStarted(containerEl);
 
-    this.section(containerEl, "Connected folders", (card) => {
-      card.createEl("p", { cls: "mugs-desc", text: "Manage the folders connected to this vault." });
-      const mappings = this.view().mappings;
-      if (mappings.length) this.renderMappings(card, mappings);
-      else card.createEl("p", { cls: "mugs-muted", text: "No folders connected." });
-      const add = card.createEl("details", { cls: "mugs-settings-add" });
-      add.open = mappings.length === 0;
-      add.createEl("summary", { text: "Connect another folder" });
-      void this.addMappingForm(add.createDiv({ cls: "mugs-settings-form" }));
-    });
-
     // --- Credentials / providers -------------------------------------------
     this.section(containerEl, "Accounts", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
-        text: "Connect your Git account. Tokens stay in this vault and can be encrypted.",
+        text: "Connect your Git account. The API endpoint is filled in for you. Tokens stay in this vault and can be encrypted.",
       });
 
       // Draft view: tokens are masked HERE at render time only (the draft carries
@@ -216,10 +276,13 @@ export class MugsSettingTab extends PluginSettingTab {
         card.createEl("p", { cls: "mugs-muted", text: "No accounts connected." });
       } else {
         for (const c of creds) {
+          // Tag the row so a banner problem can jump to it (data-mugs-ref).
+          const row = card.createDiv({ cls: "mugs-credential" });
+          row.setAttribute("data-mugs-ref", `credential:${c.id}`);
           const descParts = [`token: ${maskToken(c.token)}`];
           if (c.username) descParts.push(`user: ${c.username}`);
           if (c.baseUrl) descParts.push(`url: ${c.baseUrl}`);
-          new Setting(card)
+          new Setting(row)
             .setName(`${c.label} (${c.kind})`)
             .setDesc(descParts.join(" · "))
             .addButton((b) =>
@@ -235,6 +298,17 @@ export class MugsSettingTab extends PluginSettingTab {
       add.open = creds.length === 0;
       add.createEl("summary", { text: "Add another account" });
       this.addCredentialForm(add.createDiv({ cls: "mugs-settings-form" }));
+    });
+
+    this.section(containerEl, "Connected folders", (card) => {
+      card.createEl("p", { cls: "mugs-desc", text: "Manage the folders connected to this vault." });
+      const mappings = this.view().mappings;
+      if (mappings.length) this.renderMappings(card, mappings);
+      else card.createEl("p", { cls: "mugs-muted", text: "No folders connected." });
+      const add = card.createEl("details", { cls: "mugs-settings-add" });
+      add.open = mappings.length === 0;
+      add.createEl("summary", { text: "Connect another folder" });
+      void this.addMappingForm(add.createDiv({ cls: "mugs-settings-form" }));
     });
 
     // --- Security -----------------------------------------------------------
@@ -484,14 +558,13 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     const steps = card.createEl("ol", { cls: "mugs-gs-steps" });
-    steps.createEl("li", { text: "Add your account and access token under Accounts." });
+    steps.createEl("li", { text: "Add your account under Accounts — the API endpoint is filled in for you, and Test connection checks it." });
     steps.createEl("li", { text: "Connect folders and choose Both ways, Upload only, or Download only." });
-    steps.createEl("li", { text: "Apply settings, then review the mapping and your backup. A first connection starts paused; resume automatic sync under Sync when ready. Sync now can run while paused." });
-    steps.createEl("li", { text: "Open MUGS Overview to check folder status, view Changes, or Review files that need a decision." });
+    steps.createEl("li", { text: "Click Apply settings, review the connection, then resume automatic sync under Sync when ready." });
 
     card.createDiv({
       cls: "mugs-note",
-      text: "Back up your vault and plugin settings before first sync. Git history and MUGS recovery backups help recover changes, but don't replace a backup.",
+      text: "Back up your vault and plugin settings before first sync. A first connection starts paused so nothing runs unattended until you review it.",
     });
   }
 
@@ -547,6 +620,8 @@ export class MugsSettingTab extends PluginSettingTab {
     const activeLastSync = this.plugin.store.getSettings().lastSync; // status dots read ACTIVE state, not the draft
     for (const m of mappings) {
       const block = card.createDiv({ cls: "mugs-mapping" });
+      // Tag the card so a banner problem can jump to it (data-mugs-ref).
+      block.setAttribute("data-mugs-ref", `mapping:${m.id}`);
 
       // Header row: status dot + label + delete button. Rendered manually so the
       // sync-status dot sits beside the name (native Setting has no leading icon slot).
@@ -703,48 +778,74 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     addWrap.appendChild(addBtn);
   }
 
-  /** Add-credential form using native Obsidian Setting rows (dropdown/text/password/textarea). */
+  /** Add-account form using native Obsidian Setting rows. The provider choice
+   *  fills in the API endpoint automatically, values are checked inline as they
+   *  are typed, and an explicit "Test connection" probe can verify the account
+   *  before it is added. */
   private addCredentialForm(card: HTMLElement): void {
-    let kind: Credential["kind"] = "gitlab";
+    let kind: Credential["kind"] = PROVIDER_OPTIONS[0]?.kind ?? "gitlab";
     let label = "";
     let username = "";
     let token = "";
-    let baseUrl = "";
+    let baseUrl = prefillBaseUrl(kind);
     let repos: string[] = [];
+    /** True once the user pressed "Add account" — required-field errors show only then. */
+    let attempted = false;
     let baseUrlInputEl: HTMLInputElement | null = null;
+
+    // Inline problem list + test-connection status, updated in place so typing
+    // never rebuilds the form inputs (which would steal focus/caret).
+    const messagesEl = card.createDiv({ cls: "mugs-form-messages" });
+    const testStatusEl = card.createDiv({ cls: "mugs-test-status" });
+
+    const currentProblems = (): FieldProblem[] =>
+      validateCredentialForm({ kind, label, token, baseUrl, repos });
+
+    const refreshValidation = (): void => {
+      messagesEl.empty();
+      for (const p of currentProblems()) {
+        if (p.kind === "required" && !attempted) continue; // don't nag before submit
+        messagesEl.createEl("div", {
+          cls: p.level === "error" ? "mugs-field-error" : "mugs-field-warn",
+          text: p.message,
+        });
+      }
+    };
 
     const setBaseUrlField = (value: string): void => {
       baseUrl = value;
       if (baseUrlInputEl) baseUrlInputEl.value = value;
     };
-    const prefilledBaseUrl = (k: Credential["kind"]): string =>
-      k === "local" ? "" : defaultBaseUrl(k);
 
     new Setting(card)
       .setName("Provider")
-      .setDesc("Where your repositories are hosted.")
+      .setDesc("Where your repositories are hosted. The API endpoint is filled in for you.")
       .addDropdown((d) => {
-        for (const [value, text] of [
-          ["gitlab", "GitLab"],
-          ["github", "GitHub"],
-          ["bitbucket", "Bitbucket"],
-          ["gitea", "Gitea / Forgejo"],
-          ["local", "Local (existing clone)"],
-        ] as const) {
-          d.addOption(value, text);
-        }
+        for (const option of PROVIDER_OPTIONS) d.addOption(option.kind, option.label);
         d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
-          setBaseUrlField(prefilledBaseUrl(kind));
+          setBaseUrlField(prefillBaseUrl(kind));
+          testStatusEl.empty();
           // No markUnsaved: nothing is stored yet — the old call showed the
           // "Unsaved changes" banner on a form the user had not filled in.
+          refreshValidation();
         });
+      });
+
+    new Setting(card)
+      .setName("Base URL")
+      .setDesc("API endpoint, filled in for the provider. Change it only for a self-hosted instance.")
+      .addText((t) => {
+        baseUrlInputEl = t.inputEl;
+        t.setPlaceholder(providerOption(kind)?.endpointHint ?? "");
+        t.setValue(baseUrl);
+        t.onChange((v) => { baseUrl = v.trim(); refreshValidation(); });
       });
 
     new Setting(card)
       .setName("Label")
       .setDesc("A name for this account.")
-      .addText((t) => t.setPlaceholder("Label").onChange((v) => { label = v.trim(); }));
+      .addText((t) => t.setPlaceholder("Label").onChange((v) => { label = v.trim(); refreshValidation(); }));
 
     new Setting(card)
       .setName("Username")
@@ -756,29 +857,72 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       .setDesc("Hosted account: API token. Local repository: leave empty.")
       .addText((t) => {
         t.setPlaceholder("Token").inputEl.type = "password";
-        t.onChange((v) => { token = v; });
-      });
-
-    new Setting(card)
-      .setName("Base URL")
-      .setDesc("Hosted account: API base URL. Local repository: file:///absolute/path/to/repo.git.")
-      .addText((t) => {
-        baseUrlInputEl = t.inputEl;
-        t.setPlaceholder("API URL or file:///absolute/path/to/repo.git").onChange((v) => { baseUrl = v.trim(); });
+        t.onChange((v) => { token = v; refreshValidation(); });
       });
 
     new Setting(card)
       .setName("Allowed repositories")
       .setDesc("Optional owner/repo per line to restrict which repos this credential may access.")
-      .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); }));
+      .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); refreshValidation(); }));
+
+    /** Explicit, opt-in live probe: build the provider from the in-form values and
+     *  list repos, so the user finds out now whether the account works. */
+    const testConnection = async (): Promise<void> => {
+      testStatusEl.empty();
+      if (kind === "local") {
+        const p = validateBaseUrl("local", baseUrl);
+        testStatusEl.createEl("div", {
+          cls: p ? "mugs-field-error" : "mugs-test-ok",
+          text: p ? p.message : "Local path looks valid — MUGS will use this existing clone.",
+        });
+        return;
+      }
+      if (!baseUrl) {
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: "Enter your instance's API endpoint first." });
+        return;
+      }
+      if (!token) {
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: "Enter a token to test the connection." });
+        return;
+      }
+      testStatusEl.createEl("div", { cls: "mugs-field-hint", text: "Testing…" });
+      try {
+        const provider = buildProvider(
+          { kind, baseUrl, token, allowedRepos: repos.length ? repos : undefined },
+          { actingUsername: username || undefined },
+        );
+        const list = await provider.listRepos();
+        testStatusEl.empty();
+        if (list.length === 0) {
+          testStatusEl.createEl("div", {
+            cls: "mugs-field-warn",
+            text: "Connected, but this token sees no repositories. Check its scope or the Allowed repositories list.",
+          });
+        } else {
+          testStatusEl.createEl("div", {
+            cls: "mugs-test-ok",
+            text: `Connected — ${list.length} repositor${list.length === 1 ? "y" : "ies"} visible.`,
+          });
+        }
+      } catch (e) {
+        testStatusEl.empty();
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: `Could not connect — ${errorMessage(e)}` });
+      }
+    };
 
     card.appendChild(this.actions([
+      { text: "Test connection", onClick: () => void testConnection() },
       {
         text: "Add account",
         cta: true,
-        onClick: async () => {
-          if (!label) { new Notice("MUGS: enter a label for the credential."); return; }
-          if (!token && kind !== "local") { new Notice("MUGS: enter a token."); return; }
+        onClick: () => {
+          attempted = true;
+          refreshValidation();
+          const errors = currentProblems().filter((p) => p.level === "error");
+          if (errors.length > 0) {
+            new Notice(`MUGS: fix these before adding the account:\n· ${errors.slice(0, 4).map((p) => p.message).join("\n· ")}`, 10000);
+            return;
+          }
           try {
             this.edit((d) => d.upsertCredential({
               id: newId(),
@@ -797,6 +941,8 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         },
       },
     ]));
+
+    refreshValidation();
   }
   /** Staged assistant for adding mappings: pick a credential → pick (or sync) a repo →
    *  check the matched top-level folders to link. Each checked folder becomes its own

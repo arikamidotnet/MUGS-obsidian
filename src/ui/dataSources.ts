@@ -16,6 +16,8 @@ export interface MapRow {
   status: SyncStatus;
   /** Owning user (recent git author) when the clone is available. */
   owner?: string;
+  /** Who produced the mapping's most recent push (credential username/agent). */
+  lastPushBy?: { name: string; email?: string };
   /** Most recent push time (ms epoch), if known. */
   lastPushAt?: number;
   /** Most recent pull time (ms epoch), if known. */

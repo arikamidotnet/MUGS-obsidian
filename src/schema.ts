@@ -86,12 +86,17 @@ export const credentialSchema = z.object({
   label: z.string().min(1),
   kind: providerKindSchema,
   username: z.string().optional(),
+  /** The token value. Empty when the secret lives in the OS keychain (secretId). */
   token: z.string(),
+  /** SecretStorage id holding the token (Obsidian 1.11.4+); when set, the value
+   *  is never persisted in data.json. */
+  secretId: z.string().optional(),
   baseUrl: z.string().url().optional(),
   /** Explicit allowed repos; when set, MUGS skips global enumeration. */
   repos: z.array(repoPathSchema).optional(),
 }).superRefine((credential, ctx) => {
-  if (credential.kind !== "local" && !credential.token) {
+  // A hosted account needs a token — either inline or referenced via the keychain.
+  if (credential.kind !== "local" && !credential.token && !credential.secretId) {
     ctx.addIssue({ code: "custom", path: ["token"], message: "A hosted Git account needs a token" });
   }
 });
@@ -133,6 +138,9 @@ export const lastSyncStateSchema = z.object({
   mappingId: z.string().min(1),
   lastPushAt: z.number().int().positive().optional(),
   lastPullAt: z.number().int().positive().optional(),
+  /** Acting identity of the mapping's most recent push (credential username or
+   *  pinned agent) — UI attribution only, never a secret. */
+  lastPushBy: z.object({ name: z.string().min(1), email: z.string().optional() }).optional(),
   lastLocalSha: z.string().optional(),
   lastRemoteSha: z.string().optional(),
   baseSha: z.string().optional(),
