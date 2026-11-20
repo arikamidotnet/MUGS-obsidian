@@ -2,6 +2,17 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.22 highlights
+
+- **Settings tab always reflects the live backend.** The settings pane kept a
+  draft snapshot of the store; if the tab was opened, closed without applying,
+  and the backend changed in the meantime (e.g. a mapping's direction flipped
+  by another surface), re-opening showed the stale snapshot. `display()` now
+  re-snapshots from the live store on every open unless the user has in-progress
+  (dirty) edits, which are preserved. The UI now follows the backend config.
+  - Unchanged: the sync engine, the draft/Apply model, and the "never steal a
+    live owner" lock contract.
+
 ## 0.4.21 highlights
 
 - **Stale clone-lock recovery (liveness fix).** If Obsidian is killed, crashes,

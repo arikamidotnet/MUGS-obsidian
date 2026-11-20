@@ -80,6 +80,14 @@ export class MugsSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    // Re-snapshot from the live store on every open UNLESS the user has
+    // in-progress (dirty) edits, which must be preserved. A clean or absent
+    // draft is stale after any external change to the store (e.g. a mapping's
+    // direction flipped by another surface), so rebuild it to keep the UI in
+    // sync with the backend. A dirty draft is left alone: the user is mid-edit,
+    // and yanking the base out from under them would lose their work — the
+    // existing Apply/Cancel flow owns that case.
+    if (this.draft && !this.draft.dirty()) this.draft = null;
     this._renderAll();
   }
 
