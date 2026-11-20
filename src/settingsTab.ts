@@ -58,6 +58,9 @@ function maskToken(token: string): string {
   return `••••${token.slice(-4)}`;
 }
 
+/** Debounce for auto-applying settings after the last edit (ms). */
+const AUTO_APPLY_MS = 700;
+
 export class MugsSettingTab extends PluginSettingTab {
   constructor(private plugin: MugsPlugin) {
     super(plugin.app, plugin);
@@ -100,17 +103,32 @@ export class MugsSettingTab extends PluginSettingTab {
   /** Banner container listing validation problems (each clickable to jump to it). */
   private unsavedProblemsEl: HTMLElement | null = null;
 
+  /** Pending debounced auto-apply timer (settings save without an explicit click). */
+  private autoApplyTimer?: ReturnType<typeof setTimeout>;
+
   /** The settings snapshot edits render from and mutate: the DRAFT (never the live store). */
   private view(): MugsSettings {
     if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
     return this.draft.view();
   }
 
-  /** Apply an edit to the draft and flag the unsaved banner. */
+  /** Apply an edit to the draft, flag the banner, and schedule a debounced
+   *  auto-apply so settings save without the user pressing Apply. */
   private edit(mutate: (d: SettingsDraft) => void): void {
     if (!this.draft) this.draft = new SettingsDraft(this.plugin.store.getSettings());
     mutate(this.draft);
     this.markUnsaved();
+    this.scheduleAutoApply();
+  }
+
+  /** Debounced auto-apply: commit + persist shortly after the last edit. The
+   *  banner still surfaces any problem and stays until it is fixed or cancelled. */
+  private scheduleAutoApply(): void {
+    if (this.autoApplyTimer !== undefined) clearTimeout(this.autoApplyTimer);
+    this.autoApplyTimer = setTimeout(() => {
+      this.autoApplyTimer = undefined;
+      void this.applySettings();
+    }, AUTO_APPLY_MS);
   }
 
   /** Create the single unsaved-changes banner if it does not yet exist. */
@@ -123,7 +141,7 @@ export class MugsSettingTab extends PluginSettingTab {
     this.unsavedProblemsEl = el.createDiv({ cls: "mugs-banner-problems" });
     const actions = el.createDiv({ cls: "mugs-unsaved-actions" });
     const applyBtn = actions.createEl("button", { cls: "mugs-unsaved-apply", text: "Apply settings" });
-    applyBtn.addEventListener("click", () => void this.applySettings());
+    applyBtn.addEventListener("click", () => void this.applySettings({ explicit: true }));
     const cancelBtn = actions.createEl("button", { cls: "mugs-unsaved-cancel", text: "Cancel" });
     cancelBtn.addEventListener("click", () => this.cancelSettings());
     this.unsavedBannerEl = el;
@@ -197,12 +215,16 @@ export class MugsSettingTab extends PluginSettingTab {
     }
   }
 
-  /** U04 Apply: validate the COMPLETE draft, then commit + persist ONCE.
-   *  Validation problems are listed and NOTHING is activated. A refused/failed
-   *  save rolls the store back to the pre-apply state (active settings intact)
-   *  and the banner stays so the user can retry or cancel. */
-  private async applySettings(): Promise<void> {
-    if (!this.draft) return;
+  /** Validate the COMPLETE draft, then commit + persist ONCE. Runs both from the
+   *  debounced auto-apply (silent) and the explicit Apply button (Notices +
+   *  re-render). Validation problems leave the draft untouched and the banner
+   *  lists them; a refused save rolls the store back and keeps the draft. */
+  private async applySettings(opts: { explicit?: boolean } = {}): Promise<void> {
+    if (this.autoApplyTimer !== undefined) { clearTimeout(this.autoApplyTimer); this.autoApplyTimer = undefined; }
+    const draft = this.draft;
+    if (!draft) return;
+    // Resume/apply the scheduler immediately only when the sync policy changed.
+    const syncChanged = JSON.stringify(draft.base.sync) !== JSON.stringify(draft.view().sync);
     const target: SettingsDraftTarget = {
       getSettings: () => this.plugin.store.getSettings(),
       upsertCredential: (c) => this.plugin.store.upsertCredential(c),
@@ -214,11 +236,15 @@ export class MugsSettingTab extends PluginSettingTab {
       setObsidianConfig: (c) => this.plugin.store.setObsidianConfig(c),
       save: async () => (await this.plugin.store.save()) ?? { ok: true },
     };
-    const outcome = await this.draft.commit(target);
+    const outcome = await draft.commit(target);
     if (outcome.kind === "invalid") {
-      new Notice(`MUGS: settings not applied — fix these first:\n· ${outcome.problems.slice(0, 5).join("\n· ")}${outcome.problems.length > 5 ? `\n… and ${outcome.problems.length - 5} more` : ""}`, 10000);
+      // Auto-apply stays quiet (the banner lists the problems); an explicit Apply
+      // also raises a Notice and jumps to the first problem.
+      if (opts.explicit) {
+        new Notice(`MUGS: settings not applied — fix these first:\n· ${outcome.problems.slice(0, 5).join("\n· ")}${outcome.problems.length > 5 ? `\n… and ${outcome.problems.length - 5} more` : ""}`, 10000);
+        this.jumpToProblem(draft.validateDetailed()[0]?.ref);
+      }
       this.refreshBanner();
-      this.jumpToProblem(this.draft.validateDetailed()[0]?.ref);
       return;
     }
     if (outcome.kind === "save-failed") {
@@ -228,26 +254,29 @@ export class MugsSettingTab extends PluginSettingTab {
     }
     this.draft = null;
     this.unsavedChanges = false;
-    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
-    new Notice("MUGS: settings saved and now active.");
-    this.plugin.automaticSyncSettingsChanged();
-    this._renderAll();
+    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; this.unsavedNoteEl = null; this.unsavedProblemsEl = null; }
+    if (syncChanged) this.plugin.automaticSyncSettingsChanged();
+    if (opts.explicit) {
+      new Notice("MUGS: settings saved and now active.");
+      this._renderAll();
+    }
   }
 
-  /** U04 Cancel: discard the draft entirely — active settings never changed. */
+  /** Discard the draft entirely — active settings never changed. */
   private cancelSettings(): void {
+    if (this.autoApplyTimer !== undefined) { clearTimeout(this.autoApplyTimer); this.autoApplyTimer = undefined; }
     this.draft = null;
     this.unsavedChanges = false;
-    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; }
+    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; this.unsavedNoteEl = null; this.unsavedProblemsEl = null; }
     new Notice("MUGS: changes discarded — active settings unchanged.");
     this._renderAll();
   }
 
   hide(): void {
-    // Draft model: leaving the tab with an unapplied draft is the moment a
-    // teammate loses work — say so instead of letting the changes silently expire.
+    // Auto-apply saves shortly after each edit; only a draft that failed
+    // validation (or a save) is still pending when the tab closes.
     if (this.unsavedChanges) {
-      new Notice("MUGS: settings changed but not applied — reopen MUGS settings and click Apply (or Cancel) to finish.", 6000);
+      new Notice("MUGS: some settings still need attention — reopen MUGS settings to fix the listed problems.", 6000);
     }
   }
 
@@ -784,7 +813,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
    *  before it is added. */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = PROVIDER_OPTIONS[0]?.kind ?? "gitlab";
-    let label = "";
+    let label = providerOption(kind)?.label ?? kind; // auto-filled; editable
+    let labelTouched = false;
+    let labelInputEl: HTMLInputElement | null = null;
     let username = "";
     let token = "";
     let baseUrl = prefillBaseUrl(kind);
@@ -816,6 +847,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       baseUrl = value;
       if (baseUrlInputEl) baseUrlInputEl.value = value;
     };
+    /** The label defaults to the provider name until the user edits it. */
+    const setLabelField = (value: string): void => {
+      label = value;
+      if (labelInputEl) labelInputEl.value = value;
+    };
 
     new Setting(card)
       .setName("Provider")
@@ -825,6 +861,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
           setBaseUrlField(prefillBaseUrl(kind));
+          if (!labelTouched) setLabelField(providerOption(kind)?.label ?? kind);
           testStatusEl.empty();
           // No markUnsaved: nothing is stored yet — the old call showed the
           // "Unsaved changes" banner on a form the user had not filled in.
@@ -844,8 +881,12 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     new Setting(card)
       .setName("Label")
-      .setDesc("A name for this account.")
-      .addText((t) => t.setPlaceholder("Label").onChange((v) => { label = v.trim(); refreshValidation(); }));
+      .setDesc("A name for this account — filled in for you; edit if you like.")
+      .addText((t) => {
+        labelInputEl = t.inputEl;
+        t.setValue(label);
+        t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
+      });
 
     new Setting(card)
       .setName("Username")
@@ -1078,6 +1119,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         // Obsidian Config Sync section), and .trash is a whole-repo sub-option.
         const remoteDirs = detectedDirs.filter((d) => d !== ".obsidian" && d !== ".trash");
         matches = matchFolderPairs(remoteDirs, vaultTop);
+        // Minimum engagement: pre-select the single exact match when there is
+        // exactly one unambiguous, unclaimed folder pair — one fewer click, and
+        // the user still confirms with "Connect selected folders".
+        const freeExact = matches.filter((m) => !usedLocalFolders.has(m.localFolder));
+        if (freeExact.length === 1) selectedFolders.add(freeExact[0].remotePath);
         // Also compute fuzzy suggestions for near-misses (e.g., "Notes" → "My Notes").
         const fuzzy = matchFolderPairsFuzzy(remoteDirs, vaultTop).filter((m) => m.score < 1 && m.remotePath !== ".obsidian" && m.remotePath !== ".trash");
         fuzzyMatches = fuzzy.map((m) => ({ remotePath: m.remotePath, localFolder: m.localFolder, label: m.label, score: m.score }));
@@ -1236,12 +1282,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
               if (count === 0) { new Notice("MUGS: no selected folder still matches this repository — refresh and choose again."); return; }
               new Notice(`MUGS: ${count} folder${count === 1 ? "" : "s"} connected. Apply settings to save.`);
             }
-            // A fresh connection must not start an unattended first pass as a
-            // side effect of Apply. Existing connections keep their chosen pause
-            // state; only the first mapping gets this one-time safety gate.
-            if (this.plugin.store.getSettings().mappings.length === 0) {
-              this.edit((d) => d.setSync({ paused: true }));
-            }
             // Surface direction/first-sync consequences BEFORE activation.
             const consequence = direction === "pull-only"
               ? "Download only: repository files update this vault; your edits aren't uploaded."
@@ -1251,7 +1291,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             const first = this.view().sync.firstSyncDirection === "push"
               ? "first sync starts by UPLOADING this device's eligible text files; unknown repository files stay for Review."
               : "first sync starts by DOWNLOADING eligible repository text files; conflicts or unknown deletions need review.";
-            new Notice(`MUGS — what happens after Apply:\n· ${consequence}\n· ${first}${this.plugin.store.getSettings().mappings.length === 0 ? "\n· Automatic sync stays paused until you review the connection and resume it under Sync." : ""}`, 12000);
+            new Notice(`MUGS — what happens next:\n· ${consequence}\n· ${first}`, 12000);
             this._renderAll();
           } catch (e) {
             new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);

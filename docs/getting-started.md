@@ -81,13 +81,13 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    repository, branch and which top-level folder belongs to which person.
    If both sides already contain files, compare them **before** connecting.
 2. In **Settings → MUGS → Accounts → Add another account**, select GitLab or
-   GitHub. The **Base URL** (API endpoint) is filled in automatically for the
-   chosen provider — change it only for a self-hosted instance. Enter **Label**,
-   optional **Username** and **Token**. Values are checked as you type (a
+   GitHub. Everything possible is filled in for you: the **Base URL** (API
+   endpoint) and the **Label** are set from the provider. All you need is the
+   **Token** (and a **Username** if you like). Values are checked as you type (a
    malformed URL or repo path is flagged inline), and **Test connection** probes
    the account before you commit. For a repository-restricted token, enter the
    exact `owner/repo` or `group/project` under **Allowed repositories**, one per
-   line. Press **Add account**. This stages a draft; it does **not** save yet.
+   line. Press **Add account** — settings save automatically.
 3. Under **Connected folders → Connect another folder**, select your account
    and repository. MUGS suggests matches between **top-level repository
    directories** and **top-level vault folders**. Check the intended matching
@@ -100,17 +100,16 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    for the repository default, or name the intended *existing* branch. Review
    **Only sync matching files** and **Skip matching files**; empty filters mean
    all otherwise eligible files in the mapping. Press **Connect selected
-   folders**. The unsaved-settings banner counts your pending changes and lists
-   anything that must be fixed before applying; click a listed problem to jump to
-   it. When the list is clear, press **Apply settings**.
-5. A **first connection created with this candidate** automatically starts
-   **paused** after Apply. Check the route on the connected-folder card and
-   choose **Sync → Start new connections with**: **Download from repository**
-   (default) or **Upload from this device**. Both operate only within the
-   configured direction and scope; neither is an overwrite guarantee or a
-   substitute for a backup. Click **Apply settings** if you change it. When
-   ready, turn **Pause automatic sync** off and **Apply settings**. This
-   immediately checks for work; no routine **Sync now** click is needed.
+   folders**. Settings save automatically; the banner counts any pending changes
+   and lists anything that must be fixed, with each problem clickable to jump to
+   it.
+5. Sync starts on its own — no pause step, no routine **Sync now** click. Check
+   the route on the connected-folder card and, if you want, choose
+   **Sync → Start new connections with**: **Download from repository** (default)
+   or **Upload from this device**. Both operate only within the configured
+   direction and scope; neither is an overwrite guarantee or a substitute for a
+   backup. To stop automatic sync at any time, turn on **Pause automatic sync**
+   under Sync.
 
 Use **MUGS Overview** to inspect each folder, **Diff** for committed
 snapshots, **Review** for repository files that need a decision, and **Conflicts**
@@ -127,7 +126,7 @@ mapped folder, save and close it, and **do not** press Sync now. Wait for the
 background pass and confirm the same file and bytes appear in the intended
 remote folder and branch. Check Overview and Review for pending work. For
 **Both ways**, create a different test note in the remote folder and wait for
-the ordinary periodic check (default every 300 seconds, evaluated on a 15
+the ordinary periodic check (default every 30 seconds, evaluated on a 15
 second tick). **Upload only never downloads remote edits**; do not use it to
 test inbound sync. Do not conduct this exercise in a real team vault that has
 unresolved Review items or an unknown clone state.
@@ -150,8 +149,9 @@ conflicts can postpone completion; keep a separate backup and check status.
   to work around missing folder suggestions.
 - **403/404 or push rejected:** check token approval, repository role, branch
   protections/rulesets and that the target branch exists. See the host guide.
-- **Paused after setup:** first-time safety gate; inspect the mapping and
-  backup, then unpause under Sync and Apply. **Sync now** bypasses this pause.
+- **Not syncing:** check the status bar and Overview. Automatic sync runs by
+  default (near real-time); if **Pause automatic sync** is on, turn it off.
+  **Sync now** always works, even while paused.
 - **Needs review:** a teammate's newly added file is **pulled automatically**
   for Both ways / Download only; Review only lists genuinely ambiguous paths (a
   file this vault had proven and then lost while the remote changed). Inspect
@@ -171,7 +171,7 @@ plugin `data.json`. Secrets are **device-local** — they are not synced with th
 vault, so a second device must re-enter each token. On older builds, tokens
 fall back to `data.json`, where **encryption at rest is off by default**: in
 **Settings → MUGS → Security** you can set a passphrase and enable **Encrypt
-saved tokens**, then **Apply settings**; you must unlock tokens after every app
+saved tokens**; you must unlock tokens after every app
 start, and losing the passphrase requires re-entering tokens. This is **not
 vault-content end-to-end encryption**. Do
 not put tokens in a note, terminal argument, Git remote URL, screenshot or

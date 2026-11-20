@@ -31,8 +31,8 @@ already has content.
    and ask the repository owner for a supported access method rather than
    granting an unrestricted token by default.
 3. In **Settings → MUGS → Accounts → Add another account**, choose
-   **GitHub**, give it a **Label**, paste the token in **Token** and enter
-   your GitHub **Username**. **Base URL** is filled in automatically as
+   **GitHub**, paste the token in **Token** (the **Label** is filled in for you;
+   edit it if you like) and enter your GitHub **Username**. **Base URL** is filled in automatically as
    `https://api.github.com`; for GitHub Enterprise Server change it to your
    documented API base (normally
    `https://your-enterprise-host.example/api/v3`). Do not paste a browser
@@ -42,8 +42,8 @@ already has content.
    repository-scoped token discover precisely the repository without
    enumerating everything under `/user/repos`. This field affects the
    picker, **not** the token's actual GitHub permissions. Click
-   **Add account** and **Apply settings** (or stage the mapping and Apply
-   both at once). Do not paste your token into the Allowed repositories box.
+   **Add account** — settings save automatically, so you can go straight on to
+   connecting a folder. Do not paste your token into the Allowed repositories box.
 
 For a classic token when a fine-grained token is not supported, GitHub's
 `repo` scope grants *broad* private-repository access; use it only when
@@ -57,10 +57,9 @@ how to preserve their state.
 Under **Connected folders → Connect another folder**, select the GitHub
 account and repository, choose matching *top-level* folders, set direction
 and the existing branch (or leave blank for default), then press
-**Connect selected folders** and **Apply settings**. Set **Sync → Start new
-connections with** after comparing the two sides. A first mapping made
-with the current release stays paused until you inspect it and resume
-automatic sync. Confirm event-driven upload without
+**Connect selected folders**. Settings save automatically and sync starts on
+its own — no pause step. Set **Sync → Start new connections with** after
+comparing the two sides. Confirm event-driven upload without
 Sync now using a disposable file as in the [setup guide](getting-started.md#confirm-background-sync-then-leave-it-alone).
 
 If the repository is missing, confirm the token's resource owner, selected

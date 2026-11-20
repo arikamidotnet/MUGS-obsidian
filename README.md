@@ -16,8 +16,37 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.16.
+The latest verified publication when these instructions were written is 0.4.18.
 Back up the vault and plugin state before upgrading or making a first connection.
+
+## 0.4.18 highlights
+
+- **Minimum-engagement onboarding.** Settings save automatically (no Apply
+  click), a first connection no longer starts paused, the account **Label** is
+  filled in from the provider, and the connect-folder form pre-selects a single
+  unambiguous folder match. The default check-for-changes interval is now near
+  real-time (30 s).
+  - Unchanged: the sync engine's conflict/deletion guarantees and the Review
+    workflow behave exactly as in 0.4.17.
+
+## 0.4.17 highlights
+
+- **Settings onboarding simplified.** The add-account form fills in each
+  provider's API endpoint automatically, checks the base URL / repo paths inline
+  as you type, and offers an explicit **Test connection** probe; the
+  unsaved-changes banner shows how many changes are pending and lists any problem
+  you can click to jump to.
+- **A teammate's new file now syncs automatically** instead of landing in the
+  Review tab (only deletion races, unreadable/binary, and held paths stay
+  reviewable).
+- **Account tokens moved to the OS keychain.** On Obsidian 1.11.4+ tokens live in
+  the built-in SecretStorage and `data.json` keeps only a reference; existing
+  tokens migrate on load. Secrets are device-local, so a second device must
+  re-enter them. **Requires Obsidian 1.11.4+.**
+- **UI:** the *Changes* view is renamed **Diff**; avatars and a "pushed by"
+  attribution appear on the Overview and Diff.
+  - Unchanged: the sync engine's conflict/deletion guarantees and the Review
+    workflow behave exactly as in 0.4.16.
 
 ## 0.4.16 highlights
 
@@ -298,7 +327,7 @@ src/
   providers/          backend adapters: contract, GitLab v4, HTTP transport, schema + provider factory
   sync/               sync driver (syncAllMappings orchestration), clone manager (identity-keyed shared clones), and the merge contract: classifier, rebase policy, exclusion, merge/conflict, reconciliation (path-level ownership proof)
   runtime/            app-runtime transactions: manual conflict resolution, status reporting,
-                      bulk review, settings draft/Apply, clone locks, adapter path safety
+                      bulk review, settings auto-apply, clone locks, adapter path safety
   membership/         multi-user membership merge (roster + local activity -> summary)
   ui/                 Obsidian views (Overview, Diff, Review, Conflicts)
                       + pure models + data seams
@@ -347,18 +376,18 @@ Implemented features:
   Deletion propagation is per-path: a remote file may be deleted only if its
   path is blob-proven. (`src/sync/reconciliation.ts`, `src/ui/reconciliationReview.ts`)
 - **End-to-end sync.** A sync driver (`src/sync/driver.ts`) wires credentials → provider factory → repo → clone manager, driven from the ribbon icon, the *Run sync* command, and a gated scheduler. Manual runs report per-mapping synced / needs-merge / skipped Notices (plus first-sync completion); automatic runs report one aggregate. Recoverable stops — a dirty or unpushed legacy clone, a clone locked by another process — return a *blocked* outcome with a reason and are never auto-reset. (`src/providers/factory.ts`, `src/main.ts`)
-- **Settings controls.** Manage credentials and folder mappings, with explicit
-  Apply/Cancel drafts and validation of protected configuration scopes. The
-  add-account form fills in each provider's API endpoint automatically, checks
-  the base URL / repo paths inline as you type, and offers an explicit **Test
-  connection** probe; the unsaved-changes banner shows how many changes are
-  pending and lists any problem you can click to jump to.
+- **Settings controls.** Manage credentials and folder mappings; changes
+  validate and **save automatically** (a banner lists any problem, each clickable
+  to jump to it, and Cancel discards). The add-account form fills in each
+  provider's API endpoint **and label** automatically, checks the base URL / repo
+  paths inline as you type, and offers an explicit **Test connection** probe. A
+  first connection is **not** force-paused — it syncs as soon as it is saved.
 
 Also shipped: first-sync policy, identity-keyed clone sharing with exclusive
 cross-process clone locks, event-driven sync (file changes coalesce into a pass
 within ~1.5 s; renames count on both the old and new path, so moving a file out
 of a mapped folder still propagates the removal; a gated poll — presets
-3600 s / 300 s / 30 s, default 300 s, on a 15 s tick — covers remote drift), a
+3600 s / 300 s / 30 s, default 30 s, on a 15 s tick — covers remote drift), a
 clickable status bar, opt-in passphrase
 encryption, serialized settings saves, cancellation on plugin unload, and the
 repository-file Review tab (the user surface for reconciliation review rows,
@@ -563,14 +592,13 @@ never credentials.
 
 1. [Install and start safely](docs/getting-started.md), using the [GitLab](docs/gitlab.md)
    or [GitHub](docs/github.md) token walkthrough. **Desktop Obsidian only.**
-2. In Settings → MUGS → Accounts, add your own token (the API endpoint is
-   filled in for you; **Test connection** checks it), then in Connected folders
-   choose the repository, check the intended matched folders and select direction.
-   Press Connect selected folders and **Apply settings** — the banner counts
-   pending changes and lists anything to fix first. A *first* mapping
-   starts paused automatically; unpause only after reviewing the connection.
-3. Review the mapping, backup and Start new connections with setting; unpause and
-   Apply only when safe. Background sync then runs without a routine Sync now click.
+2. In Settings → MUGS → Accounts, add your own token (the API endpoint and label
+   are filled in for you; **Test connection** checks it), then in Connected
+   folders choose the repository, check the intended matched folders and select
+   direction. Press Connect selected folders — settings save automatically and
+   sync starts on its own; the banner lists anything to fix first.
+3. Background sync then runs without a routine Sync now click; review the mapping
+   and the Start new connections with setting when convenient.
    For a staged team rollout, see the [guided rollout checklist](docs/rollout.md).
 4. Watch the status bar: `⟳` while syncing (with live phase text), `✓ synced HH:MM`, `⚠ needs merge`,
 `✗ sync issues` / `✗ failed`, `⏸ paused`, `👁 hidden`. **Clicking it** opens the Conflicts panel when

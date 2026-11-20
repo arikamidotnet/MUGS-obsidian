@@ -30,8 +30,8 @@ empty Git directory does not exist in the repository tree.
    API **and** Git-over-HTTPS read/write permissions with the intended project
    before relying on it.
 3. In **Settings → MUGS → Accounts → Add another account**, select
-   **GitLab**, give it a recognizable **Label**, paste the token into
-   **Token** and optionally supply your GitLab **Username**. The token is not
+   **GitLab**, paste the token into **Token** (the **Label** is filled in for
+   you; edit it if you like) and optionally supply your GitLab **Username**. The token is not
    your GitLab login password. **Base URL** is filled in automatically as
    `https://gitlab.com/api/v4`; for a self-managed host change it to
    `https://your-gitlab-host.example/api/v4`. Do not enter a project page or a
@@ -41,9 +41,8 @@ empty Git directory does not exist in the repository tree.
    **Allowed repositories**, one per line. This limits MUGS's repository
    picker, **not** the host token's actual privileges. It is particularly
    useful for a token restricted to one project, where global project
-   enumeration may not work. Press **Add account** and **Apply settings**.
-   If you are also creating a mapping in the same settings session, you can
-   stage both and Apply once.
+   enumeration may not work. Press **Add account** — settings save automatically,
+   so you can go straight on to connecting a folder.
 
 GitLab personal tokens expire and must be rotated. Replacing a token in MUGS
 requires creating a new account and reconnecting its mappings if the current
@@ -56,9 +55,8 @@ with an existing multi-mapping vault. Do not edit `data.json` by hand.
 Under **Connected folders → Connect another folder**, select the GitLab
 account, pick the project, check only intended top-level matching folders,
 choose the direction and branch, and press **Connect selected folders**.
-Choose **Sync → Start new connections with** after comparing the two sides;
-Apply the settings. A new connection starts paused, so review the route and
-backups before resuming **Pause automatic sync**. Use a disposable note and
+Settings save automatically and sync starts on its own — no pause step. Choose
+**Sync → Start new connections with** after comparing the two sides. Use a disposable note and
 verify automatic upload as described in the
 [setup guide](getting-started.md#confirm-background-sync-then-leave-it-alone).
 

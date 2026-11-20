@@ -271,7 +271,7 @@ export const DEFAULT_SYNC_POLICY: SyncPolicy = {
   sameChangeAccept: true,
   recencyWins: true,
   paused: false,
-  intervalSeconds: 300,
+  intervalSeconds: 30,
   firstSyncDirection: "pull",
   obsidianConfig: {
     enabled: false,

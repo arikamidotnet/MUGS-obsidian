@@ -221,7 +221,7 @@ export const syncPolicySchema = z.object({
   sameChangeAccept: z.boolean().default(true),
   recencyWins: z.boolean().default(true),
   paused: z.boolean().default(false),
-  intervalSeconds: z.number().int().positive().default(300),
+  intervalSeconds: z.number().int().positive().default(30),
   /** Which side wins a mapping's first initialization; "pull" = remote populates
    *  the vault (historic default), "push" = vault uploads without downloading history. */
   firstSyncDirection: z.enum(["pull", "push"]).default("pull"),

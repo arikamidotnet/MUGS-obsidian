@@ -366,7 +366,7 @@ describe("deferred persistence", () => {
     expect(manage.attrs["aria-expanded"]).toBe("true");
     expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
   });
-  it("does not persist a setting change until Apply is clicked", async () => {
+  it("commits a setting change on the debounce (and immediately on Apply)", async () => {
     const plugin = makePlugin();
     let saveCalls = 0;
     plugin.store.save = vi.fn(async () => { saveCalls += 1; });
@@ -388,6 +388,25 @@ describe("deferred persistence", () => {
     tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
     await flush();
 
+    expect(saveCalls).toBe(1);
+    expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
+  });
+
+  it("auto-applies a setting change shortly after the last edit", async () => {
+    const plugin = makePlugin();
+    let saveCalls = 0;
+    plugin.store.save = vi.fn(async () => { saveCalls += 1; });
+
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    // A change is debounced, not saved instantly...
+    tab.containerEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    expect(saveCalls).toBe(0);
+
+    // ...but commits on its own without an Apply click.
+    await new Promise((r) => setTimeout(r, 900));
     expect(saveCalls).toBe(1);
     expect(tab.containerEl.querySelector(".mugs-unsaved-banner")).toBeFalsy();
   });
@@ -493,7 +512,7 @@ describe("add-mapping assistant", () => {
     expect(plugin.store.getSettings().mappings).toHaveLength(2);
   });
 
-  it("stages a first connection paused before Apply so no unattended initial pass begins", async () => {
+  it("starts a first connection syncing immediately (no forced pause)", async () => {
     const plugin = makePlugin();
     plugin.store.getSettings().mappings.splice(0);
     plugin.store.getSettings().credentials[0].kind = "gitlab";
@@ -517,11 +536,13 @@ describe("add-mapping assistant", () => {
       return undefined;
     };
     findButton(tab.containerEl, "Connect selected folders").handlers.click[0]();
-    expect((tab as any).view().sync.paused).toBe(true);
+    // Minimum engagement: the first connection is NOT force-paused, so it can sync
+    // as soon as the settings commit.
+    expect((tab as any).view().sync.paused).toBe(false);
     expect(plugin.store.getSettings().sync.paused).toBe(false);
     tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
     await flush();
-    expect(plugin.store.getSettings().sync.paused).toBe(true);
+    expect(plugin.store.getSettings().sync.paused).toBe(false);
     expect(plugin.store.getSettings().mappings).toHaveLength(1);
   });
 
@@ -588,15 +609,18 @@ describe("settings onboarding — endpoint autofill and inline validation", () =
     expect(findButton(tab.containerEl, "Test connection")).toBeTruthy();
   });
 
-  it("shows inline required-field errors when Add account is submitted empty", async () => {
+  it("auto-fills the account label and only requires a token on an empty submit", async () => {
     const tab = new MugsSettingTab(makePlugin());
     tab.display();
     await flush();
+    // The label defaults to the provider name, so the user only supplies a token.
+    const inputs = tab.containerEl.querySelectorAll('input[type="text"]') as unknown as Array<{ value: string }>;
+    expect(inputs.map((i) => i.value)).toContain("GitLab");
     const add = findButton(tab.containerEl, "Add account");
     expect(add).toBeTruthy();
     add.handlers.click[0]();
     const text = collectText(tab.containerEl);
-    expect(text).toContain("A label is required.");
+    expect(text).not.toContain("A label is required.");
     expect(text).toContain("A token is required for a hosted account.");
   });
 

@@ -25,7 +25,9 @@ describe("DEFAULT_SETTINGS — shape & defaults", () => {
     expect(s.sameChangeAccept).toBe(true);
     expect(s.recencyWins).toBe(true);
     expect(s.paused).toBe(false);
-    expect(s.intervalSeconds).toBe(300);
+    // Minimum-engagement default: near-real-time polling so remote edits appear
+    // without the user thinking about "Sync now".
+    expect(s.intervalSeconds).toBe(30);
   });
 
   it("defaults .obsidian/ config sync off with the documented entry bucket", () => {

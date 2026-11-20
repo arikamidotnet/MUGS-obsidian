@@ -18,17 +18,17 @@ describe("INTERVAL_PRESETS", () => {
     }
   });
 
-  it("defaults to balanced", () => {
-    expect(DEFAULT_PRESET_ID).toBe("balanced");
-    expect(DEFAULT_PRESET_SECONDS).toBe(300);
+  it("defaults to near real-time (minimum-engagement)", () => {
+    expect(DEFAULT_PRESET_ID).toBe("near-realtime");
+    expect(DEFAULT_PRESET_SECONDS).toBe(30);
   });
 });
 
 describe("resolveIntervalSeconds — preset id or raw seconds → clamped interval", () => {
   it("returns the default when input is missing/blank", () => {
-    expect(resolveIntervalSeconds(undefined)).toBe(300);
-    expect(resolveIntervalSeconds(null)).toBe(300);
-    expect(resolveIntervalSeconds("")).toBe(300);
+    expect(resolveIntervalSeconds(undefined)).toBe(30);
+    expect(resolveIntervalSeconds(null)).toBe(30);
+    expect(resolveIntervalSeconds("")).toBe(30);
   });
 
   it("resolves a preset id string to its interval", () => {
@@ -50,8 +50,8 @@ describe("resolveIntervalSeconds — preset id or raw seconds → clamped interv
   });
 
   it("falls back to the default for an unknown preset id", () => {
-    expect(resolveIntervalSeconds("does-not-exist")).toBe(300);
-    expect(resolveIntervalSeconds("NaN-ish")).toBe(300);
+    expect(resolveIntervalSeconds("does-not-exist")).toBe(30);
+    expect(resolveIntervalSeconds("NaN-ish")).toBe(30);
   });
 
   it("clamps out-of-range raw seconds (string form) into [1, 86400]", () => {

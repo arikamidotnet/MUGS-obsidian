@@ -24,8 +24,9 @@ export const INTERVAL_PRESETS: CadencePreset[] = [
   { id: "near-realtime", label: "Near real-time", seconds: 30 },
 ];
 
-/** Default preset id when the user has not chosen one. */
-export const DEFAULT_PRESET_ID = "balanced";
+/** Default preset id when the user has not chosen one. "near-realtime" keeps
+ *  remote edits appearing without the user thinking about "Sync now". */
+export const DEFAULT_PRESET_ID = "near-realtime";
 
 const MIN_SECONDS = 1;
 const MAX_SECONDS = 86_400; // cap at one day so a stray value can't wedge the poll loop.
