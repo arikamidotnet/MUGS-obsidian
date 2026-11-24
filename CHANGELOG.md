@@ -2,6 +2,21 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.23 highlights
+
+- **Keychain-stored tokens no longer block settings save.** On Obsidian 1.11.4+
+  MUGS moves account tokens into the OS keychain (SecretStorage) on first load,
+  leaving an empty `token` plus a `secretId` reference in `data.json`. The
+  settings draft validator still required a non-empty `token` on every hosted
+  credential, so after the first load every keychain credential tripped the
+  "token is required" banner — which blocked Apply and left the unsaved-changes
+  banner stuck at the top of the pane, so no settings change could be saved.
+  The check now accepts `secretId` as satisfying the token requirement, matching
+  the Zod schema (which already did). The credential row now shows
+  `token: keychain` instead of the misleading `token: not set`.
+  - Unchanged: the sync engine, the keychain migration, and the draft/Apply
+    model.
+
 ## 0.4.22 highlights
 
 - **Settings tab always reflects the live backend.** The settings pane kept a

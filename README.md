@@ -1,8 +1,15 @@
 # MUGS — Multi-User Git Sync for Obsidian
 
 Desktop-only Git sync with folder mappings, explicit sync directions, recoverable
-conflicts, and per-file committed-snapshot comparisons. Requires system Git and
-Obsidian 1.8.0 or newer.
+conflicts, and per-file committed-snapshot comparisons. Fine-grained, folder-mapped
+git sync across **all** git backends (GitLab-first), with per-user credentials
+stored *inside* the vault and multi-user collaboration built on shared repos +
+backend permissions — no hosted backend, no E2E encryption. Requires system Git
+and Obsidian 1.11.4 or newer (keychain token storage).
+
+MUGS merges the folder-mapping sync engine model of [Easy-Git](https://github.com/Saiki77/Easy-Git)
+with the multi-user concepts of [Sync Deck](https://github.com/ismailivanov/sync-deck), but stays
+purely git-native.
 
 Development requires Node 20.19+ (CI pins 20.20.2). Release dependencies are
 locked; use `npm ci` for repeatable installs.
@@ -16,22 +23,13 @@ locked; use `npm ci` for repeatable installs.
 
 BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
 **not** from this GitLab source repository or an unpublished local candidate.
-The latest verified publication when these instructions were written is 0.4.19.
 Back up the vault and plugin state before upgrading or making a first connection.
 
 ## Releases
 
-Highlights for every version live in [CHANGELOG.md](CHANGELOG.md). The latest is **0.4.19** (guided onboarding); see the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases) for installable assets.
-
-Use the upgrade/rollback instructions below and retain a private vault backup.
-
-Fine-grained, folder-mapped git sync across **all** git backends (GitLab-first),
-with per-user credentials stored *inside* the vault and multi-user collaboration
-built on shared repos + backend permissions — no hosted backend, no E2E encryption.
-
-MUGS merges the folder-mapping sync engine model of [Easy-Git](https://github.com/Saiki77/Easy-Git)
-with the multi-user concepts of [Sync Deck](https://github.com/ismailivanov/sync-deck), but stays
-purely git-native.
+Highlights for every version live in [CHANGELOG.md](CHANGELOG.md); the
+[Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases) lists
+the installable assets.
 
 ## Design principles
 

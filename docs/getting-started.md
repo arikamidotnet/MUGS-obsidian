@@ -19,7 +19,6 @@ Choose your provider: [GitLab](gitlab.md) · [GitHub](github.md).
 BRAT reads **GitHub releases**, not the GitLab source repository or a developer's
 local build. The verified public distribution repository is
 [`arikamidotnet/MUGS-obsidian`](https://github.com/arikamidotnet/MUGS-obsidian/releases).
-At the time this guide was written, **0.4.13 is the latest published release**.
 Choose only a version that appears on the linked Releases page and has matching
 `main.js`, `manifest.json`, and `styles.css` assets. Do not interpret a local
 version number or a GitLab tag as proof that BRAT can install it.
