@@ -320,7 +320,7 @@ export class MugsSettingTab extends PluginSettingTab {
           // Tag the row so a banner problem can jump to it (data-mugs-ref).
           const row = card.createDiv({ cls: "mugs-credential" });
           row.setAttribute("data-mugs-ref", `credential:${c.id}`);
-          const descParts = [`token: ${maskToken(c.token)}`];
+          const descParts = [`token: ${c.secretId ? "keychain" : maskToken(c.token)}`];
           if (c.username) descParts.push(`user: ${c.username}`);
           if (c.baseUrl) descParts.push(`url: ${c.baseUrl}`);
           new Setting(row)

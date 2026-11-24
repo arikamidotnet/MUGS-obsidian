@@ -175,7 +175,7 @@ export class SettingsDraft {
     for (const c of this.working.credentials) {
       const ref: DraftProblem["ref"] = { kind: "credential", id: c.id };
       if (!c.label) problems.push({ ref, message: `credential ${c.id}: label is required` });
-      if (c.kind !== "local" && !c.token) problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
+      if (c.kind !== "local" && !c.token && !c.secretId) problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
       if (c.kind === "local" && (!c.baseUrl || !c.baseUrl.startsWith("file://"))) {
         problems.push({ ref, message: `credential "${c.label || c.id}": local repositories need a file:// URL in Base URL` });
       }

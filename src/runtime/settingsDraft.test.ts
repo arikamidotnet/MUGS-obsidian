@@ -110,6 +110,12 @@ describe("SettingsDraft — validation of the COMPLETE draft", () => {
     expect(problems.length).toBe(2);
   });
 
+  it("accepts a hosted credential whose token lives in the OS keychain (secretId, empty token)", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({ id: "kc", label: "Keychain", kind: "gitlab", token: "", secretId: "mugs-kc" });
+    expect(d.validate()).toEqual([]);
+  });
+
   it("accepts tokenless local repositories with a file URL and rejects a missing path", () => {
     const d = new SettingsDraft(baseSettings());
     d.upsertCredential({ id: "local", label: "Local", kind: "local", token: "", baseUrl: "file:///tmp/test.git" });
