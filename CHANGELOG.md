@@ -2,6 +2,13 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.28 highlights
+
+- **Release distribution refresh.** No code changes since 0.4.27 — this version
+  exists so BRAT clients (which may have cached an older update check, or be
+  frozen to a specific version) see a fresh release to fetch. Assets:
+  `main.js`, `manifest.json`, `styles.css`, `checksums.txt`.
+
 ## 0.4.27 highlights
 
 - **UI polish from a full settings/views audit.** Non-destructive link buttons
