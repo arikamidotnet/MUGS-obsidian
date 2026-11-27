@@ -27,6 +27,14 @@ describe("GitLabProvider — auth", () => {
     expect(h.Authorization).toBeUndefined();
   });
 
+  it("authenticates with Authorization: Bearer when authMode is oauth", async () => {
+    const t = new FakeTransport(() => ({ status: 200, body: [] }));
+    await new GitLabProvider({ baseUrl: BASE, token: "oauth-access-token", authMode: "oauth", transport: t }).listRepos();
+    const h = t.calls[0].headers;
+    expect(h.Authorization).toBe("Bearer oauth-access-token");
+    expect(h["PRIVATE-TOKEN"]).toBeUndefined();
+  });
+
   it("strips a trailing slash from the base URL", async () => {
     const t = new FakeTransport(() => ({ status: 200, body: [] }));
     await new GitLabProvider({ baseUrl: "https://gitlab.com/api/v4/", token: "t", transport: t }).listRepos();

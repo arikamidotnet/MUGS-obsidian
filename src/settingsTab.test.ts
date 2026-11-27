@@ -681,8 +681,10 @@ describe("connect form — whole-repo root sync", () => {
     await flush();
     await flush();
 
-    // Flip the mode choice to whole-repo root sync (second radio).
-    const radios = tab.containerEl.querySelectorAll('input[type="radio"]') as unknown as any[];
+    // Flip the mode choice to whole-repo root sync (second radio in connect-mode group).
+    const radios = (tab.containerEl.querySelectorAll('input[type="radio"]') as unknown as any[]).filter(
+      (r) => r.name === "mugs-connect-mode",
+    );
     expect(radios.length).toBe(2);
     const rootRadio = radios[1];
     rootRadio.checked = true;
@@ -824,5 +826,43 @@ describe("secondary sections — progressive disclosure", () => {
     await flush();
     expect(collectText(tab.containerEl)).toContain("All set — account connected, folders linked, and sync has run.");
     expect((tab.containerEl.querySelectorAll(".mugs-gs-step") as unknown as any[])).toHaveLength(0);
+  });
+});
+
+describe("GitLab OAuth & token repair UI", () => {
+  it("renders GitLab OAuth sign-in mode toggle and prefilled Create token link in Add Account", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+    const text = collectText(tab.containerEl);
+    expect(text).toContain("Access token (PAT / Project token)");
+    expect(text).toContain("Sign in with GitLab (OAuth)");
+    expect(text).toContain("Create token in GitLab ↗");
+  });
+
+  it("renders Test & Save + Create token link on hosted GitLab token accounts and Reconnect on OAuth accounts", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().credentials = [
+      { id: "c-pat", label: "PAT", kind: "gitlab", token: "", secretId: "mugs-c-pat" },
+      {
+        id: "c-oa",
+        label: "OAuth",
+        kind: "gitlab",
+        authMode: "oauth",
+        username: "alice",
+        token: "",
+        secretId: "mugs-c-oa",
+        oauth: { clientId: "cid-1", redirectUri: "http://127.0.0.1:47291/callback" },
+      },
+    ];
+    plugin.store.getCredentialStatus = (id: string) => (id === "c-oa" ? "oauth-expired" : "missing-keychain");
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    const text = collectText(tab.containerEl);
+    expect(text).toContain("Test & Save");
+    expect(text).toContain("session expired — sign in again");
+    expect(text).toContain("OAuth (gitlab OAuth)");
   });
 });

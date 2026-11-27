@@ -30,6 +30,18 @@ import { analyzeReview, decideReviewBatch, reviewConfig } from "./runtime/reconc
 import { gitBlobId } from "./sync/reconciliation";
 import { checkRelPath } from "./git/safePath";
 import { buildProvider } from "./providers/factory";
+import {
+  DEFAULT_OAUTH_REDIRECT_URI,
+  buildGitLabAuthorizeUrl,
+  exchangeGitLabCode,
+  fetchGitLabUsername,
+  generatePkcePair,
+  gitlabOriginFromBaseUrl,
+  refreshGitLabToken,
+  type OAuthTokenBundle,
+} from "./providers/gitlabOAuth";
+import { runLoopbackOAuth } from "./runtime/oauthLoopback";
+import { OAuthTokenManager } from "./runtime/oauthRefresh";
 import { ChildProcessRunner } from "./git/runner";
 import { GitClient } from "./git/client";
 import { syncAllMappings, storeWritableAccessor, storeConflictAccessor, storeHeldAccessor, type SyncOutcome } from "./sync/driver";
@@ -112,6 +124,10 @@ export default class MugsPlugin extends Plugin {
    *  into GitRunOpts when the driver surface accepts it (contract seam; currently
    *  prepared here, wired at integration when sync-core lands the cancellation param). */
   private currentRunController?: AbortController;
+  /** Single-flight OAuth 2.0 token refresh manager bound to `this.store`. */
+  private oauth?: OAuthTokenManager;
+  /** Active loopback OAuth sign-in controller, aborted on plugin unload. */
+  private activeOAuthController?: AbortController;
   /** Epoch ms of the newest successful sync — renders the "✓ synced HH:MM" state. */
   private lastSyncedAt?: number;
   /** Last terminal status-bar state (synced/conflict/skipped/error/paused/idle) —
@@ -127,6 +143,7 @@ export default class MugsPlugin extends Plugin {
       read: () => this.loadData(),
       write: (data) => this.saveData(data as unknown),
     }, this.secretStore());
+    this.oauth = new OAuthTokenManager(this.store, (input) => refreshGitLabToken(input));
 
     await this.store.load();
     // One-shot, idempotent: move any stored tokens into the OS keychain. Only
@@ -343,6 +360,7 @@ export default class MugsPlugin extends Plugin {
     const ss = (this.app as unknown as {
       secretStorage?: {
         adapter?: unknown;
+        isEncryptionAvailable?(): boolean;
         getSecret?(id: string): string | null;
         setSecret?(id: string, value: string): void;
         deleteSecret?(id: string): void;
@@ -358,8 +376,13 @@ export default class MugsPlugin extends Plugin {
     }
     const get = ss.getSecret.bind(ss);
     const set = ss.setSecret.bind(ss);
+    const isEnc = typeof ss.isEncryptionAvailable === "function" ? ss.isEncryptionAvailable.bind(ss) : undefined;
     return {
       available: () => true,
+      canWrite: () => {
+        if (!isEnc) return true;
+        try { return Boolean(isEnc()); } catch { return false; }
+      },
       get: (id) => { try { return get(id) ?? null; } catch { return null; } },
       set: (id, value) => { set(id, value); },
       delete: (id) => { try { ss.deleteSecret?.(id); } catch { /* ignore */ } },
@@ -383,6 +406,70 @@ export default class MugsPlugin extends Plugin {
   /** E02/§8: true until the first sync pass completes after load — the startup
    *  pass re-verifies content instead of trusting the steady-state stat shortcut. */
   private startupUncertain = true;
+
+  /** Resolve a live token for a credential, automatically refreshing expiring OAuth grants. */
+  async resolveToken(credentialId: string): Promise<string | undefined> {
+    if (this.oauth) return this.oauth.resolveAccessToken(credentialId);
+    return this.store.getToken(credentialId);
+  }
+
+  /** Run an interactive GitLab OAuth 2.0 (PKCE + 127.0.0.1 loopback) sign-in flow.
+   *  Opens the user's browser, receives the callback code, exchanges it for tokens,
+   *  and resolves the authenticated GitLab username. Aborted cleanly on plugin unload. */
+  async startGitLabOAuth(opts: {
+    baseUrl?: string;
+    clientId: string;
+    redirectUri?: string;
+    signal?: AbortSignal;
+  }): Promise<{ bundle: OAuthTokenBundle; username?: string; redirectUri: string }> {
+    const redirectUri = opts.redirectUri?.trim() || DEFAULT_OAUTH_REDIRECT_URI;
+    const origin = gitlabOriginFromBaseUrl(opts.baseUrl);
+    const { codeVerifier, codeChallenge, state } = generatePkcePair();
+    const authorizeUrl = buildGitLabAuthorizeUrl({
+      origin,
+      clientId: opts.clientId.trim(),
+      redirectUri,
+      codeChallenge,
+      state,
+    });
+
+    this.activeOAuthController?.abort();
+    const controller = new AbortController();
+    this.activeOAuthController = controller;
+    const onExternalAbort = () => controller.abort();
+    opts.signal?.addEventListener("abort", onExternalAbort, { once: true });
+
+    try {
+      const { code } = await runLoopbackOAuth({
+        authorizeUrl,
+        redirectUri,
+        expectedState: state,
+        signal: controller.signal,
+        openBrowser: (url) => {
+          if (typeof window !== "undefined" && typeof window.open === "function") {
+            window.open(url, "_blank");
+          }
+        },
+      });
+      const bundle = await exchangeGitLabCode({
+        origin,
+        clientId: opts.clientId.trim(),
+        redirectUri,
+        code,
+        codeVerifier,
+      });
+      const username = await fetchGitLabUsername({
+        baseUrl: opts.baseUrl || `${origin}/api/v4`,
+        accessToken: bundle.accessToken,
+      });
+      return { bundle, username, redirectUri };
+    } finally {
+      opts.signal?.removeEventListener("abort", onExternalAbort);
+      if (this.activeOAuthController === controller) {
+        this.activeOAuthController = undefined;
+      }
+    }
+  }
 
   /** Run one sync pass over every mapping (push + pull), reporting each outcome as a Notice.
    *  Guarded: while a pass is in flight, further calls (scheduler ticks, file events,
@@ -446,7 +533,7 @@ export default class MugsPlugin extends Plugin {
       outcomes = await syncAllMappings({
         mappings: selected,
         credentials: settings.credentials,
-        getToken: (id) => this.store.getToken(id),
+        getToken: (id) => this.resolveToken(id),
         buildProvider,
         cloneRoot,
         runner: new ChildProcessRunner(),
@@ -583,9 +670,10 @@ export default class MugsPlugin extends Plugin {
           if (!quiet) new Notice("MUGS: no folders connected. Add one in Settings to start syncing.", 5000);
         }
       }
-      // One aggregate count-only notice per pass replaces per-mapping spam while
-      // keeping distinct reasons visible (quiet runs especially).
-      if (quiet && (report.kind === "offline" || report.kind === "auth" || report.kind === "error")) {
+      // One aggregate count-only notice per quiet pass (skip when a detailed
+      // quiet skipped notice already fired above so notices don't stack).
+      const quietSkippedAlreadyNoticed = quiet && outcomes.some((o) => o.status === "skipped");
+      if (quiet && !quietSkippedAlreadyNoticed && (report.kind === "offline" || report.kind === "auth" || report.kind === "error")) {
         new Notice(report.message, 10_000);
       }
     }
@@ -1305,6 +1393,9 @@ export default class MugsPlugin extends Plugin {
     // Abort in-flight work on unload (E05). The driver seam for signal will pick this up at integration.
     if (this.currentRunController) {
       try { this.currentRunController.abort(); } catch {}
+    }
+    if (this.activeOAuthController) {
+      try { this.activeOAuthController.abort(); } catch {}
     }
     console.log("MUGS unloaded");
   }

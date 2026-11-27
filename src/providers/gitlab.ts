@@ -42,8 +42,10 @@ const DEFAULT_ACCESS_LEVEL = 3000;
 export interface GitLabOptions {
   /** API base URL, e.g. https://gitlab.com/api/v4 or a self-hosted instance. */
   baseUrl: string;
-  /** Personal access token (PRIVATE-TOKEN) with the `api` scope. */
+  /** Personal access token (PRIVATE-TOKEN) or OAuth 2.0 Bearer access token. */
   token: string;
+  /** Auth mode: `"oauth"` uses `Authorization: Bearer`; default `"token"` uses `PRIVATE-TOKEN`. */
+  authMode?: "token" | "oauth";
   /** Optional transport override for tests. Defaults to global fetch. */
   transport?: HttpTransport;
   /** Explicit allowed repos (`owner/repo`). When set, listRepos returns these
@@ -113,18 +115,23 @@ export class GitLabProvider implements Provider {
 
   private readonly baseUrl: string;
   private readonly token: string;
+  private readonly authMode: "token" | "oauth";
   private readonly transport: HttpTransport;
   private readonly allowedRepos?: string[];
 
   constructor(opts: GitLabOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.token = opts.token;
+    this.authMode = opts.authMode ?? "token";
     this.transport = opts.transport ?? new FetchTransport();
     this.allowedRepos = opts.allowedRepos;
   }
 
-  /** `PRIVATE-TOKEN` is the GitLab auth header (vs GitHub's `Authorization`). */
+  /** `Authorization: Bearer` for OAuth 2.0 access tokens; `PRIVATE-TOKEN` for PATs/project tokens. */
   private headers(): Record<string, string> {
+    if (this.authMode === "oauth") {
+      return { Accept: "application/json", Authorization: `Bearer ${this.token}` };
+    }
     return { Accept: "application/json", "PRIVATE-TOKEN": this.token };
   }
 

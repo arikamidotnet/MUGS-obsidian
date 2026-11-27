@@ -10,6 +10,18 @@
 /** Supported git backends. All are git-native; GitLab gets first-class REST support. */
 export type ProviderKind = "github" | "gitlab" | "bitbucket" | "gitea" | "forgejo" | "local";
 
+/** How a credential authenticates with its provider: manual access token or OAuth 2.0. */
+export type AuthMode = "token" | "oauth";
+
+/** Non-secret OAuth 2.0 metadata persisted on a credential (tokens live in the secret slot). */
+export interface OAuthMetadata {
+  clientId: string;
+  redirectUri: string;
+  /** Epoch milliseconds when the current access token expires (advisory for UI/refresh). */
+  expiresAt?: number;
+  scope?: string;
+}
+
 /** How a mapping interacts with the remote. */
 export type SyncDirection = "push-pull" | "pull-only" | "push-only";
 
@@ -35,6 +47,10 @@ export interface Credential {
   secretId?: string;
   /** Base URL for self-hosted instances, e.g. https://gitlab.example.com/api/v4 */
   baseUrl?: string;
+  /** Authentication mode: manual access token (default when omitted) or OAuth 2.0. */
+  authMode?: AuthMode;
+  /** Non-secret OAuth metadata (client ID, redirect URI, expiry). Never stores tokens. */
+  oauth?: OAuthMetadata;
   /**
    * Explicit list of repositories this credential is scoped to, as `owner/repo`
    * paths (GitLab nested groups allowed: `group/sub/repo`). When non-empty, MUGS

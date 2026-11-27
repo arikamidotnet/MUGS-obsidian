@@ -1331,3 +1331,49 @@ describe("syncAllMappings — recoverable deletions via .mugs-trash (Area 3)", (
     expect(trash.get("m1", "notes/both.md")).toBe("");
   });
 });
+
+describe("syncAllMappings — async OAuth token resolution", () => {
+  it("awaits async getToken, passes authMode=oauth to buildProvider, and forces git username oauth2", async () => {
+    const { runner } = makeRunner({ head: "L1", remote: "L1", ancestor: true, cloned: true });
+    let capturedAuthMode: string | undefined;
+    let capturedGitUser: string | undefined;
+    const wrappedRunner = {
+      run: async (args: string[], opts?: { cwd?: string; env?: Record<string, string> }) => {
+        if (opts?.env?.MUGS_GIT_USER) capturedGitUser = opts.env.MUGS_GIT_USER;
+        return runner.run(args, opts);
+      },
+    };
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ authMode: "oauth", username: "alice", oauth: { clientId: "cid", redirectUri: "http://127.0.0.1:47291/callback" } })],
+      getToken: async () => "oauth-fresh-token",
+      buildProvider: (input) => {
+        capturedAuthMode = input.authMode;
+        return fakeProvider(fakeRepo("m1"));
+      },
+      cloneRoot: CLONE_ROOT,
+      runner: wrappedRunner,
+      lastSync: spyAccessor("L1").accessor,
+    });
+    expect(outcomes[0].status).toBe("ok");
+    expect(capturedAuthMode).toBe("oauth");
+    expect(capturedGitUser).toBe("oauth2");
+  });
+
+  it("reports a clear OAuth session-expired skip reason when async getToken returns undefined", async () => {
+    const { runner } = makeRunner({ head: "L1", remote: "L1", ancestor: true, cloned: true });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ authMode: "oauth", token: "mugs-oauth-v1:..." })],
+      getToken: async () => undefined,
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor("L1").accessor,
+    });
+    expect(outcomes[0]).toMatchObject({
+      status: "skipped",
+      reason: "GitLab OAuth session expired — reconnect in Settings → MUGS → Accounts",
+    });
+  });
+});

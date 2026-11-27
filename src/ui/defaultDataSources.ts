@@ -130,15 +130,21 @@ export class StoreMapDataSource implements MapDataSource {
           ? "local provider needs a repo path — set it in the credential's settings"
           : ls?.skipReason;
       // A hosted credential whose token resolves to nothing on THIS device (never
-      // entered, or an orphaned keychain reference synced from another machine) can
-      // never run either — surface the repair path now instead of waiting for the
-      // next sync pass to skip it. Guarded with typeof so minimal fake stores in
-      // tests (without getToken) keep working.
-      if (credential && credential.kind !== "local" && !skipReason &&
-          typeof this.store.getToken === "function" && !this.store.getToken(credential.id)) {
-        skipReason = credential.secretId && !credential.token
-          ? "token missing on this device — open Settings → MUGS → Accounts to enter your token"
-          : "missing token — open Settings → MUGS → Accounts";
+      // entered, orphaned keychain reference, or expired OAuth grant) can never run —
+      // surface the repair path now instead of waiting for the next sync pass.
+      if (credential && credential.kind !== "local" && !skipReason) {
+        const status = typeof this.store.getCredentialStatus === "function"
+          ? this.store.getCredentialStatus(credential.id)
+          : undefined;
+        if (status === "oauth-expired") {
+          skipReason = "GitLab OAuth session expired — reconnect in Settings → MUGS → Accounts";
+        } else if (typeof this.store.getToken === "function" && !this.store.getToken(credential.id)) {
+          skipReason = credential.secretId && !credential.token
+            ? (credential.authMode === "oauth"
+              ? "token missing on this device — open Settings → MUGS → Accounts to reconnect with GitLab"
+              : "token missing on this device — open Settings → MUGS → Accounts to enter your token")
+            : "missing token — open Settings → MUGS → Accounts";
+        }
       }
       const conflictCount = unresolvedConflicts(this.store.getConflicts(m.id)).length;
       rows.push({

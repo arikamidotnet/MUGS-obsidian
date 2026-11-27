@@ -24,6 +24,8 @@ export interface ProviderInput {
   baseUrl?: string;
   /** Resolved token (already decrypted by the store, or plaintext from the form). */
   token?: string;
+  /** Optional auth mode (`"oauth"` uses Bearer auth on GitLab; default `"token"`). */
+  authMode?: "token" | "oauth";
   /**
    * Explicit allowed repos (`owner/repo`). When non-empty, the provider returns
    * these directly from `listRepos()` instead of calling a global enumeration
@@ -146,7 +148,7 @@ export function buildProvider(input: ProviderInput, opts: { transport?: HttpTran
   const shared = { transport: opts.transport };
   switch (kind) {
     case "gitlab":
-      return new GitLabProvider({ baseUrl, token, allowedRepos, ...shared });
+      return new GitLabProvider({ baseUrl, token, authMode: input.authMode, allowedRepos, ...shared });
     case "github":
       return new GitHubProvider({ baseUrl, token, allowedRepos, ...shared });
     case "gitea":
@@ -162,6 +164,6 @@ export function buildProvider(input: ProviderInput, opts: { transport?: HttpTran
 }
 
 /** Convenience: build a provider from a full stored credential, resolving its username as the acting user. */
-export function providerFromCredential(credential: Pick<Credential, "id" | "kind" | "baseUrl" | "username"> & { token: string; repos?: string[] }, opts: { transport?: HttpTransport } = {}): Provider {
-  return buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token: credential.token, allowedRepos: credential.repos }, { ...opts, actingUsername: credential.username });
+export function providerFromCredential(credential: Pick<Credential, "id" | "kind" | "baseUrl" | "username" | "authMode"> & { token: string; repos?: string[] }, opts: { transport?: HttpTransport } = {}): Provider {
+  return buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token: credential.token, authMode: credential.authMode, allowedRepos: credential.repos }, { ...opts, actingUsername: credential.username });
 }

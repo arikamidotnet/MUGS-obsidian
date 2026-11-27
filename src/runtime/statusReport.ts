@@ -51,11 +51,22 @@ export function classifySkipReason(reason: string | undefined): ReportKind {
   // status code is anchored to the "API/GitHub/GitLab <code>" prefix so a repo
   // named e.g. "issue-401" in a 404 message is not misread as an auth error.
   if (/(api|github|gitlab) (401|403)\b/.test(r)) return "auth";
+  // Remote Git auth rejections ("git fetch failed (128): remote: HTTP Basic:
+  // Access denied / Authentication failed") contain "fetch failed", so check
+  // them BEFORE the generic network-fetch fallback.
+  if (r.includes("access denied") || r.includes("authentication failed") || r.includes("token rejected")) return "auth";
   if (/(api|github|gitlab) (429|5\d\d)\b/.test(r)) return "offline";
   if (r.includes("reach provider") || r.includes("network") || r.includes("offline") || r.includes("timeout") || r.includes("fetch failed")) return "offline";
-  // Covers "missing token", "token missing on this device — …" and "no credential":
-  // every device-local token gap is an auth problem, never a network one.
-  if (r.includes("token") || r.includes("credential") || r.includes("auth") || r.includes("locked")) return "auth";
+  // Covers "missing token", "token missing on this device — …", "OAuth session
+  // expired", and "no credential": every device-local token/grant gap is an auth problem.
+  if (
+    r.includes("token") ||
+    r.includes("credential") ||
+    r.includes("auth") ||
+    r.includes("oauth") ||
+    r.includes("session expired") ||
+    r.includes("locked")
+  ) return "auth";
   return "skipped";
 }
 
@@ -114,12 +125,26 @@ export function buildStatusReport(opts: {
   const authN = byKind.get("auth") ?? 0;
   const offlineN = byKind.get("offline") ?? 0;
   if (authN > 0) {
+    // Distinguish a token actively rejected by the remote (HTTP Basic: Access
+    // denied / 401 / 403 / missing write_repository scope) from a locally
+    // missing or passphrase-locked token so the notice points at the real fix.
+    const authSkips = skips.filter((s) => classifySkipReason(s.reason) === "auth");
+    const allRejectedByRemote = authSkips.length > 0 && authSkips.every((s) => {
+      const r = (s.reason ?? "").toLowerCase();
+      return (
+        r.includes("access denied") ||
+        r.includes("authentication failed") ||
+        r.includes("token rejected") ||
+        /(api|github|gitlab) (401|403)\b/.test(r)
+      );
+    });
+    const detail = allRejectedByRemote
+      ? `${authN} mapping${authN === 1 ? "" : "s"} skipped — token rejected by remote (expired or missing read_repository/write_repository scope) — update or reconnect in Settings → MUGS → Accounts`
+      : `${authN} mapping${authN === 1 ? "" : "s"} skipped — token missing: unlock credentials, or re-enter the token in Settings → MUGS → Accounts (locked tokens unlock under Security)`;
     return {
       kind: "auth",
       counts,
-      // Two distinct repairs, named surfaces: re-enter a missing token on the
-      // existing account (Accounts) vs. unlock passphrase-encrypted tokens (Security).
-      message: parts([`${authN} mapping${authN === 1 ? "" : "s"} skipped — token missing: unlock credentials, or re-enter the token in Settings → MUGS → Accounts (locked tokens unlock under Security)`, countText(counts)]),
+      message: parts([detail, countText(counts)]),
     };
   }
   if (offlineN > 0) {

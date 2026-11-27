@@ -2,6 +2,32 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.25 highlights
+
+- **GitLab OAuth 2.0 (PKCE + auto-refresh), additive alongside manual tokens.**
+  GitLab accounts can now authenticate via **Sign in with GitLab (OAuth)**
+  using Authorization Code + PKCE (no client secret), a temporary `127.0.0.1`
+  loopback callback (`http://127.0.0.1:47291/callback`), least-privilege scopes
+  (`read_api write_repository read_user`), and a single-flight rotating refresh
+  coordinator so concurrent sync passes never race on GitLab's 2-hour tokens.
+  OAuth accounts support **Allowed repositories** pinning and one-click
+  **Reconnect with GitLab** in place. Manual PATs, fine-grained/project-scoped
+  tokens, GitHub, Bitbucket, Gitea, Forgejo, and Local repositories all remain
+  unchanged.
+- **No more "Secrets are stored without encryption" popup on Linux without a
+  keyring.** `secretStore()` now checks Obsidian's `isEncryptionAvailable()`:
+  when OS-level encryption is unavailable (common on Arch Linux minimal WMs
+  without `gnome-keyring`/`kwallet`), MUGS still reads any pre-existing
+  `secretId` but stops writing new secrets into unencrypted `SecretStorage`,
+  falling back cleanly to `data.json` (and optional passphrase encryption).
+- **Clearer Git auth rejection notices & inline Test & Save token repair.**
+  Remote `HTTP Basic: Access denied` / 401 / 403 rejections now report that the
+  token was rejected by the remote (expired or missing `read_repository` /
+  `write_repository` scope) instead of the generic missing-token message, and
+  quiet passes no longer stack two duplicate skip notices. Hosted token accounts
+  now include **Test & Save** inline repair and a prefilled **Create token in
+  GitLab ↗** link.
+
 ## 0.4.24 highlights
 
 - **Universal credential compatibility (Arch Linux / minimal WMs & multi-device).**

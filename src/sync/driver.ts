@@ -58,8 +58,8 @@ export interface ProviderFactory {
 export interface SyncDriverDeps {
   mappings: FolderMapping[];
   credentials: Credential[];
-  /** Resolve the live (possibly decrypted) token for a credential id. */
-  getToken: (credentialId: string) => string | undefined;
+  /** Resolve the live (possibly decrypted or OAuth-refreshed) token for a credential id. */
+  getToken: (credentialId: string) => string | undefined | Promise<string | undefined>;
   buildProvider: ProviderFactory;
   /** On-disk directory holding per-mapping clones, e.g. "<vault>/.mugs-clones". */
   cloneRoot: string;
@@ -248,23 +248,46 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
         },
       ];
     } else {
-      const token = deps.getToken(credential.id);
-      if (!token) {
-        // Distinguish a keychain reference that holds nothing on THIS device (an
-        // orphaned secretId — data.json copied/synced from another machine, or a
-        // Linux keyring that dropped the write) from a plain never-entered token:
-        // the repair path (re-enter the token on the existing account) differs.
-        skip(mapping, credential.secretId && !credential.token
-          ? "token missing on this device — open Settings → MUGS → Accounts to enter your token"
-          : "missing token");
+      let token: string | undefined;
+      try {
+        token = await deps.getToken(credential.id);
+      } catch (error) {
+        skip(mapping, errorMessage(error));
         continue;
       }
-      // Any non-empty username works for token auth; `oauth2` is the GitLab convention.
-      auth = { username: credential.username ?? "oauth2", token };
+      if (!token) {
+        // Distinguish an OAuth grant that expired/revoked, an orphaned keychain
+        // secretId on THIS device, and a plain never-entered token.
+        if (credential.authMode === "oauth") {
+          skip(mapping, credential.secretId && !credential.token
+            ? "token missing on this device — open Settings → MUGS → Accounts to reconnect with GitLab"
+            : "GitLab OAuth session expired — reconnect in Settings → MUGS → Accounts");
+        } else {
+          skip(mapping, credential.secretId && !credential.token
+            ? "token missing on this device — open Settings → MUGS → Accounts to enter your token"
+            : "missing token");
+        }
+        continue;
+      }
+      // GitLab requires HTTP Basic username `oauth2` for OAuth 2.0 Git-over-HTTPS
+      // (while `actingUsername` on the provider keeps the human username for attribution).
+      auth = {
+        username: credential.authMode === "oauth" ? "oauth2" : (credential.username ?? "oauth2"),
+        token,
+      };
 
       let provider = providerCache.get(credential.id);
       if (!provider) {
-        provider = deps.buildProvider({ kind: credential.kind, baseUrl: credential.baseUrl, token, allowedRepos: credential.repos }, { actingUsername: credential.username });
+        provider = deps.buildProvider(
+          {
+            kind: credential.kind,
+            baseUrl: credential.baseUrl,
+            token,
+            authMode: credential.authMode,
+            allowedRepos: credential.repos,
+          },
+          { actingUsername: credential.username },
+        );
         providerCache.set(credential.id, provider);
       }
 

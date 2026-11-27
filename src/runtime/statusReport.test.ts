@@ -61,6 +61,16 @@ describe("status reporting", () => {
     expect(r.message).toContain("unlock");
   });
 
+  it("distinguishes remote HTTP Basic / 401 token rejections from locally missing tokens", () => {
+    const reason = "git fetch failed (128): remote: HTTP Basic: Access denied. fatal: Authentication failed";
+    expect(classifySkipReason(reason)).toBe("auth");
+    const r = buildStatusReport({ outcomes: [{ mappingId: "a", label: "a", status: "skipped", reason }] });
+    expect(r.kind).toBe("auth");
+    expect(r.message).toContain("token rejected by remote");
+    expect(r.message).toContain("write_repository");
+    expect(r.message).toContain("Settings → MUGS → Accounts");
+  });
+
   it("a refused save is an ERROR — never reported as synced", () => {
     const r = buildStatusReport({
       outcomes: [ok("a", true)],
@@ -90,6 +100,7 @@ describe("status reporting", () => {
     expect(classifySkipReason("missing token")).toBe("auth");
     expect(classifySkipReason("missing token — open Settings → MUGS → Accounts")).toBe("auth");
     expect(classifySkipReason("token missing on this device — open Settings → MUGS → Accounts to enter your token")).toBe("auth");
+    expect(classifySkipReason("GitLab OAuth session expired — reconnect in Settings → MUGS → Accounts")).toBe("auth");
     expect(classifySkipReason("no credential")).toBe("auth");
     expect(classifySkipReason("repo not found or not accessible")).toBe("skipped");
     expect(classifySkipReason(undefined)).toBe("skipped");

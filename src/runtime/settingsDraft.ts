@@ -176,7 +176,16 @@ export class SettingsDraft {
     for (const c of this.working.credentials) {
       const ref: DraftProblem["ref"] = { kind: "credential", id: c.id };
       if (!c.label) problems.push({ ref, message: `credential ${c.id}: label is required` });
-      if (c.kind !== "local" && !c.token && !c.secretId) problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
+      if (c.authMode === "oauth") {
+        if (!c.oauth?.clientId) {
+          problems.push({ ref, message: `credential "${c.label || c.id}": OAuth application ID is required` });
+        }
+        if (!c.token && !c.secretId) {
+          problems.push({ ref, message: `credential "${c.label || c.id}": sign in with GitLab to finish connecting` });
+        }
+      } else if (c.kind !== "local" && !c.token && !c.secretId) {
+        problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
+      }
       // Local paths may be stored as bare absolute paths; normalize before the
       // file:// shape check so /home/user/repo is accepted like its file:// form.
       if (c.kind === "local" && !normalizeLocalBaseUrl(c.baseUrl ?? "").startsWith("file://")) {

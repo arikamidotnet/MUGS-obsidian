@@ -470,4 +470,21 @@ describe("StoreConflictDataSource", () => {
     expect(res.remaining).toBe(0);
     expect(store.getConflicts("m1")).toEqual([expect.objectContaining({ resolved: true })]);
   });
+
+  it("surfaces oauth-expired on StoreMapDataSource rows when credential status is oauth-expired", async () => {
+    const store = storeWith([mapping()]);
+    store.upsertCredential({
+      id: "c1",
+      label: "GitLab OAuth",
+      kind: "gitlab",
+      authMode: "oauth",
+      token: "",
+      oauth: { clientId: "cid", redirectUri: "http://127.0.0.1:47291/callback" },
+    });
+    store.setOAuthBundle("c1", { accessToken: "acc-1", refreshToken: "ref-1", expiresAt: Date.now() + 60_000 });
+    store.markOAuthExpired("c1");
+    const mapDs = new StoreMapDataSource(store, ".mugs-clones");
+    const rows = await mapDs.getRows();
+    expect(rows[0].skipReason).toContain("OAuth session expired");
+  });
 });

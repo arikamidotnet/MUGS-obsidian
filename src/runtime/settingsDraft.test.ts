@@ -229,4 +229,31 @@ describe("SettingsDraft — validateDetailed() refs", () => {
     d.upsertMapping(map("m2", "../escape"));
     expect(d.validate()).toEqual(d.validateDetailed().map((p) => p.message));
   });
+
+  it("validates GitLab OAuth credentials (requires oauth.clientId and a stored secret or secretId)", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({
+      id: "c-oa",
+      label: "GitLab OAuth",
+      kind: "gitlab",
+      authMode: "oauth",
+      token: "",
+      secretId: "mugs-c-oa",
+      oauth: { clientId: "app-123", redirectUri: "http://127.0.0.1:47291/callback" },
+    });
+    expect(d.validate()).toEqual([]);
+
+    const dBad = new SettingsDraft(baseSettings());
+    dBad.upsertCredential({
+      id: "c-oa-bad",
+      label: "Broken OAuth",
+      kind: "gitlab",
+      authMode: "oauth",
+      token: "",
+      oauth: { clientId: "", redirectUri: "http://127.0.0.1:47291/callback" },
+    });
+    const probs = dBad.validate();
+    expect(probs.some((p) => p.includes("OAuth application ID is required"))).toBe(true);
+    expect(probs.some((p) => p.includes("sign in with GitLab"))).toBe(true);
+  });
 });

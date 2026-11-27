@@ -16,7 +16,25 @@ directory it maps to. If creating a new project, initialize its default
 branch and add the intended top-level directory with a harmless file; an
 empty Git directory does not exist in the repository tree.
 
-## Create a GitLab token
+## Sign in with GitLab (OAuth 2.0)
+
+MUGS supports GitLab OAuth 2.0 (Authorization Code + PKCE, no client secret)
+alongside manual access tokens, with automatic background token refresh:
+
+1. In GitLab (**Edit profile → Access → Applications**, or a Group/Instance
+   Application), create a **non-confidential** OAuth application with:
+   - **Redirect URI:** `http://127.0.0.1:47291/callback`
+   - **Scopes:** `read_api`, `write_repository`, `read_user`
+2. In **Settings → MUGS → Accounts → Add another account**, choose **GitLab**
+   and select **Sign in with GitLab (OAuth)**. Paste the **Application ID
+   (Client ID)** (optionally set **Allowed repositories** under **Advanced
+   options** to restrict MUGS to a single project such as `group/project`), and
+   click **Sign in with GitLab**.
+3. If an OAuth grant is ever revoked or opened on a second device, click
+   **Reconnect with GitLab** on the existing account card to refresh the session
+   in place without touching connected folders.
+
+## Create a GitLab token (PAT / Project token)
 
 1. In GitLab, open your avatar → **Edit profile → Access → Personal access
    tokens**. Choose a legacy personal token if using the scope-based setup
@@ -44,11 +62,11 @@ empty Git directory does not exist in the repository tree.
    enumeration may not work. Press **Add account** — settings save automatically,
    so you can go straight on to connecting a folder.
 
-GitLab personal tokens expire and must be rotated. Replacing a token in MUGS
-requires creating a new account and reconnecting its mappings if the current
-UI does not offer an in-place token editor; pause sync and preserve your
-existing mapping/state before making that change. Ask an operator for help
-with an existing multi-mapping vault. Do not edit `data.json` by hand.
+GitLab personal tokens expire and must be rotated. To rotate or fix a token
+without breaking connected folders, open **Settings → MUGS → Accounts**, click
+**Update token** on the existing account, paste the new token, and press
+**Test & Save** (or use **Create token in GitLab ↗** to open GitLab's prefilled
+token page). Do not edit `data.json` by hand.
 
 ## Connect and verify
 

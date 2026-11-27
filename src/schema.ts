@@ -81,6 +81,15 @@ const repoPathSchema = z.string().trim().regex(
   "expected a repository path like owner/repo",
 );
 
+export const authModeSchema = z.enum(["token", "oauth"]);
+
+export const oauthMetadataSchema = z.object({
+  clientId: z.string().min(1),
+  redirectUri: z.string().url(),
+  expiresAt: z.number().int().positive().optional(),
+  scope: z.string().optional(),
+});
+
 export const credentialSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
@@ -92,6 +101,10 @@ export const credentialSchema = z.object({
    *  is never persisted in data.json. */
   secretId: z.string().optional(),
   baseUrl: z.string().url().optional(),
+  /** Authentication mode: manual token (default when omitted) or OAuth 2.0. */
+  authMode: authModeSchema.optional(),
+  /** Non-secret OAuth metadata (tokens live in the secret slot). */
+  oauth: oauthMetadataSchema.optional(),
   /** Explicit allowed repos; when set, MUGS skips global enumeration. */
   repos: z.array(repoPathSchema).optional(),
 }).superRefine((credential, ctx) => {
@@ -287,9 +300,11 @@ export function parseSettings(raw: unknown): Settings {
   return mugsSettingsSchema.parse(raw ?? {});
 }
 
-/** Mask a token so only the last 4 chars are visible (if long enough). */
+/** Mask a token so only the last 4 chars are visible (if long enough).
+ *  Serialized OAuth token bundles (`mugs-oauth-v1:...`) never leak suffixes. */
 export function redactToken(token: string): string {
   if (!token) return "";
+  if (token.startsWith("mugs-oauth-v1:")) return "••••oauth";
   if (token.length <= 6) return "•".repeat(token.length);
   return "•".repeat(token.length - 4) + token.slice(-4);
 }

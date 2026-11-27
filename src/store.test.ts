@@ -1219,4 +1219,73 @@ describe("getCredentialStatus classification", () => {
     expect(await reloaded.unlock(PASS)).toBe(true);
     expect(reloaded.getCredentialStatus("c1")).toBe("ready");
   });
+
+  it("stores OAuth bundles via verified keychain or data.json, extracts accessToken, and tracks oauth-expired", async () => {
+    const io = new MemoryIO(null);
+    const secrets = new MemorySecretStore();
+    const store = new MugsStore(io, secrets);
+    await store.load();
+    store.upsertCredential({
+      id: "c-oauth",
+      label: "GitLab OAuth",
+      kind: "gitlab",
+      authMode: "oauth",
+      token: "",
+      oauth: { clientId: "cid-1", redirectUri: "http://127.0.0.1:47291/callback" },
+    });
+    store.setOAuthBundle("c-oauth", {
+      accessToken: "acc-live-1",
+      refreshToken: "ref-live-1",
+      expiresAt: Date.now() + 7_200_000,
+    });
+    expect(store.getToken("c-oauth")).toBe("acc-live-1");
+    expect(store.getOAuthBundle("c-oauth")?.refreshToken).toBe("ref-live-1");
+    expect(store.getCredentialStatus("c-oauth")).toBe("ready");
+    expect(store.getDisplaySettings().credentials[0].token).not.toContain("acc-live-1");
+
+    store.markOAuthExpired("c-oauth");
+    expect(store.getCredentialStatus("c-oauth")).toBe("oauth-expired");
+
+    // Rotating the bundle clears oauth-expired and updates expiresAt.
+    store.setOAuthBundle("c-oauth", {
+      accessToken: "acc-live-2",
+      refreshToken: "ref-live-2",
+      expiresAt: Date.now() + 7_200_000,
+    });
+    expect(store.getToken("c-oauth")).toBe("acc-live-2");
+    expect(store.getCredentialStatus("c-oauth")).toBe("ready");
+
+    await store.save();
+    const reloaded = new MugsStore(io, secrets);
+    await reloaded.load();
+    expect(reloaded.getToken("c-oauth")).toBe("acc-live-2");
+    expect(reloaded.getOAuthBundle("c-oauth")?.refreshToken).toBe("ref-live-2");
+  });
+
+  it("skips writing to SecretStorage when canWrite() is false (Linux without keyring) while still reading existing entries", async () => {
+    const backed = new Map<string, string>([[secretIdFor("c-old"), "glpat-EXISTING"]]);
+    const readOnlySecrets = {
+      available: () => true,
+      canWrite: () => false,
+      get: (id: string) => backed.get(id) ?? null,
+      set: () => { throw new Error("must not write when canWrite() is false"); },
+    };
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [{ id: "c-old", label: "old", kind: "gitlab", token: "", secretId: secretIdFor("c-old") }],
+      mappings: [], lastSync: {}, conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [], staging: {}, security: { encryptCredentials: false },
+    });
+    const store = new MugsStore(io, readOnlySecrets);
+    await store.load();
+    // Pre-existing keychain secret still reads cleanly.
+    expect(store.getToken("c-old")).toBe("glpat-EXISTING");
+    // New credentials stay in data.json and NEVER call set() on the unencrypted store.
+    store.upsertCredential({ id: "c-new", label: "new", kind: "gitlab", token: "glpat-NEW" });
+    const created = store.getSettings().credentials.find((c) => c.id === "c-new")!;
+    expect(created.secretId).toBeUndefined();
+    expect(created.token).toBe("glpat-NEW");
+    expect(await store.migrateTokensToSecretStorage()).toBe(0);
+  });
 });

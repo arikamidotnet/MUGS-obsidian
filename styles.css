@@ -860,6 +860,22 @@
   color: var(--text-normal);
   cursor: pointer;
 }
+.mugs-oauth-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.mugs-token-helper-link {
+  color: var(--text-accent);
+  font-size: var(--font-ui-smaller);
+  text-decoration: none;
+}
+.mugs-token-helper-link:hover { text-decoration: underline; }
 .mugs-repo-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .mugs-repo-row .mugs-repo-select { flex: 1; min-width: 0; }
 

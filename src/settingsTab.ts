@@ -12,7 +12,9 @@ import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, Fol
 import type { KdfParams } from "./schema";
 import type { RepoSummary } from "./providers/types";
 import { buildProvider, PROVIDER_OPTIONS, providerOption, prefillBaseUrl } from "./providers/factory";
+import { DEFAULT_OAUTH_REDIRECT_URI, buildGitLabCreateTokenUrl, encodeOAuthSecret } from "./providers/gitlabOAuth";
 import { validateBaseUrl, validateCredentialForm, normalizeLocalBaseUrl, type FieldProblem } from "./providers/validate";
+import type { CredentialStatus } from "./store";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
@@ -57,10 +59,6 @@ function maskToken(token: string): string {
   if (!token) return "not set";
   return `••••${token.slice(-4)}`;
 }
-
-/** Live token health of a credential. Mirrors MugsStore.getCredentialStatus
- *  (declared locally so this file typechecks before the store ships the method). */
-type CredentialStatus = "ready" | "missing-keychain" | "locked" | "missing";
 
 /** Debounce for auto-applying settings after the last edit (ms). */
 const AUTO_APPLY_MS = 700;
@@ -356,26 +354,33 @@ export class MugsSettingTab extends PluginSettingTab {
           const row = card.createDiv({ cls: "mugs-credential" });
           row.setAttribute("data-mugs-ref", `credential:${c.id}`);
           const status = this.credentialStatus(c);
-          const needsRepair = status === "missing-keychain" || status === "missing";
+          const needsRepair = status === "missing-keychain" || status === "missing" || status === "oauth-expired";
           if (needsRepair) row.classList.add("mugs-cred-warning");
           const descParts = [this.credentialStatusText(c, status)];
           if (c.username) descParts.push(`user: ${c.username}`);
           if (c.baseUrl) descParts.push(`url: ${c.baseUrl}`);
-          new Setting(row)
-            .setName(`${c.label} (${c.kind})`)
-            .setDesc(descParts.join(" · "))
-            .addButton((b) =>
-              b.setButtonText("Delete").onClick(() => {
-                this.edit((d) => d.removeCredential(c.id));
-                void this.commitNow();
-              }),
-            );
+          const settingRow = new Setting(row)
+            .setName(`${c.label} (${c.authMode === "oauth" ? `${c.kind} OAuth` : c.kind})`)
+            .setDesc(descParts.join(" · "));
+          if (c.authMode === "oauth") {
+            settingRow.addButton((b) => {
+              b.setButtonText(needsRepair ? "Reconnect with GitLab" : "Reconnect");
+              if (needsRepair) b.setCta();
+              b.onClick(() => void this.reconnectOAuthInPlace(c.id));
+            });
+          }
+          settingRow.addButton((b) =>
+            b.setButtonText("Delete").onClick(() => {
+              this.edit((d) => d.removeCredential(c.id));
+              void this.commitNow();
+            }),
+          );
 
-          // In-place token repair (hosted only): paste a new token onto the
-          // EXISTING credential (id preserved) so every mapping stays linked.
+          // In-place token repair (hosted token accounts): paste a new token onto
+          // the EXISTING credential (id preserved) so every mapping stays linked.
           // Auto-expanded when the token is known-missing; behind a small
           // "Update token" toggle otherwise.
-          if (c.kind !== "local") {
+          if (c.kind !== "local" && c.authMode !== "oauth") {
             let toggleBtn: HTMLElement | null = null;
             if (!needsRepair) {
               toggleBtn = row.createEl("button", { cls: "mugs-link-btn", text: "Update token" });
@@ -386,12 +391,27 @@ export class MugsSettingTab extends PluginSettingTab {
             input.type = "password";
             input.placeholder = needsRepair ? "Paste token to reconnect" : "New token";
             input.setAttribute("aria-label", `Token for ${c.label}`);
+            const testSaveBtn = document.createElement("button");
+            testSaveBtn.type = "button";
+            testSaveBtn.className = "mod-cta";
+            testSaveBtn.textContent = "Test & Save";
+            testSaveBtn.addEventListener("click", () => void this.testAndSaveTokenInPlace(c.id, input));
             const saveBtn = document.createElement("button");
             saveBtn.type = "button";
             saveBtn.textContent = "Save token";
             saveBtn.addEventListener("click", () => void this.saveTokenInPlace(c.id, input));
             panel.appendChild(input);
+            panel.appendChild(testSaveBtn);
             panel.appendChild(saveBtn);
+            if (c.kind === "gitlab") {
+              const createLink = document.createElement("a");
+              createLink.className = "mugs-token-helper-link";
+              createLink.href = buildGitLabCreateTokenUrl(c.baseUrl);
+              createLink.target = "_blank";
+              createLink.rel = "noopener noreferrer";
+              createLink.textContent = "Create token in GitLab ↗";
+              panel.appendChild(createLink);
+            }
             if (toggleBtn) {
               toggleBtn.setAttribute("aria-expanded", "false");
               toggleBtn.addEventListener("click", () => {
@@ -789,11 +809,83 @@ export class MugsSettingTab extends PluginSettingTab {
    *  "keychain" claim when the keychain actually holds nothing). */
   private credentialStatusText(c: Credential, status: CredentialStatus): string {
     if (c.kind === "local") return `path: ${c.baseUrl ?? "not set"}`;
+    if (c.authMode === "oauth") {
+      switch (status) {
+        case "ready": return "GitLab OAuth · auto-refresh";
+        case "oauth-expired": return "session expired — sign in again";
+        case "missing-keychain": return "not signed in on this device — sign in again";
+        case "locked": return "locked — unlock under Security";
+        case "missing": return "not signed in — sign in with GitLab";
+      }
+    }
     switch (status) {
       case "ready": return c.secretId ? "token: saved in keychain" : `token: ${maskToken(c.token)}`;
       case "missing-keychain": return "token missing on this device — paste token below";
+      case "oauth-expired": return "session expired — sign in again";
       case "locked": return "locked — unlock under Security";
       case "missing": return "token not set — paste token below";
+    }
+  }
+
+  /** Test a pasted token live against the provider before saving it in place. */
+  private async testAndSaveTokenInPlace(id: string, input: { value: string }): Promise<void> {
+    const value = input.value.trim();
+    if (!value) { new Notice("MUGS: paste a token first."); return; }
+    const current = this.view().credentials.find((x) => x.id === id);
+    if (!current) { new Notice("MUGS: this account no longer exists."); return; }
+    try {
+      const provider = buildProvider(
+        { kind: current.kind, baseUrl: current.baseUrl, token: value, allowedRepos: current.repos },
+        { actingUsername: current.username },
+      );
+      const list = await provider.listRepos();
+      await this.saveTokenInPlace(id, input);
+      new Notice(`MUGS: verified and saved token for "${current.label}" (${list.length} repositor${list.length === 1 ? "y" : "ies"} visible).`);
+    } catch (e) {
+      new Notice(`MUGS: token check failed — ${errorMessage(e)}. Nothing was changed.`, 10000);
+    }
+  }
+
+  /** Re-run GitLab OAuth PKCE for an existing OAuth credential (preserving `id` and all mappings). */
+  private async reconnectOAuthInPlace(id: string): Promise<void> {
+    const current = this.view().credentials.find((x) => x.id === id);
+    if (!current || !current.oauth?.clientId) {
+      new Notice("MUGS: this account has no OAuth Application ID configured.");
+      return;
+    }
+    const start = (this.plugin as unknown as {
+      startGitLabOAuth?: (opts: { baseUrl?: string; clientId: string; redirectUri?: string }) => Promise<{
+        bundle: { accessToken: string; refreshToken?: string; expiresAt?: number; scope?: string };
+        username?: string;
+        redirectUri: string;
+      }>;
+    }).startGitLabOAuth;
+    if (typeof start !== "function") {
+      new Notice("MUGS: GitLab OAuth is not available in this host.");
+      return;
+    }
+    new Notice("MUGS: opening browser to reconnect with GitLab…");
+    try {
+      const res = await start.call(this.plugin, {
+        baseUrl: current.baseUrl,
+        clientId: current.oauth.clientId,
+        redirectUri: current.oauth.redirectUri,
+      });
+      this.edit((d) => d.upsertCredential({
+        ...current,
+        authMode: "oauth",
+        username: res.username ?? current.username,
+        token: encodeOAuthSecret(res.bundle),
+        oauth: {
+          clientId: current.oauth!.clientId,
+          redirectUri: res.redirectUri,
+          expiresAt: res.bundle.expiresAt,
+          scope: res.bundle.scope,
+        },
+      }));
+      await this.commitNow(`MUGS: reconnected "${current.label}" with GitLab.`);
+    } catch (e) {
+      new Notice(`MUGS: could not reconnect with GitLab — ${errorMessage(e)}`, 10000);
     }
   }
 
@@ -1027,6 +1119,9 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
    *  account live, and "Add account" commits immediately. */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = PROVIDER_OPTIONS[0]?.kind ?? "gitlab";
+    let authMode: "token" | "oauth" = "token";
+    let oauthClientId = "";
+    let oauthController: AbortController | null = null;
     let label = providerOption(kind)?.label ?? kind; // auto-filled; editable
     let labelTouched = false;
     let username = "";
@@ -1041,12 +1136,15 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     const messagesEl = card.createDiv({ cls: "mugs-form-messages" });
     const testStatusEl = card.createDiv({ cls: "mugs-test-status" });
 
-    /** Form rows, rebuilt when the provider kind flips (hosted ↔ local layouts). */
+    /** Form rows + action buttons, rebuilt when provider kind or authMode flips. */
     let rowsEl: HTMLElement | null = null;
+    let actionsEl: HTMLElement | null = null;
     let advancedEl: HTMLDetailsElement | null = null;
 
     const currentProblems = (): FieldProblem[] =>
-      validateCredentialForm({ kind, label, token, baseUrl, repos });
+      authMode === "oauth" && kind === "gitlab"
+        ? validateCredentialForm({ kind, label, token: "oauth-pending", baseUrl, repos })
+        : validateCredentialForm({ kind, label, token, baseUrl, repos });
 
     const refreshValidation = (): void => {
       messagesEl.empty();
@@ -1064,10 +1162,75 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       }
     };
 
-    /** (Re)build the kind-specific rows: hosted shows Token + advanced options;
+    const startOAuthSignIn = async (): Promise<void> => {
+      const clientId = oauthClientId.trim();
+      if (!clientId) {
+        testStatusEl.empty();
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: "Enter your GitLab OAuth Application ID first." });
+        return;
+      }
+      const start = (this.plugin as unknown as {
+        startGitLabOAuth?: (opts: { baseUrl?: string; clientId: string; redirectUri?: string; signal?: AbortSignal }) => Promise<{
+          bundle: { accessToken: string; refreshToken?: string; expiresAt?: number; scope?: string };
+          username?: string;
+          redirectUri: string;
+        }>;
+      }).startGitLabOAuth;
+      if (typeof start !== "function") {
+        testStatusEl.empty();
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: "GitLab OAuth is not available in this host." });
+        return;
+      }
+      oauthController?.abort();
+      oauthController = new AbortController();
+      testStatusEl.empty();
+      const waitRow = testStatusEl.createDiv({ cls: "mugs-field-hint" });
+      waitRow.createEl("span", { text: "Waiting for GitLab sign-in in your browser… " });
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "mugs-link-btn";
+      cancelBtn.textContent = "Cancel";
+      cancelBtn.addEventListener("click", () => oauthController?.abort());
+      waitRow.appendChild(cancelBtn);
+      try {
+        const res = await start.call(this.plugin, {
+          baseUrl: baseUrl || undefined,
+          clientId,
+          redirectUri: DEFAULT_OAUTH_REDIRECT_URI,
+          signal: oauthController.signal,
+        });
+        const finalLabel = labelTouched && label ? label : (res.username ? `GitLab (${res.username})` : label);
+        this.edit((d) => d.upsertCredential({
+          id: newId(),
+          label: finalLabel,
+          kind: "gitlab",
+          authMode: "oauth",
+          username: res.username || username || undefined,
+          token: encodeOAuthSecret(res.bundle),
+          baseUrl: baseUrl || undefined,
+          repos: repos.length ? repos : undefined,
+          oauth: {
+            clientId,
+            redirectUri: res.redirectUri,
+            expiresAt: res.bundle.expiresAt,
+            scope: res.bundle.scope,
+          },
+        }));
+        testStatusEl.empty();
+        await this.commitNow(`MUGS: signed in to GitLab as ${res.username ?? finalLabel}.`);
+      } catch (e) {
+        testStatusEl.empty();
+        testStatusEl.createEl("div", { cls: "mugs-field-error", text: `Sign-in failed — ${errorMessage(e)}` });
+      } finally {
+        oauthController = null;
+      }
+    };
+
+    /** (Re)build the kind-specific rows: hosted shows Token (or GitLab OAuth) + advanced options;
      *  local shows a Repository path (bare /abs path or file:// URL) + Label. */
     const buildRows = (): void => {
       if (rowsEl) rowsEl.remove();
+      if (actionsEl) actionsEl.remove();
       rowsEl = card.createDiv({ cls: "mugs-cred-form-rows" });
       advancedEl = null;
       if (kind === "local") {
@@ -1086,15 +1249,76 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             t.setValue(label);
             t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
           });
+        buildActions();
         return;
       }
-      new Setting(rowsEl)
-        .setName("Token")
-        .setDesc("API token for this account — stored in this vault and never displayed.")
-        .addText((t) => {
-          t.setPlaceholder("Token").inputEl.type = "password";
-          t.onChange((v) => { token = v; refreshValidation(); });
+
+      if (kind === "gitlab") {
+        const modeWrap = rowsEl.createDiv({ cls: "mugs-mode-choice mugs-auth-mode" });
+        const mkAuthOpt = (val: "token" | "oauth", text: string): void => {
+          const opt = modeWrap.createEl("label", { cls: "mugs-mode-option" });
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "mugs-gitlab-auth-mode";
+          radio.checked = authMode === val;
+          radio.addEventListener("change", () => {
+            if (!radio.checked) return;
+            authMode = val;
+            testStatusEl.empty();
+            buildRows();
+            refreshValidation();
+          });
+          opt.appendChild(radio);
+          opt.createEl("span", { text });
+        };
+        mkAuthOpt("token", "Access token (PAT / Project token)");
+        mkAuthOpt("oauth", "Sign in with GitLab (OAuth)");
+      }
+
+      if (kind === "gitlab" && authMode === "oauth") {
+        new Setting(rowsEl)
+          .setName("Application ID (Client ID)")
+          .setDesc("Create a non-confidential GitLab OAuth application with scopes: read_api, write_repository, read_user.")
+          .addText((t) => {
+            t.setPlaceholder("GitLab OAuth Application ID");
+            t.setValue(oauthClientId);
+            t.onChange((v) => { oauthClientId = v.trim(); });
+          });
+        const hint = rowsEl.createDiv({ cls: "mugs-oauth-hint" });
+        hint.createEl("span", { text: `Redirect URI: ${DEFAULT_OAUTH_REDIRECT_URI} ` });
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "mugs-link-btn";
+        copyBtn.textContent = "Copy URI";
+        copyBtn.addEventListener("click", () => {
+          void navigator.clipboard?.writeText(DEFAULT_OAUTH_REDIRECT_URI);
+          new Notice("MUGS: copied OAuth redirect URI.");
         });
+        hint.appendChild(copyBtn);
+      } else {
+        new Setting(rowsEl)
+          .setName("Token")
+          .setDesc("API token for this account — stored in this vault and never displayed.")
+          .addText((t) => {
+            t.setPlaceholder("Token").inputEl.type = "password";
+            t.onChange((v) => { token = v; refreshValidation(); });
+          });
+        if (kind === "gitlab") {
+          const linkRow = rowsEl.createDiv({ cls: "mugs-oauth-hint" });
+          const a = document.createElement("a");
+          a.className = "mugs-token-helper-link";
+          a.href = buildGitLabCreateTokenUrl(baseUrl);
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.textContent = "Create token in GitLab ↗";
+          linkRow.appendChild(a);
+          linkRow.createEl("span", {
+            cls: "mugs-muted",
+            text: " · For single-repo access, use a fine-grained or project token with read_api + write_repository and set Allowed repositories below.",
+          });
+        }
+      }
+
       const advanced = rowsEl.createEl("details", { cls: "mugs-advanced-details" });
       advancedEl = advanced;
       advanced.open = kind === "forgejo"; // self-hosted only: the URL is required
@@ -1115,14 +1339,63 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           t.setValue(label);
           t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
         });
-      new Setting(advBody)
-        .setName("Username")
-        .setDesc("Optional username (GitLab shows the acting user).")
-        .addText((t) => t.setPlaceholder("Username (optional)").onChange((v) => { username = v.trim(); }));
+      if (!(kind === "gitlab" && authMode === "oauth")) {
+        new Setting(advBody)
+          .setName("Username")
+          .setDesc("Optional username (GitLab shows the acting user).")
+          .addText((t) => t.setPlaceholder("Username (optional)").onChange((v) => { username = v.trim(); }));
+      }
       new Setting(advBody)
         .setName("Allowed repositories")
-        .setDesc("Optional owner/repo per line to restrict which repos this credential may access.")
+        .setDesc("Optional owner/repo per line to restrict which repos this account may access (works with OAuth too).")
         .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); refreshValidation(); }));
+      buildActions();
+    };
+
+    const buildActions = (): void => {
+      if (actionsEl) actionsEl.remove();
+      if (kind === "gitlab" && authMode === "oauth") {
+        actionsEl = this.actions([
+          { text: "Sign in with GitLab", cta: true, onClick: () => void startOAuthSignIn() },
+        ]);
+      } else {
+        actionsEl = this.actions([
+          { text: "Test connection", onClick: () => void testConnection() },
+          {
+            text: "Add account",
+            cta: true,
+            onClick: () => {
+              attempted = true;
+              refreshValidation();
+              const errors = currentProblems().filter((p) => p.level === "error");
+              if (errors.length > 0) {
+                new Notice(`MUGS: fix these before adding the account:\n· ${errors.slice(0, 4).map((p) => p.message).join("\n· ")}`, 10000);
+                return;
+              }
+              try {
+                // Local paths are normalized to file:// here so data.json always
+                // stores a valid URL (schema requires z.string().url()).
+                const storedBaseUrl = kind === "local" ? normalizeLocalBaseUrl(baseUrl) : baseUrl || undefined;
+                this.edit((d) => d.upsertCredential({
+                  id: newId(),
+                  label,
+                  kind,
+                  username: kind === "local" ? undefined : (username || undefined),
+                  token: kind === "local" ? "" : token,
+                  baseUrl: storedBaseUrl || undefined,
+                  repos: repos.length ? repos : undefined,
+                }));
+                // Commit immediately — no "Apply settings to save" limbo. Re-render
+                // also refreshes the Connect-folders form so repos load right away.
+                void this.commitNow(`MUGS: account "${label}" added.`);
+              } catch (e) {
+                new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
+              }
+            },
+          },
+        ]);
+      }
+      card.appendChild(actionsEl);
     };
 
     new Setting(card)
@@ -1132,6 +1405,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         for (const option of PROVIDER_OPTIONS) d.addOption(option.kind, option.label);
         d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
+          if (kind !== "gitlab") authMode = "token";
           baseUrl = prefillBaseUrl(kind);
           token = "";
           if (!labelTouched) label = providerOption(kind)?.label ?? kind;
@@ -1142,8 +1416,6 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           refreshValidation();
         });
       });
-
-    buildRows();
 
     /** Explicit, opt-in live probe: build the provider from the in-form values and
      *  list repos, so the user finds out now whether the account works. */
@@ -1190,42 +1462,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       }
     };
 
-    card.appendChild(this.actions([
-      { text: "Test connection", onClick: () => void testConnection() },
-      {
-        text: "Add account",
-        cta: true,
-        onClick: () => {
-          attempted = true;
-          refreshValidation();
-          const errors = currentProblems().filter((p) => p.level === "error");
-          if (errors.length > 0) {
-            new Notice(`MUGS: fix these before adding the account:\n· ${errors.slice(0, 4).map((p) => p.message).join("\n· ")}`, 10000);
-            return;
-          }
-          try {
-            // Local paths are normalized to file:// here so data.json always
-            // stores a valid URL (schema requires z.string().url()).
-            const storedBaseUrl = kind === "local" ? normalizeLocalBaseUrl(baseUrl) : baseUrl || undefined;
-            this.edit((d) => d.upsertCredential({
-              id: newId(),
-              label,
-              kind,
-              username: kind === "local" ? undefined : (username || undefined),
-              token: kind === "local" ? "" : token,
-              baseUrl: storedBaseUrl || undefined,
-              repos: repos.length ? repos : undefined,
-            }));
-            // Commit immediately — no "Apply settings to save" limbo. Re-render
-            // also refreshes the Connect-folders form so repos load right away.
-            void this.commitNow(`MUGS: account "${label}" added.`);
-          } catch (e) {
-            new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
-          }
-        },
-      },
-    ]));
-
+    buildRows();
     refreshValidation();
   }
   /** Connect assistant: pick an account → pick a repo → choose whole-repo root
@@ -1320,12 +1557,14 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         }
         const cred = this.view().credentials.find((c) => c.id === providerId);
         if (!cred) { repoSel.disabled = true; return; }
-        // Runtime token first; fall back to the DRAFT credential (just-added, not yet applied).
-        const token = this.plugin.store.getToken(providerId)
+        // Runtime/OAuth-refreshed token first; fall back to the DRAFT credential.
+        const resolve = (this.plugin as unknown as { resolveToken?: (id: string) => Promise<string | undefined> }).resolveToken;
+        const token = (typeof resolve === "function" ? await resolve.call(this.plugin, providerId) : undefined)
+          ?? this.plugin.store.getToken(providerId)
           ?? this.view().credentials.find((c) => c.id === providerId)?.token
           ?? "";
-        if (!token) { new Notice("MUGS: enter a token for this credential."); repoSel.disabled = true; return; }
-        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, allowedRepos: cred.repos }, { actingUsername: cred.username });
+        if (!token) { new Notice("MUGS: enter a token or reconnect this account first."); repoSel.disabled = true; return; }
+        const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, authMode: cred.authMode, allowedRepos: cred.repos }, { actingUsername: cred.username });
         reposCache = await provider.listRepos();
         if (reposCache.length === 0) {
           new Notice("MUGS: no accessible repositories for this credential.");
@@ -1624,10 +1863,14 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
   }
   /** List child directories of `repoKey` at `path` for a credential's provider. */
   private async listDirectoriesFor(cred: Credential, repoKey: string, path: string): Promise<string[]> {
-    const token = this.plugin.store.getToken(cred.id) ?? cred.token ?? "";
+    const resolve = (this.plugin as unknown as { resolveToken?: (id: string) => Promise<string | undefined> }).resolveToken;
+    const token = (typeof resolve === "function" ? await resolve.call(this.plugin, cred.id) : undefined)
+      ?? this.plugin.store.getToken(cred.id)
+      ?? cred.token
+      ?? "";
     if (!token) return [];
     try {
-      const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token }, { actingUsername: cred.username });
+      const provider = buildProvider({ kind: cred.kind, baseUrl: cred.baseUrl, token, authMode: cred.authMode }, { actingUsername: cred.username });
       return await provider.listDirectories(repoKey, path);
     } catch {
       return [];

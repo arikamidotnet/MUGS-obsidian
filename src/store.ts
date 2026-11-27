@@ -29,6 +29,13 @@ import {
   decryptAesGcm,
   generateSalt,
 } from "./crypto";
+import {
+  DEFAULT_OAUTH_REDIRECT_URI,
+  decodeOAuthSecret,
+  encodeOAuthSecret,
+  isOAuthTokenExpiring,
+  type OAuthTokenBundle,
+} from "./providers/gitlabOAuth";
 import type {
   MugsSettings,
   LastSyncState,
@@ -75,6 +82,11 @@ type SecuritySettings = MugsSettings["security"] & { kdf?: KdfParams };
 export interface SecretStore {
   /** False when the host has no usable secret storage (older Obsidian/mobile). */
   available(): boolean;
+  /** False when the host's secret store lacks OS encryption (e.g. Linux without
+   *  gnome-keyring/kwallet/libsecret). Reads still work for pre-existing entries,
+   *  but MUGS skips writing new secrets there so Obsidian never pops an
+   *  "unencrypted secret store" warning and tokens fall back to data.json. */
+  canWrite?(): boolean;
   get(id: string): string | null;
   set(id: string, value: string): void;
   /** Best-effort removal of a stored secret. Optional: hosts without a delete
@@ -86,9 +98,10 @@ export interface SecretStore {
  *  - "ready": the token (or local repo URL) resolves and is usable for auth now.
  *  - "missing-keychain": the credential references a keychain secret THIS device
  *    does not have (data.json synced from another machine, or a reset keyring).
+ *  - "oauth-expired": the OAuth grant expired or was revoked and must reconnect.
  *  - "locked": the stored token is passphrase-encrypted and the vault is locked.
  *  - "missing": no usable token, keychain reference, or local repo URL at all. */
-export type CredentialStatus = "ready" | "missing-keychain" | "locked" | "missing";
+export type CredentialStatus = "ready" | "missing-keychain" | "oauth-expired" | "locked" | "missing";
 
 /** In-memory SecretStore for tests and non-Obsidian hosts. */
 export class MemorySecretStore implements SecretStore {
@@ -114,6 +127,8 @@ export class MugsStore {
   /** Credential ids whose stored token could not be decrypted (locked, wrong
    *  passphrase or corrupted): kept in storage for recovery, but never used for auth. */
   private unreadableTokens = new Set<string>();
+  /** Credential ids whose OAuth grant was rejected (`invalid_grant` / revoked) this session. */
+  private expiredOAuth = new Set<string>();
   /** Set when data.json could not be parsed: saves are refused (see save) so the
    *  corrupt file is never silently overwritten with fresh defaults. */
   private loadErrorMessage?: string;
@@ -136,6 +151,7 @@ export class MugsStore {
 
   async load(): Promise<MugsSettings> {
     this.unreadableTokens.clear();
+    this.expiredOAuth.clear();
     this.loadErrorMessage = undefined;
     try {
       // The read AND the parse are both guarded: in real Obsidian, loadData()
@@ -517,9 +533,10 @@ export class MugsStore {
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
     if (!isMetadataOnly) {
-      // A real secret supersedes the runtime plaintext and clears an undecryptable marker.
+      // A real secret supersedes the runtime plaintext and clears an undecryptable/expired marker.
       this.runtimeTokens.set(cred.id, cred.token);
       this.unreadableTokens.delete(cred.id);
+      this.expiredOAuth.delete(cred.id);
       // Prefer the OS keychain — but only a VERIFIED write may blank the durable
       // token. If the keychain silently drops the secret (Linux without a running
       // keyring daemon) or rejects the write, the token stays in data.json (or
@@ -542,6 +559,7 @@ export class MugsStore {
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== id);
     this.runtimeTokens.delete(id);
     this.unreadableTokens.delete(id);
+    this.expiredOAuth.delete(id);
   }
 
   /** Add or replace a folder mapping, rejecting any that target .obsidian/ unless
@@ -704,10 +722,8 @@ export class MugsStore {
     return myTurn;
   }
 
-  /** Resolve the live token for a credential id (runtime secret). Undecryptable
-   *  or locked stored tokens resolve to undefined so sync reports "missing token"
-   *  clearly; stored ciphertext/masks are never handed out as if they were secrets. */
-  getToken(id: string): string | undefined {
+  /** Resolve the raw stored secret (PAT string or serialized `mugs-oauth-v1:` bundle). */
+  private getRawSecret(id: string): string | undefined {
     if (this.unreadableTokens.has(id)) return undefined;
     const runtime = this.runtimeTokens.get(id);
     if (runtime !== undefined) return runtime;
@@ -722,21 +738,73 @@ export class MugsStore {
     return stored;
   }
 
+  /** Resolve the live token for a credential id (runtime secret). For OAuth credentials
+   *  this transparently extracts `accessToken` from the stored bundle. Undecryptable
+   *  or locked stored tokens resolve to undefined so sync reports "missing token"
+   *  clearly; stored ciphertext/masks are never handed out as if they were secrets. */
+  getToken(id: string): string | undefined {
+    const raw = this.getRawSecret(id);
+    if (raw === undefined) return undefined;
+    const oauth = decodeOAuthSecret(raw);
+    return oauth ? oauth.accessToken : raw;
+  }
+
+  /** Decode the OAuth token bundle for an OAuth credential, or undefined if absent/plain PAT. */
+  getOAuthBundle(id: string): OAuthTokenBundle | undefined {
+    const raw = this.getRawSecret(id);
+    return decodeOAuthSecret(raw) ?? undefined;
+  }
+
+  /** Store a freshly exchanged or rotated OAuth token bundle on an existing credential,
+   *  routing through verified SecretStorage (or data.json fallback) and updating expiry metadata. */
+  setOAuthBundle(id: string, bundle: OAuthTokenBundle): void {
+    const cred = this.settings.credentials.find((c) => c.id === id);
+    if (!cred) return;
+    this.expiredOAuth.delete(id);
+    this.upsertCredential({
+      ...cred,
+      authMode: "oauth",
+      token: encodeOAuthSecret(bundle),
+      oauth: {
+        clientId: cred.oauth?.clientId ?? "",
+        redirectUri: cred.oauth?.redirectUri ?? DEFAULT_OAUTH_REDIRECT_URI,
+        ...(bundle.expiresAt !== undefined ? { expiresAt: bundle.expiresAt } : {}),
+        ...(bundle.scope || cred.oauth?.scope ? { scope: bundle.scope ?? cred.oauth?.scope } : {}),
+      },
+    });
+  }
+
+  /** Mark an OAuth credential's grant as expired/revoked for this session (`invalid_grant`). */
+  markOAuthExpired(id: string): void {
+    this.expiredOAuth.add(id);
+  }
+
   /** Why a credential is (not) usable for auth right now. Pure state inspection —
    *  never throws, never writes. Lets the UI tell "locked" apart from "the token
-   *  simply is not on this device" instead of lumping both into missing-token. */
+   *  simply is not on this device" or "OAuth session expired". */
   getCredentialStatus(id: string): CredentialStatus {
     const cred = this.settings.credentials.find((c) => c.id === id);
     if (!cred) return "missing";
     // A local repo needs no secret: it is ready iff it points at a repo path.
     if (cred.kind === "local") return cred.baseUrl?.trim() ? "ready" : "missing";
-    if (this.getToken(id)) return "ready";
     if (
       this.unreadableTokens.has(id) ||
       (this.isLocked() && cred.token && isStoredCipher(cred.token))
     ) {
       return "locked";
     }
+    if (this.expiredOAuth.has(id)) return "oauth-expired";
+    if (cred.authMode === "oauth") {
+      if (!this.getToken(id)) {
+        return cred.secretId && !cred.token ? "missing-keychain" : "missing";
+      }
+      const bundle = this.getOAuthBundle(id);
+      if (bundle && !bundle.refreshToken && isOAuthTokenExpiring(bundle.expiresAt, Date.now(), 0)) {
+        return "oauth-expired";
+      }
+      return "ready";
+    }
+    if (this.getToken(id)) return "ready";
     // Keychain-referenced with nothing durable in data.json and nothing readable
     // in the keychain: the reference is orphaned on this device.
     if (cred.secretId && !cred.token) return "missing-keychain";
@@ -752,6 +820,7 @@ export class MugsStore {
    *  failed attempt. */
   private tryStoreInKeychain(sid: string, secret: string): boolean {
     if (!this.secrets?.available() || !secret || isMasked(secret)) return false;
+    if (this.secrets.canWrite && !this.secrets.canWrite()) return false;
     try {
       this.secrets.set(sid, secret);
       if (this.secrets.get(sid) === secret) return true;
