@@ -123,6 +123,12 @@ describe("SettingsDraft — validation of the COMPLETE draft", () => {
     d.upsertCredential({ id: "local", label: "Local", kind: "local", token: "" });
     expect(d.validate().some((p) => p.includes("file://"))).toBe(true);
   });
+
+  it("accepts a local credential whose baseUrl is a bare absolute Linux path", () => {
+    const d = new SettingsDraft(baseSettings());
+    d.upsertCredential({ id: "loc", label: "Local", kind: "local", token: "", baseUrl: "/tmp/test.git" });
+    expect(d.validate()).toEqual([]);
+  });
 });
 
 describe("SettingsDraft — commit semantics", () => {

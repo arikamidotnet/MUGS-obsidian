@@ -26,7 +26,7 @@ import { emptyReconciliation, gitBlobId, parseReconciliationTree, reconciliation
 import { checkRelPath } from "../git/safePath";
 import { identityCloneDir, identityKey, canonicalizeRemote, withIdentityLock } from "./repoIdentity";
 import { isInScope, detectRenames, type Rename } from "./exclusion";
-import { isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
+import { isProtectedMugsPath, isUnderObsidianRoot, shouldSyncObsidianPath } from "./obsidianScope";
 import { orderApplyOps, type ApplyOp } from "./applier";
 import { planMirrorPull, vaultToRepoPath, repoToVaultPath } from "./mirror";
 import type { TrashStore } from "./trash";
@@ -518,6 +518,14 @@ export class CloneManager {
    * so existing behavior is unchanged.
    */
   private inScope(mapping: FolderMapping, path: string): boolean {
+    // HARD BLOCK: MUGS's own runtime state (its clone store, git metadata, the
+    // plugin's data.json and lockfiles) is never in scope — not for push, not for
+    // pull, not even against a remote that accidentally carries a committed copy of
+    // `.obsidian/plugins/mugs-obsidian/data.json` (which would overwrite this
+    // user's credentials with another machine's keychain references). This guard
+    // runs BEFORE every other scope rule and cannot be overridden by mapping or
+    // obsidianConfig settings.
+    if (isProtectedMugsPath(path)) return false;
     if (!isInScope(mapping, path)) return false;
     const config = this.obsidianConfig;
     if (isUnderObsidianRoot(path)) {

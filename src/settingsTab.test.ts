@@ -505,10 +505,12 @@ describe("add-mapping assistant", () => {
     expect(connect).toBeTruthy();
     connect.handlers.click[0]();
     expect((tab as any).view().sync.paused).toBe(false);
-    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
+    // Connect commits immediately (no "Apply settings to save" limbo) and kicks
+    // the scheduler so the new folder starts syncing right away.
     await flush();
     expect(plugin.store.getSettings().sync.paused).toBe(false);
     expect(plugin.store.getSettings().mappings).toHaveLength(2);
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
   });
 
   it("starts a first connection syncing immediately (no forced pause)", async () => {
@@ -536,13 +538,12 @@ describe("add-mapping assistant", () => {
     };
     findButton(tab.containerEl, "Connect selected folders").handlers.click[0]();
     // Minimum engagement: the first connection is NOT force-paused, so it can sync
-    // as soon as the settings commit.
+    // as soon as the settings commit (immediately — no Apply click needed).
     expect((tab as any).view().sync.paused).toBe(false);
-    expect(plugin.store.getSettings().sync.paused).toBe(false);
-    tab.containerEl.querySelector<HTMLButtonElement>(".mugs-unsaved-apply")!.click();
     await flush();
     expect(plugin.store.getSettings().sync.paused).toBe(false);
     expect(plugin.store.getSettings().mappings).toHaveLength(1);
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
   });
 
   it("disables matched folders whose localFolder is already mapped, with a Mapped badge", async () => {
@@ -632,5 +633,196 @@ describe("settings onboarding — endpoint autofill and inline validation", () =
     const banner = tab.containerEl.querySelector(".mugs-unsaved-banner")!;
     expect(banner).toBeTruthy();
     expect(collectText(banner)).toContain("unsaved change");
+  });
+
+  it("shows a muted hint instead of a broken form when no account exists", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().credentials.splice(0);
+    plugin.store.getSettings().mappings.splice(0);
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    expect(collectText(tab.containerEl)).toContain("Add an account above first to connect a repository.");
+    expect(findButton(tab.containerEl, "Connect selected folders")).toBeFalsy();
+  });
+
+});
+
+describe("connect form — whole-repo root sync", () => {
+  it("connects a local credential as whole-repo root sync immediately", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().mappings.splice(0);
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    await flush();
+
+    // Local credentials default to root sync: the connect button works out of
+    // the box (the old flow dead-ended with "check at least one folder to link").
+    const connect = findButton(tab.containerEl, "Connect vault root");
+    expect(connect).toBeTruthy();
+    connect.handlers.click[0]();
+    await flush();
+
+    const mappings = plugin.store.getSettings().mappings;
+    expect(mappings).toHaveLength(1);
+    expect(mappings[0].localFolder).toBe(".");
+    expect(mappings[0].remotePath).toBe("");
+    expect(mappings[0].providerId).toBe("c1");
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
+  });
+
+  it("connects a hosted repo as whole-repo root sync with repoRef + repoPath and kicks the scheduler", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().mappings.splice(0);
+    plugin.store.getSettings().credentials[0].kind = "gitlab";
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    await flush();
+
+    // Flip the mode choice to whole-repo root sync (second radio).
+    const radios = tab.containerEl.querySelectorAll('input[type="radio"]') as unknown as any[];
+    expect(radios.length).toBe(2);
+    const rootRadio = radios[1];
+    rootRadio.checked = true;
+    rootRadio.handlers.change[0]({ target: rootRadio });
+
+    const connect = findButton(tab.containerEl, "Connect vault root");
+    expect(connect).toBeTruthy();
+    connect.handlers.click[0]();
+    await flush();
+
+    const mappings = plugin.store.getSettings().mappings;
+    expect(mappings).toHaveLength(1);
+    expect(mappings[0].localFolder).toBe(".");
+    expect(mappings[0].remotePath).toBe("");
+    expect(mappings[0].repoRef).toBe("r1");
+    expect(mappings[0].repoPath).toBe("team/repo");
+    expect(mappings[0].providerId).toBe("c1");
+    expect(mappings[0].label).toBe("team/repo");
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
+  });
+});
+
+describe("accounts — honest status + in-place token repair", () => {
+  it("flags a credential whose keychain entry is missing and repairs it in place", async () => {
+    const plugin = makePlugin();
+    const cred = plugin.store.getSettings().credentials[0];
+    cred.kind = "gitlab";
+    cred.secretId = "mugs-c1";
+    cred.token = "";
+    (plugin.store as any).getCredentialStatus = (id: string) => (id === "c1" ? "missing-keychain" : "ready");
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    expect(collectText(tab.containerEl)).toContain("token missing on this device — paste token below");
+
+    // The repair input is auto-expanded: the first password field on the page.
+    const input = tab.containerEl.querySelector('input[type="password"]') as any;
+    expect(input).toBeTruthy();
+    input.value = "glpat-repaired";
+    const save = findButton(tab.containerEl, "Save token");
+    expect(save).toBeTruthy();
+    save.handlers.click[0]();
+    await flush();
+
+    const stored = plugin.store.getSettings().credentials[0];
+    expect(stored.token).toBe("glpat-repaired");
+    expect(stored.id).toBe("c1"); // repaired in place — id preserved, mappings stay linked
+    expect(stored.secretId).toBe("mugs-c1");
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
+  });
+
+  it("describes a keychain-backed ready credential as saved in the keychain", async () => {
+    const plugin = makePlugin();
+    const cred = plugin.store.getSettings().credentials[0];
+    cred.kind = "gitlab";
+    cred.secretId = "mugs-c1";
+    (plugin.store as any).getCredentialStatus = () => "ready";
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    expect(collectText(tab.containerEl)).toContain("token: saved in keychain");
+  });
+
+  it("infers missing-keychain without the store helper (secretId set, token unreadable)", async () => {
+    const plugin = makePlugin();
+    const cred = plugin.store.getSettings().credentials[0];
+    cred.kind = "gitlab";
+    cred.secretId = "mugs-c1";
+    cred.token = "";
+    plugin.store.getToken = () => undefined;
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    expect(collectText(tab.containerEl)).toContain("token missing on this device — paste token below");
+  });
+});
+
+describe("mapping cards — account recovery", () => {
+  it("highlights a mapping whose account is missing and rebinds in one click", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().mappings[0].providerId = "ghost";
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+
+    expect(collectText(tab.containerEl)).toContain("Account missing — select an account to reconnect");
+    const use = findButton(tab.containerEl, "Use Work");
+    expect(use).toBeTruthy();
+    use.handlers.click[0]();
+    await flush();
+
+    expect(plugin.store.getSettings().mappings[0].providerId).toBe("c1");
+    expect(plugin.automaticSyncSettingsChanged).toHaveBeenCalled();
+  });
+});
+
+describe("secondary sections — progressive disclosure", () => {
+  const sectionTitles = (tab: MugsSettingTab): string[] =>
+    (tab.containerEl.querySelectorAll(".mugs-section") as unknown as any[]).map((s) =>
+      collectText(s.querySelector(".mugs-section-header")).replace(/[▾▸]/g, "").trim(),
+    );
+  const collapsedTitles = (tab: MugsSettingTab): string[] =>
+    (tab.containerEl.querySelectorAll(".mugs-section") as unknown as any[])
+      .filter((s) => s.className.includes("is-collapsed"))
+      .map((s) => collectText(s.querySelector(".mugs-section-header")).replace(/[▾▸]/g, "").trim());
+
+  it("default-collapses Conflicts, Security, and Obsidian settings (unlocked, sync off)", async () => {
+    const tab = new MugsSettingTab(makePlugin());
+    tab.display();
+    await flush();
+
+    const collapsed = collapsedTitles(tab);
+    expect(collapsed).toContain("Conflicts");
+    expect(collapsed).toContain("Security");
+    expect(collapsed).toContain("Obsidian settings");
+    // Primary sections stay expanded.
+    expect(collapsed).not.toContain("Getting Started");
+    expect(collapsed).not.toContain("Accounts");
+    expect(collapsed).not.toContain("Connected folders");
+    expect(sectionTitles(tab)).toHaveLength(6); // + Sync + About
+  });
+
+  it("auto-expands Security while the vault is locked", async () => {
+    const plugin = makePlugin();
+    plugin.store.isLocked = () => true;
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    expect(collapsedTitles(tab)).not.toContain("Security");
+    expect(collapsedTitles(tab)).toContain("Conflicts");
+  });
+
+  it("keeps Getting Started compact once every step is done", async () => {
+    const plugin = makePlugin();
+    plugin.store.getSettings().lastSync.m1 = { mappingId: "m1", status: "ok" } as any;
+    const tab = new MugsSettingTab(plugin);
+    tab.display();
+    await flush();
+    expect(collectText(tab.containerEl)).toContain("All set — account connected, folders linked, and sync has run.");
+    expect((tab.containerEl.querySelectorAll(".mugs-gs-step") as unknown as any[])).toHaveLength(0);
   });
 });

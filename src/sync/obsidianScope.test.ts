@@ -3,6 +3,7 @@ import {
   shouldSyncObsidianPath,
   classifyObsidianEntry,
   effectiveObsidianEntries,
+  isProtectedMugsPath,
   isUnderObsidianRoot,
   obsidianTopLevel,
   DEFAULT_OBSIDIAN_ENTRIES,
@@ -111,6 +112,41 @@ describe("effectiveObsidianEntries — defaults overlaid by config", () => {
     editedMap.set("themes", themes);
     const edited = { enabled: true, entries: Array.from(editedMap.values()) } as ObsidianConfigPolicy;
     expect(shouldSyncObsidianPath(".obsidian/themes/x.css", edited)).toBe(true); // now shared
+  });
+});
+
+describe("isProtectedMugsPath — MUGS runtime state never syncs", () => {
+  it("protects .mugs-clones, .git, the plugin's own data.json and sync lockfiles", () => {
+    expect(isProtectedMugsPath(".mugs-clones")).toBe(true);
+    expect(isProtectedMugsPath(".mugs-clones/c1/m1")).toBe(true);
+    expect(isProtectedMugsPath(".git")).toBe(true);
+    expect(isProtectedMugsPath(".git/objects/ab/cdef")).toBe(true);
+    expect(isProtectedMugsPath(".obsidian/plugins/mugs-obsidian/data.json")).toBe(true);
+    // Case-insensitive: a differently-cased vault layout can never sneak past.
+    expect(isProtectedMugsPath(".OBSIDIAN/Plugins/MUGS-OBSIDIAN/data.json")).toBe(true);
+    // Any .mugs-sync.lock path (the per-clone advisory lockfile, <dir>.mugs-sync.lock).
+    expect(isProtectedMugsPath(".mugs-sync.lock")).toBe(true);
+    expect(isProtectedMugsPath("sub/dir/clone.mugs-sync.lock")).toBe(true);
+  });
+
+  it("leaves ordinary notes and genuinely shared config syncable", () => {
+    expect(isProtectedMugsPath("notes/todo.md")).toBe(false);
+    expect(isProtectedMugsPath(".obsidian/themes/x.css")).toBe(false);
+    expect(isProtectedMugsPath(".obsidian/plugins/theme/main.js")).toBe(false);
+    expect(isProtectedMugsPath(".obsidian/plugins/theme/data.json")).toBe(false); // another plugin's data.json is governed by excludes, not the hard block
+    expect(isProtectedMugsPath(".gitignore")).toBe(false); // a root-synced repo may share its .gitignore
+  });
+
+  it("shouldSyncObsidianPath rejects the plugin's data.json even when a user shares plugins with empty excludes", () => {
+    // The user override that previously could leak MUGS's own state:
+    const leaky = config({
+      enabled: true,
+      entries: [{ path: "plugins", scope: "vault-wide", excludes: [] }],
+    });
+    expect(shouldSyncObsidianPath(".obsidian/plugins/theme/main.js", leaky)).toBe(true);
+    expect(shouldSyncObsidianPath(".obsidian/plugins/mugs-obsidian/data.json", leaky)).toBe(false);
+    expect(shouldSyncObsidianPath(".obsidian/plugins/mugs-obsidian/data.json", config({ enabled: true, entries: [] }))).toBe(false);
+    expect(shouldSyncObsidianPath(".obsidian/plugins/mugs-obsidian/data.json", config({ enabled: false, entries: [] }))).toBe(false);
   });
 });
 

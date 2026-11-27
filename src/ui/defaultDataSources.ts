@@ -124,11 +124,22 @@ export class StoreMapDataSource implements MapDataSource {
       // credential can never run, so the Map row says "skipped" (with the reason)
       // instead of a quiet "pending" that implies sync will get to it eventually.
       const credential = settings.credentials.find((c) => c.id === m.providerId);
-      const skipReason = !credential
+      let skipReason = !credential
         ? "no credential selected — choose one for this mapping in MUGS settings"
         : credential.kind === "local" && !credential.baseUrl?.trim()
           ? "local provider needs a repo path — set it in the credential's settings"
           : ls?.skipReason;
+      // A hosted credential whose token resolves to nothing on THIS device (never
+      // entered, or an orphaned keychain reference synced from another machine) can
+      // never run either — surface the repair path now instead of waiting for the
+      // next sync pass to skip it. Guarded with typeof so minimal fake stores in
+      // tests (without getToken) keep working.
+      if (credential && credential.kind !== "local" && !skipReason &&
+          typeof this.store.getToken === "function" && !this.store.getToken(credential.id)) {
+        skipReason = credential.secretId && !credential.token
+          ? "token missing on this device — open Settings → MUGS → Accounts to enter your token"
+          : "missing token — open Settings → MUGS → Accounts";
+      }
       const conflictCount = unresolvedConflicts(this.store.getConflicts(m.id)).length;
       rows.push({
         mapping: m,

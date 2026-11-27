@@ -92,7 +92,7 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 
 | Area | Path(s) | Role |
 |---|---|---|
-| Data plane | `src/types.ts`, `src/schema.ts`, `src/store.ts` | Domain types, Zod source-of-truth, persistence + token handling (tokens live in Obsidian's SecretStorage keychain, referenced by `secretId`; inline `data.json` fallback + optional passphrase encryption) |
+| Data plane | `src/types.ts`, `src/schema.ts`, `src/store.ts` | Domain types, Zod source-of-truth, persistence + verified token handling (tokens move to Obsidian's SecretStorage only after a verified write-read round-trip, falling back to `data.json` + optional passphrase encryption on systems without a working keyring; `getCredentialStatus` surfaces missing/locked/orphaned keychain states) |
 | Git client | `src/git/{types,client,runner}.ts` | Thin git wrapper over an injectable runner |
 | Providers | `src/providers/{factory,http,types,gitlab,github,gitea,bitbucket,schema}.ts` | REST adapters per backend behind one `Provider` interface |
 | Membership | `src/membership/{types,merge}.ts` | Correlate remote roster + local activity into a summary |
@@ -103,7 +103,7 @@ The seams that make this testable: `SettingsIO` (store), `GitRunner` (git client
 | Resumable state | `src/sync/resume.ts` | Deterministic base-SHA + op-id resume key |
 | Cadence | `src/sync/cadence.ts` | Human preset ↔ concrete interval mapping |
 | Scheduling | `src/sync/schedule.ts` | Pause gate, visibility reducer, event debounce |
-| Obsidian config | `src/sync/obsidianScope.ts` | Personal vs vault-wide `.obsidian/` classification |
+| Obsidian config | `src/sync/obsidianScope.ts` | Personal vs vault-wide `.obsidian/` classification + `isProtectedMugsPath` hard-block preventing `.obsidian/plugins/mugs-obsidian/data.json`, `.mugs-clones/`, `.git/`, and sync locks from ever syncing |
 | Commit message | `src/sync/commit-message.ts` | Deterministic greppable sync messages (+ on-behalf-of trailer) |
 | Attribution/worktrees (A10) | `src/sync/{attribution,trees}.ts` | Agent attribution + isolated-branch lifecycle |
 | MCP (A10) | `src/mcp/{server,draft}.ts` | Agent tool contract + commit-draft composition |

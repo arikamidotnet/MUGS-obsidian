@@ -81,35 +81,29 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    repository, branch and which top-level folder belongs to which person.
    If both sides already contain files, compare them **before** connecting.
 2. In **Settings → MUGS → Accounts → Add another account**, select GitLab or
-   GitHub. Everything possible is filled in for you: the **Base URL** (API
-   endpoint) and the **Label** are set from the provider. All you need is the
-   **Token** (and a **Username** if you like). Values are checked as you type (a
-   malformed URL or repo path is flagged inline), and **Test connection** probes
-   the account before you commit. For a repository-restricted token, enter the
-   exact `owner/repo` or `group/project` under **Allowed repositories**, one per
-   line. Press **Add account** — settings save automatically.
-3. Under **Connected folders → Connect another folder**, select your account
-   and repository. MUGS suggests matches between **top-level repository
-   directories** and **top-level vault folders**. Check the intended matching
-   folder; if none match, create the intended folder on both sides, then reopen
-   the mapping form. Avoid **Sync the entire repository to the vault root**
-   unless the whole vault is explicitly meant to be shared.
+   GitHub and paste your **Token** (the **Base URL** and **Label** are filled in
+   automatically under **Advanced options**, where you can also set a self-hosted
+   endpoint, username, or **Allowed repositories** for a project-scoped token).
+   For a **Local** repository, enter its directory path (plain `/path/to/repo`
+   or `file:///path/to/repo`). **Test connection** probes the account before
+   saving; press **Add account** to save immediately.
+3. Under **Connected folders → Connect another folder**, choose your repository
+   and pick either **Sync specific folders** (check matching top-level folders,
+   fuzzy suggestions, or map a custom folder pair) or **Sync entire repository
+   to vault root** (available for both hosted and local repositories). Avoid
+   whole-vault root sync unless the entire vault is meant to be shared.
 4. Set **Direction**: **Both ways** for collaborative upload and download,
    **Upload only** if the repository must never update this vault, or
-   **Download only** if this device must never publish. Leave **Branch** empty
-   for the repository default, or name the intended *existing* branch. Review
-   **Only sync matching files** and **Skip matching files**; empty filters mean
-   all otherwise eligible files in the mapping. Press **Connect selected
-   folders**. Settings save automatically; the banner counts any pending changes
-   and lists anything that must be fixed, with each problem clickable to jump to
-   it.
-5. Sync starts on its own — no pause step, no routine **Sync now** click. Check
-   the route on the connected-folder card and, if you want, choose
-   **Sync → Start new connections with**: **Download from repository** (default)
-   or **Upload from this device**. Both operate only within the configured
-   direction and scope; neither is an overwrite guarantee or a substitute for a
-   backup. To stop automatic sync at any time, turn on **Pause automatic sync**
-   under Sync.
+   **Download only** if this device must never publish. Optional **Branch** and
+   file filters live under **Advanced (branch, file filters)**. Press
+   **Connect vault root** or **Connect selected folders** — settings save
+   immediately and sync starts on its own.
+5. Sync starts automatically with no pause step. Check the route on the
+   connected-folder card and, if needed, choose **Sync → Start new connections
+   with**: **Download from repository** (default) or **Upload from this device**.
+   Both operate only within the configured direction and scope; neither is an
+   overwrite guarantee or a substitute for a backup. To stop automatic sync at
+   any time, turn on **Pause automatic sync** under Sync.
 
 Use **MUGS Overview** to inspect each folder, **Diff** for committed
 snapshots, **Review** for repository files that need a decision, and **Conflicts**
@@ -166,16 +160,20 @@ conflicts can postpone completion; keep a separate backup and check status.
 ## Token and privacy limits
 
 On Obsidian 1.11.4+, MUGS stores account tokens in Obsidian's built-in
-**SecretStorage** (the OS keychain) and keeps only a reference in this vault's
-plugin `data.json`. Secrets are **device-local** — they are not synced with the
-vault, so a second device must re-enter each token. On older builds, tokens
-fall back to `data.json`, where **encryption at rest is off by default**: in
-**Settings → MUGS → Security** you can set a passphrase and enable **Encrypt
-saved tokens**; you must unlock tokens after every app
-start, and losing the passphrase requires re-entering tokens. This is **not
-vault-content end-to-end encryption**. Do
-not put tokens in a note, terminal argument, Git remote URL, screenshot or
-issue report. Grant each teammate their own least-privilege host token and
-revoke it on departure.
+**SecretStorage** (the OS keychain) after verifying that writes round-trip on
+this system, keeping only a `secretId` reference in `data.json`. On Linux
+systems without a working keyring backend (or older Obsidian builds), MUGS
+automatically falls back to `data.json` instead of dropping the token. Secrets
+in SecretStorage are **device-local** — if a vault is opened on a second
+machine, **Settings → MUGS → Accounts** highlights the missing token inline so
+you can paste a fresh token in place without breaking connected folders.
+MUGS never syncs `.obsidian/plugins/mugs-obsidian/data.json` or `.mugs-clones/`
+even during whole-vault root sync. When tokens live in `data.json`, **encryption
+at rest is off by default**: in **Settings → MUGS → Security** you can set a
+passphrase and enable **Encrypt saved tokens**; you must unlock tokens after
+every app start, and losing the passphrase requires re-entering tokens. This is
+**not vault-content end-to-end encryption**. Do not put tokens in a note,
+terminal argument, Git remote URL, screenshot or issue report. Grant each
+teammate their own least-privilege host token and revoke it on departure.
 
 [brat]: https://github.com/TfTHacker/obsidian42-brat/blob/main/BRAT-DEVELOPER-GUIDE.md

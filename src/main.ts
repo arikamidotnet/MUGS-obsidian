@@ -334,19 +334,35 @@ export default class MugsPlugin extends Plugin {
   }
 
   /** Obsidian's SecretStorage (1.11.4+) as a MUGS {@link SecretStore} seam.
-   *  Returns undefined on builds without it, where tokens fall back to the
-   *  existing (optionally passphrase-encrypted) data.json storage. */
+   *  Returns undefined on builds without it — and when Obsidian explicitly
+   *  reports NO storage backend (`adapter === null`, e.g. Linux without any
+   *  keyring daemon) — where tokens fall back to the existing (optionally
+   *  passphrase-encrypted) data.json storage. This seam is still treated as
+   *  untrusted: every write is verified by read-back in the store. */
   private secretStore(): SecretStore | undefined {
     const ss = (this.app as unknown as {
-      secretStorage?: { getSecret?(id: string): string | null; setSecret?(id: string, value: string): void };
+      secretStorage?: {
+        adapter?: unknown;
+        getSecret?(id: string): string | null;
+        setSecret?(id: string, value: string): void;
+        deleteSecret?(id: string): void;
+      };
     }).secretStorage;
-    if (!ss || typeof ss.getSecret !== "function" || typeof ss.setSecret !== "function") return undefined;
+    if (
+      !ss ||
+      ss.adapter === null ||
+      typeof ss.getSecret !== "function" ||
+      typeof ss.setSecret !== "function"
+    ) {
+      return undefined;
+    }
     const get = ss.getSecret.bind(ss);
     const set = ss.setSecret.bind(ss);
     return {
       available: () => true,
       get: (id) => { try { return get(id) ?? null; } catch { return null; } },
       set: (id, value) => { set(id, value); },
+      delete: (id) => { try { ss.deleteSecret?.(id); } catch { /* ignore */ } },
     };
   }
 

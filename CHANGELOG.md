@@ -2,6 +2,36 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.24 highlights
+
+- **Universal credential compatibility (Arch Linux / minimal WMs & multi-device).**
+  `SecretStorage` writes are now verified with an immediate read-back before
+  blanking the durable `token` field, and `secretStore()` rejects hosts with a
+  null storage adapter. On Linux systems without a running keyring daemon
+  (GNOME Keyring / KWallet / libsecret), tokens fall back cleanly to `data.json`
+  (and optional passphrase encryption) instead of disappearing on restart.
+  `MugsStore.getCredentialStatus()` surfaces orphaned device-local keychain
+  references (`missing-keychain`) honestly, and the Accounts pane now offers
+  in-place **Update token** repair so tokens can be re-entered without deleting
+  the account or breaking connected folders.
+- **Root-sync ("entire repository to vault root") fixes & MUGS state protection.**
+  Mappings now record canonical `repoPath` (`owner/repo`) alongside `repoRef`,
+  so `resolveRepo` matches reliably across full-access (numeric ID) and
+  project-scoped (`Allowed repositories`) tokens. Local repositories can now
+  connect to the vault root directly. `.obsidian/plugins/mugs-obsidian/data.json`,
+  `.mugs-clones/`, `.git/`, and sync locks are hard-blocked (`isProtectedMugsPath`)
+  in both `.obsidian/` scope and `CloneManager.inScope`, so one device's
+  credentials or plugin state can never be uploaded or overwrite another user's
+  vault during root sync.
+- **Simplified onboarding & Settings UX.** Add Account shows Provider + Token
+  up front (with self-hosted URL, Label, Username, and Allowed repositories
+  under collapsible Advanced options, and bare `/abs/path` normalization for
+  local repos). Connected folders offers an explicit **Specific folders** vs.
+  **Entire repository to vault root** mode, a custom folder-pair option, and
+  inline Account re-binding for orphaned mappings. Explicit actions save and
+  trigger sync immediately, passphrase updates no longer collide with drafts,
+  and secondary sections collapse by default.
+
 ## 0.4.23 highlights
 
 - **Keychain-stored tokens no longer block settings save.** On Obsidian 1.11.4+

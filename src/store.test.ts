@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MugsStore, MemoryIO, MemorySecretStore, secretIdFor } from "./store";
+import { MugsStore, MemoryIO, MemorySecretStore, secretIdFor, type SecretStore } from "./store";
 import { deriveKey, encryptBytes, generateSalt, derivePassphraseKey, encryptAesGcm, decryptAesGcm } from "./crypto";
 
 // Minimal copy of the legacy XOR used by store.ts's backward-compatible reader,
@@ -977,5 +977,246 @@ describe("SecretStorage migration (tokens never persisted in data.json)", () => 
     expect(store.getSettings().credentials[0].token).toBe("glpat-PLAIN");
     expect(store.getSettings().credentials[0].secretId).toBeUndefined();
     expect(await store.migrateTokensToSecretStorage()).toBe(0);
+  });
+});
+
+/**
+ * Phase 1 — VERIFIED keychain round-trip writes.
+ *
+ * Obsidian's SecretStorage can silently drop writes (Linux without a running
+ * keyring daemon — COSMIC/Hyprland/Sway) or throw outright. A credential whose
+ * durable token was blanked on an UNVERIFIED write loses its secret forever
+ * after the next reload, so every keychain write is verified by an immediate
+ * read-back; a failed verification keeps the token in data.json and clears any
+ * stale secretId instead.
+ */
+describe("verified keychain writes (silent-drop, throwing, orphaned secretId, repair)", () => {
+  /** Fakes a Linux host without a working keyring: set() "succeeds" (no throw),
+   *  but the secret is never retained — get() always resolves empty. */
+  class SilentDropSecretStore implements SecretStore {
+    available(): boolean { return true; }
+    get(_id: string): string | null { return null; }
+    set(_id: string, _value: string): void { /* silently dropped */ }
+  }
+
+  /** Fakes a keychain that rejects writes outright (locked/unavailable daemon). */
+  class ThrowingSecretStore implements SecretStore {
+    available(): boolean { return true; }
+    get(_id: string): string | null { return null; }
+    set(_id: string, _value: string): void { throw new Error("SecretStore unavailable"); }
+  }
+
+  const baseIO = (credentials: unknown) =>
+    new MemoryIO({
+      version: 1,
+      credentials,
+      mappings: [], lastSync: {}, conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [], staging: {}, security: { encryptCredentials: false },
+    });
+
+  it("upsertCredential keeps the token in data.json when the keychain silently drops writes", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io, new SilentDropSecretStore());
+    await store.load();
+
+    const warns: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...a: unknown[]) => { warns.push(a); };
+    try {
+      store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-SILENT" });
+    } finally {
+      console.warn = origWarn;
+    }
+    expect(warns.length).toBe(1); // one clear warning — neither silent nor noisy
+
+    const cred = store.getSettings().credentials[0];
+    expect(cred.token).toBe("glpat-SILENT"); // NEVER blanked on an unverified write
+    expect(cred.secretId).toBeUndefined();   // no dangling keychain reference
+    expect(store.getToken("c1")).toBe("glpat-SILENT");
+
+    // The token survives a save/reload cycle (the Linux keychain-drop regression).
+    await store.save();
+    const reloaded = new MugsStore(io, new SilentDropSecretStore());
+    await reloaded.load();
+    expect(reloaded.getToken("c1")).toBe("glpat-SILENT");
+    expect(JSON.stringify(await io.read())).toContain("glpat-SILENT");
+  });
+
+  it("migrateTokensToSecretStorage refuses to blank tokens the keychain silently drops", async () => {
+    const io = baseIO([{ id: "c1", label: "work", kind: "gitlab", token: "glpat-OLD" }]);
+    const store = new MugsStore(io, new SilentDropSecretStore());
+    await store.load();
+
+    expect(await store.migrateTokensToSecretStorage()).toBe(0);
+    const cred = store.getSettings().credentials[0];
+    expect(cred.token).toBe("glpat-OLD");
+    expect(cred.secretId).toBeUndefined();
+    expect(store.getToken("c1")).toBe("glpat-OLD");
+  });
+
+  it("falls back cleanly to data.json when SecretStore.set() throws", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io, new ThrowingSecretStore());
+    await store.load();
+
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-THROWN" });
+    const cred = store.getSettings().credentials[0];
+    expect(cred.token).toBe("glpat-THROWN");
+    expect(cred.secretId).toBeUndefined();
+    expect(store.getToken("c1")).toBe("glpat-THROWN");
+
+    await store.save();
+    const onDisk = (await io.read()) as { credentials: Array<{ token: string; secretId?: string }> };
+    expect(onDisk.credentials[0].token).toBe("glpat-THROWN");
+    expect(onDisk.credentials[0].secretId).toBeUndefined();
+
+    const reloaded = new MugsStore(io, new ThrowingSecretStore());
+    await reloaded.load();
+    expect(reloaded.getToken("c1")).toBe("glpat-THROWN");
+  });
+
+  it("migrateTokensToSecretStorage keeps tokens when SecretStore.set() throws", async () => {
+    const io = baseIO([{ id: "c1", label: "work", kind: "gitlab", token: "glpat-OLD" }]);
+    const store = new MugsStore(io, new ThrowingSecretStore());
+    await store.load();
+
+    expect(await store.migrateTokensToSecretStorage()).toBe(0);
+    const cred = store.getSettings().credentials[0];
+    expect(cred.token).toBe("glpat-OLD");
+    expect(cred.secretId).toBeUndefined();
+    expect(store.getToken("c1")).toBe("glpat-OLD");
+  });
+
+  it("orphaned secretId (data.json synced from another device) reports missing-keychain", async () => {
+    // secretId points at a keychain entry THIS device has never written.
+    const io = baseIO([{ id: "c1", label: "work", kind: "gitlab", token: "", secretId: secretIdFor("c1") }]);
+    const store = new MugsStore(io, new MemorySecretStore()); // empty keychain
+    await store.load();
+
+    expect(store.getCredentialStatus("c1")).toBe("missing-keychain");
+    expect(store.getToken("c1")).toBeUndefined();
+  });
+
+  it("in-place token repair on an orphaned secretId works with a working keychain (id unchanged)", async () => {
+    const io = baseIO([{ id: "c1", label: "work", kind: "gitlab", token: "", secretId: secretIdFor("c1") }]);
+    const secrets = new MemorySecretStore();
+    const store = new MugsStore(io, secrets);
+    await store.load();
+    expect(store.getCredentialStatus("c1")).toBe("missing-keychain");
+
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-NEW" });
+    expect(store.getSettings().credentials[0].id).toBe("c1"); // repaired in place
+    expect(store.getToken("c1")).toBe("glpat-NEW");
+    expect(store.getSettings().credentials[0].secretId).toBe(secretIdFor("c1"));
+    expect(store.getSettings().credentials[0].token).toBe("");
+    expect(secrets.get(secretIdFor("c1"))).toBe("glpat-NEW");
+    expect(store.getCredentialStatus("c1")).toBe("ready");
+  });
+
+  it("in-place token repair on an orphaned secretId works with a failing keychain (secretId cleared, token in data.json)", async () => {
+    const io = baseIO([{ id: "c1", label: "work", kind: "gitlab", token: "", secretId: secretIdFor("c1") }]);
+    const store = new MugsStore(io, new ThrowingSecretStore());
+    await store.load();
+    expect(store.getCredentialStatus("c1")).toBe("missing-keychain");
+
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-NEW" });
+    const cred = store.getSettings().credentials[0];
+    expect(cred.id).toBe("c1");
+    expect(cred.secretId).toBeUndefined(); // stale reference cleared
+    expect(cred.token).toBe("glpat-NEW");  // durable in data.json instead
+    expect(store.getToken("c1")).toBe("glpat-NEW");
+    expect(store.getCredentialStatus("c1")).toBe("ready");
+
+    await store.save();
+    const onDisk = (await io.read()) as { credentials: Array<{ token: string; secretId?: string }> };
+    expect(onDisk.credentials[0].token).toBe("glpat-NEW");
+    expect(onDisk.credentials[0].secretId).toBeUndefined();
+  });
+
+  it("metadata-only edit on a keychain-backed credential preserves secretId and the resolvable token", async () => {
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io, new MemorySecretStore());
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "glpat-SECRET" });
+    expect(store.getSettings().credentials[0].secretId).toBe(secretIdFor("c1"));
+    expect(store.getToken("c1")).toBe("glpat-SECRET");
+
+    // Label rename from the UI re-supplies the credential's empty stored form.
+    store.upsertCredential({ id: "c1", label: "work-renamed", kind: "gitlab", token: "" });
+    const cred = store.getSettings().credentials[0];
+    expect(cred.label).toBe("work-renamed");
+    expect(cred.secretId).toBe(secretIdFor("c1")); // preserved across the edit
+    expect(cred.token).toBe("");
+    expect(store.getToken("c1")).toBe("glpat-SECRET"); // still resolves from the keychain
+    expect(store.getCredentialStatus("c1")).toBe("ready");
+  });
+
+  it("removeCredential clears the credential along with its runtime/unreadable state", async () => {
+    const io = new MemoryIO({
+      version: 1,
+      credentials: [{ id: "c1", label: "locked", kind: "gitlab", token: "aesgcm-pw:not-a-real-cipher" }],
+      mappings: [], lastSync: {}, conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [], staging: {},
+      security: { encryptCredentials: true, kdf: { algorithm: "PBKDF2-SHA-256", salt: generateSalt(), iterations: 1000 } },
+    });
+    const store = new MugsStore(io);
+    await store.load();
+    expect(store.getCredentialStatus("c1")).toBe("locked"); // unreadable cipher while locked
+
+    store.removeCredential("c1");
+    expect(store.getSettings().credentials.find((c) => c.id === "c1")).toBeUndefined();
+    expect(store.getCredentialStatus("c1")).toBe("missing"); // gone entirely
+  });
+});
+
+describe("getCredentialStatus classification", () => {
+  const baseIO = (credentials: unknown) =>
+    new MemoryIO({
+      version: 1,
+      credentials,
+      mappings: [], lastSync: {}, conflicts: {},
+      sync: { obsidianConfig: { enabled: false, entries: [] } },
+      agents: [], staging: {}, security: { encryptCredentials: false },
+    });
+
+  it("classifies local, ready, missing-keychain, missing, and unknown ids", async () => {
+    // NOTE: the persisted schema refuses a hosted credential with NEITHER a token
+    // NOR a secretId, so the hosted "missing" shape is built in memory below.
+    const io = baseIO([
+      { id: "c-local", label: "local", kind: "local", token: "", baseUrl: "file:///tmp/repo.git" },
+      { id: "c-local-nourl", label: "local-nourl", kind: "local", token: "" },
+      { id: "c-orphan", label: "orphan", kind: "gitlab", token: "", secretId: secretIdFor("c-orphan") },
+      { id: "c-ready", label: "ready", kind: "gitlab", token: "glpat-READY" },
+    ]);
+    const store = new MugsStore(io, new MemorySecretStore()); // empty keychain
+    await store.load();
+    store.upsertCredential({ id: "c-missing", label: "missing", kind: "gitlab", token: "" });
+
+    expect(store.getCredentialStatus("c-local")).toBe("ready");
+    expect(store.getCredentialStatus("c-local-nourl")).toBe("missing");
+    expect(store.getCredentialStatus("c-orphan")).toBe("missing-keychain");
+    expect(store.getCredentialStatus("c-missing")).toBe("missing");
+    expect(store.getCredentialStatus("c-ready")).toBe("ready");
+    expect(store.getCredentialStatus("unknown-id")).toBe("missing");
+  });
+
+  it("reports locked while the passphrase vault is locked and ready after unlock", async () => {
+    const PASS = "correct horse battery staple";
+    const SECRET = "glpat-STATUS-SECRET";
+    const io = new MemoryIO(null);
+    const store = new MugsStore(io); // no keychain: the cipher must live in data.json
+    await store.load();
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: SECRET });
+    await store.setEncryptionPassphrase(PASS);
+    await store.save();
+
+    const reloaded = new MugsStore(io);
+    await reloaded.load();
+    expect(reloaded.isLocked()).toBe(true);
+    expect(reloaded.getCredentialStatus("c1")).toBe("locked");
+    expect(await reloaded.unlock(PASS)).toBe(true);
+    expect(reloaded.getCredentialStatus("c1")).toBe("ready");
   });
 });

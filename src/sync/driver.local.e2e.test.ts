@@ -500,6 +500,167 @@ describe("vault mirror + first-sync direction — real git end-to-end", () => {
   });
 });
 
+describe("root sync (localFolder \".\", remotePath \"\") — real git end-to-end", () => {
+  /** A filesystem VaultMirror over the VAULT ROOT (localFolder "."). Unlike the real
+   *  Obsidian adapter (whose getFiles() skips dot-folders), this mirror lists EVERYTHING
+   *  — deliberately: the hard-block guarantee is that MUGS runtime state stays local
+   *  even when a vault view CAN see it (a user override sharing plugins, a mirror
+   *  without dot-folder filtering). */
+  function fsRootVaultMirror(vaultRoot: string): VaultMirror {
+    const base = (folder: string) => (folder === "." ? vaultRoot : join(vaultRoot, folder));
+    const walk = (dir: string, rel = ""): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        const abs = join(dir, entry);
+        const p = rel ? `${rel}/${entry}` : entry;
+        if (statSync(abs).isDirectory()) out.push(...walk(abs, p));
+        else out.push(p);
+      }
+      return out;
+    };
+    return {
+      list: async (folder) => (existsSync(base(folder)) ? walk(base(folder)) : []),
+      read: async (folder, rel) => readFileSync(join(base(folder), rel), "utf8"),
+      write: async (folder, rel, content) => {
+        const p = join(base(folder), rel);
+        mkdirSync(p.slice(0, p.lastIndexOf("/")), { recursive: true });
+        writeFileSync(p, content);
+      },
+      remove: async (folder, rel) => {
+        const p = join(base(folder), rel);
+        if (existsSync(p)) unlinkSync(p);
+      },
+    };
+  }
+
+  function rootFixture(name: string): { base: string; remotePlain: string; cloneRoot: string; vaultRoot: string } {
+    const base = tmpPath(name);
+    rmSync(base, { recursive: true, force: true });
+    const out = { base, remotePlain: join(base, "remote.git"), cloneRoot: join(base, "clones"), vaultRoot: join(base, "vault") };
+    mkdirSync(out.vaultRoot, { recursive: true });
+    return out;
+  }
+
+  function rootDeps(f: ReturnType<typeof rootFixture>, credId: string, firstSync: "pull" | "push", store = new MugsStore(new MemoryIO())) {
+    return {
+      mappings: [{ id: `map-root-${credId}`, label: "Vault root", remotePath: "", localFolder: ".", providerId: credId, direction: "push-pull" as const }],
+      credentials: [{ id: credId, label: "Local", kind: "local" as const, token: "t", baseUrl: "file://" + f.remotePlain }],
+      getToken: () => "t",
+      buildProvider: () => ({ kind: "local" as const, async listRepos() { return []; }, async getBranches() { return []; }, async getMembers() { return []; }, async listDirectories() { return []; } }),
+      cloneRoot: f.cloneRoot,
+      runner: new ChildProcessRunner(),
+      // User override that shares plugins WITHOUT the data.json excludes: exactly the
+      // configuration that previously could leak MUGS's own runtime state.
+      obsidianConfig: { enabled: true, entries: [{ path: "plugins", scope: "vault-wide" as const, includes: [], excludes: [] }] },
+      workingTree: {
+        writeFile: (p: string, c: string) => {
+          mkdirSync(p.slice(0, p.lastIndexOf("/")), { recursive: true });
+          writeFileSync(p, c);
+          return Promise.resolve();
+        },
+        readFile: (p: string) => Promise.resolve(existsSync(p) ? readFileSync(p, "utf8") : undefined),
+        deleteFile: (p: string) => { if (existsSync(p)) unlinkSync(p); return Promise.resolve(); },
+      },
+      vaultMirror: fsRootVaultMirror(f.vaultRoot),
+      rmDir: (d: string) => rmSync(d, { recursive: true, force: true }),
+      firstSyncDirection: firstSync,
+      lastSync: storeWritableAccessor(store),
+      conflicts: storeConflictAccessor(store),
+    };
+  }
+
+  it("User A pushes a root vault: notes reach git, but the plugin's data.json and .mugs-clones NEVER do", async () => {
+    const f = rootFixture("root-push");
+    // Root vault: root-level + nested notes, the plugin's own settings, and a stray
+    // clone-store file (mirroring production, where .mugs-clones lives IN the vault).
+    writeFileSync(join(f.vaultRoot, "root.md"), "# root note\n");
+    mkdirSync(join(f.vaultRoot, "Projects", "Deep"), { recursive: true });
+    writeFileSync(join(f.vaultRoot, "Projects", "Deep", "nested.md"), "nested note\n");
+    mkdirSync(join(f.vaultRoot, ".obsidian", "plugins", "mugs-obsidian"), { recursive: true });
+    writeFileSync(join(f.vaultRoot, ".obsidian", "plugins", "mugs-obsidian", "data.json"), '{"credentials":[{"token":"USER-A-SECRET"}]}');
+    mkdirSync(join(f.vaultRoot, ".mugs-clones", "stale"), { recursive: true });
+    writeFileSync(join(f.vaultRoot, ".mugs-clones", "stale", "HEAD"), "ref: refs/heads/main\n");
+    // A completely empty remote (unborn HEAD): the first sync must create the branch.
+    execSync(`git init -q --bare -b main "${f.remotePlain}"`);
+
+    const outcomes = await syncAllMappings(rootDeps(f, "cred-root-a", "push"));
+    expect(outcomes[0].status).toBe("ok");
+
+    // The notes — root-level AND nested — made it to the remote…
+    const check = join(f.base, "check");
+    execSync(`git clone -q "${f.remotePlain}" "${check}"`);
+    expect(readFileSync(join(check, "root.md"), "utf8")).toContain("root note");
+    expect(readFileSync(join(check, "Projects", "Deep", "nested.md"), "utf8")).toContain("nested note");
+    // …while MUGS's own runtime state never entered git in any form.
+    expect(existsSync(join(check, ".obsidian", "plugins", "mugs-obsidian", "data.json"))).toBe(false);
+    expect(existsSync(join(check, ".mugs-clones"))).toBe(false);
+    const tree = execSync(`git -C "${check}" ls-tree -r --name-only HEAD`).toString();
+    expect(tree).not.toContain("data.json");
+    expect(tree).not.toContain(".mugs-clones");
+    // A's secret never left the machine.
+    expect(tree).not.toContain("USER-A-SECRET");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
+  it("User B pulls a shared root repo into a completely empty vault: every note arrives with status ok", async () => {
+    const f = rootFixture("root-pull-empty");
+    // Seed the remote the way User A's push would have left it.
+    const work = join(f.base, "seed");
+    execSync(`git init -q -b main "${work}"`);
+    writeFileSync(join(work, "root.md"), "# shared root note\n");
+    mkdirSync(join(work, "Projects", "Deep"), { recursive: true });
+    writeFileSync(join(work, "Projects", "Deep", "nested.md"), "shared nested note\n");
+    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    execSync(`git clone -q --bare "${work}" "${f.remotePlain}"`);
+    rmSync(work, { recursive: true, force: true });
+
+    // User B's brand-new vault: completely empty (no notes yet). One store shared
+    // across passes so the baseline persists (a real device's persisted state).
+    const store = new MugsStore(new MemoryIO());
+    const outcomes = await syncAllMappings(rootDeps(f, "cred-root-b", "pull", store));
+    expect(outcomes[0].status).toBe("ok");
+    expect(outcomes[0].reason).toBeUndefined();
+    expect(store.getSettings().lastSync["map-root-cred-root-b"]?.status).toBe("ok");
+
+    // All root and nested notes arrived…
+    expect(readFileSync(join(f.vaultRoot, "root.md"), "utf8")).toContain("shared root note");
+    expect(readFileSync(join(f.vaultRoot, "Projects", "Deep", "nested.md"), "utf8")).toContain("shared nested note");
+    // …and a second pass (same persisted store) stays clean.
+    const outcomes2 = await syncAllMappings(rootDeps(f, "cred-root-b", "pull", store));
+    expect(outcomes2[0].status).toBe("ok");
+    rmSync(f.base, { recursive: true, force: true });
+  });
+
+  it("a remote that already carries a committed plugin data.json can NEVER overwrite the local user's data.json", async () => {
+    const f = rootFixture("root-pull-poisoned");
+    // Remote poisoned (manually committed outside MUGS): carries User A's plugin
+    // settings with a dead keychain reference, next to ordinary shared notes.
+    const work = join(f.base, "seed");
+    execSync(`git init -q -b main "${work}"`);
+    writeFileSync(join(work, "root.md"), "# shared root note\n");
+    mkdirSync(join(work, ".obsidian", "plugins", "mugs-obsidian"), { recursive: true });
+    writeFileSync(join(work, ".obsidian", "plugins", "mugs-obsidian", "data.json"), '{"credentials":[{"token":"USER-A-SECRET"}]}');
+    execSync(`git -C "${work}" config user.name T && git -C "${work}" config user.email t@l`);
+    execSync(`git -C "${work}" add -A && git -C "${work}" commit -q -m init`);
+    execSync(`git clone -q --bare "${work}" "${f.remotePlain}"`);
+    rmSync(work, { recursive: true, force: true });
+
+    // User B's vault holds their OWN plugin settings (keychain references, sync state).
+    mkdirSync(join(f.vaultRoot, ".obsidian", "plugins", "mugs-obsidian"), { recursive: true });
+    writeFileSync(join(f.vaultRoot, ".obsidian", "plugins", "mugs-obsidian", "data.json"), '{"credentials":[{"token":"USER-B-LOCAL-STATE"}]}');
+
+    for (let pass = 1; pass <= 2; pass++) {
+      const outcomes = await syncAllMappings(rootDeps(f, "cred-root-b2", "pull"));
+      expect(outcomes[0].status).toBe("ok");
+      // The shared note pulled down; B's own data.json is untouched, every pass.
+      expect(readFileSync(join(f.vaultRoot, "root.md"), "utf8")).toContain("shared root note");
+      expect(readFileSync(join(f.vaultRoot, ".obsidian", "plugins", "mugs-obsidian", "data.json"), "utf8")).toBe('{"credentials":[{"token":"USER-B-LOCAL-STATE"}]}');
+    }
+    rmSync(f.base, { recursive: true, force: true });
+  });
+});
+
 describe("sync then diff — real git verification", () => {
   it("after a successful sync the Diff data source reports identical with a baseline ref; an edit produces changed", async () => {
     // Isolated bare remote + clone root.

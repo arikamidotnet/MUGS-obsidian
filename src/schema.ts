@@ -114,6 +114,10 @@ export const folderMappingSchema = z.object({
    *  declared here or Zod strips it on load, silently degrading scoped links to the
    *  legacy id-based repo match (which never hits for random mapping ids). */
   repoRef: z.string().optional(),
+  /** Optional canonical `owner/repo` / `pathWithNamespace` — the stable cross-token-scope
+   *  match key (numeric repo ids differ between full-access and project-scoped tokens).
+   *  Must be declared here or Zod strips it on load. */
+  repoPath: z.string().optional(),
   direction: syncDirectionSchema.default("push-pull"),
   includes: z.array(z.string()).default([]),
   excludes: z.array(z.string()).default([]),

@@ -208,6 +208,41 @@ describe("syncAllMappings — skips", () => {
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "missing token" });
   });
 
+  it("skips an orphaned keychain reference (secretId set, token missing on this device) with the re-enter reason", async () => {
+    // data.json copied/synced from another machine (or a Linux keyring that dropped
+    // the write): the credential points at a keychain entry that holds nothing HERE.
+    // The repair is re-entering the token on the existing account — a distinct reason
+    // from a plain never-entered token so the UI can name the right fix.
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ token: "", secretId: "mugs-c1" })],
+      getToken: () => undefined,
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor().accessor,
+    });
+    expect(outcomes[0]).toMatchObject({
+      status: "skipped",
+      reason: "token missing on this device — open Settings → MUGS → Accounts to enter your token",
+    });
+  });
+
+  it("keeps the plain 'missing token' reason when no keychain reference exists", async () => {
+    const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
+    const outcomes = await syncAllMappings({
+      mappings: [mapping()],
+      credentials: [credential({ token: "" })], // never entered, no secretId
+      getToken: () => undefined,
+      buildProvider: () => fakeProvider(fakeRepo("m1")),
+      cloneRoot: CLONE_ROOT,
+      runner,
+      lastSync: spyAccessor().accessor,
+    });
+    expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "missing token" });
+  });
+
   it("skips a mapping whose repo is not in the provider's list", async () => {
     const { runner } = makeRunner({ head: "L1", remote: "R1", ancestor: true, cloned: true });
     const outcomes = await syncAllMappings({
@@ -235,6 +270,40 @@ describe("resolveRepo — mapping → repository resolution", () => {
     expect(resolveRepo([fakeRepo("only")], { id: "random-uuid" })).toMatchObject({ id: "only" });
     // Several visible repos and no match: unresolved rather than guessed.
     expect(resolveRepo(repos, { id: "random-uuid" })).toBeUndefined();
+  });
+
+  it("matches across token scopes: numeric repo id vs owner/repo pathWithNamespace via repoRef/repoPath", () => {
+    // A full-access token enumerates numeric ids; a project-scoped token returns
+    // owner/repo ids. The canonical path (repoPath / pathWithNamespace) is what both
+    // listings share — a mapping created under one token scope must resolve under the other.
+    const numericListing = [{ ...fakeRepo("58291"), pathWithNamespace: "fbr-rom/FBR-WRK" }, fakeRepo("other-repo")];
+    const scopedListing = [fakeRepo("fbr-rom/FBR-WRK"), fakeRepo("other-repo")];
+    // Mapping created against the numeric listing (repoRef/id "58291", canonical path recorded):
+    expect(resolveRepo(scopedListing, { id: "58291", repoRef: "58291", repoPath: "fbr-rom/FBR-WRK" })).toMatchObject({ id: "fbr-rom/FBR-WRK" });
+    expect(resolveRepo(scopedListing, { id: "58291", repoPath: "FBR-ROM/FBR-WRK" })).toMatchObject({ id: "fbr-rom/FBR-WRK" }); // case-insensitive
+    // Mapping created against the scoped listing resolves under the numeric listing:
+    expect(resolveRepo(numericListing, { id: "map-uuid", repoRef: "fbr-rom/FBR-WRK" })).toMatchObject({ id: "58291" });
+    expect(resolveRepo(numericListing, { id: "map-uuid", repoPath: "fbr-rom/FBR-WRK" })).toMatchObject({ id: "58291" });
+  });
+
+  it("resolves legacy mappings by id-as-path and whole-repo label, in deterministic priority order", () => {
+    const repos = [fakeRepo("r1"), { ...fakeRepo("r2"), pathWithNamespace: "team/notes" }];
+    // repoRef matched case-insensitively against pathWithNamespace when no id hits.
+    expect(resolveRepo(repos, { id: "map", repoRef: "TEAM/NOTES" })).toMatchObject({ id: "r2" });
+    // Legacy whole-repo link whose id is the owner/repo path.
+    expect(resolveRepo(repos, { id: "team/notes" })).toMatchObject({ id: "r2" });
+    // Legacy whole-repo label fallback (remotePath "" and the label looks like owner/repo).
+    expect(resolveRepo(repos, { id: "map-uuid", remotePath: "", label: "team/notes" })).toMatchObject({ id: "r2" });
+    // The label fallback NEVER applies to folder-scoped mappings.
+    expect(resolveRepo(repos, { id: "map-uuid", remotePath: "sub", label: "team/notes" })).toBeUndefined();
+  });
+
+  it("skips the single-repo fallback when repoRef/repoPath is set but unmatched (never guesses)", () => {
+    const repos = [fakeRepo("alpha")];
+    expect(resolveRepo(repos, { id: "map", repoRef: "beta" })).toBeUndefined();
+    expect(resolveRepo(repos, { id: "map", repoPath: "team/beta" })).toBeUndefined();
+    // The unambiguous legacy form still resolves through the single visible repo.
+    expect(resolveRepo(repos, { id: "map-uuid" })).toMatchObject({ id: "alpha" });
   });
 });
 

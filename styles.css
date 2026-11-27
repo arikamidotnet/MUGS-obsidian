@@ -802,6 +802,67 @@
 .mugs-diff-file-authors { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .mugs-diff-hunk-author { display: inline-flex; align-items: center; }
 
+/* --- Settings: advanced disclosures, credential repair, mapping recovery --- */
+
+/* Collapsible "Advanced options" disclosures (add-account form, connect form,
+ * custom folder pair). Progressive disclosure keeps the primary forms compact. */
+.mugs-advanced-details {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+.mugs-advanced-details > summary {
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+.mugs-advanced-details > summary:hover { color: var(--text-normal); }
+.mugs-advanced-details[open] > summary { margin-bottom: 8px; }
+.mugs-advanced-body { display: flex; flex-direction: column; }
+
+/* Inline warning text: missing keychain token, missing account, root overlap. */
+.mugs-cred-warning {
+  color: var(--text-warning, #d29922);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+/* In-place token repair on an account card: password input + Save token.
+ * Collapsed behind an "Update token" toggle unless repair is urgent. */
+.mugs-inline-repair {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+.mugs-inline-repair.is-collapsed { display: none; }
+.mugs-inline-repair input[type="password"] { flex: 1 1 180px; min-width: 0; }
+
+/* Mapping card whose account no longer exists — highlighted for recovery. */
+.mugs-mapping-missing-cred { border-color: var(--text-warning, #d29922); }
+.mugs-mapping-missing-cred > .mugs-cred-warning { font-weight: 500; }
+.mugs-rebind-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+
+/* Connect form: mode choice (specific folders vs whole-repo root) + repo row. */
+.mugs-mode-choice { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 8px 0; }
+.mugs-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.mugs-repo-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.mugs-repo-row .mugs-repo-select { flex: 1; min-width: 0; }
+
 /* --- Guided onboarding checklist ----------------------------------------- */
 
 .mugs-gs-step { display: flex; align-items: baseline; gap: 8px; }

@@ -77,7 +77,18 @@ export interface SecretStore {
   available(): boolean;
   get(id: string): string | null;
   set(id: string, value: string): void;
+  /** Best-effort removal of a stored secret. Optional: hosts without a delete
+   *  API omit it, and callers must tolerate that (never rely on it). */
+  delete?(id: string): void;
 }
+
+/** Live usability of a credential, as reported by {@link MugsStore.getCredentialStatus}.
+ *  - "ready": the token (or local repo URL) resolves and is usable for auth now.
+ *  - "missing-keychain": the credential references a keychain secret THIS device
+ *    does not have (data.json synced from another machine, or a reset keyring).
+ *  - "locked": the stored token is passphrase-encrypted and the vault is locked.
+ *  - "missing": no usable token, keychain reference, or local repo URL at all. */
+export type CredentialStatus = "ready" | "missing-keychain" | "locked" | "missing";
 
 /** In-memory SecretStore for tests and non-Obsidian hosts. */
 export class MemorySecretStore implements SecretStore {
@@ -86,6 +97,7 @@ export class MemorySecretStore implements SecretStore {
   available(): boolean { return this.enabled; }
   get(id: string): string | null { return this.secrets.get(id) ?? null; }
   set(id: string, value: string): void { this.secrets.set(id, value); }
+  delete(id: string): void { this.secrets.delete(id); }
 }
 
 /** Derive a valid SecretStorage id for a credential. Obsidian requires lowercase
@@ -498,23 +510,28 @@ export class MugsStore {
     if (!isMetadataOnly && this.isLocked()) {
       throw new Error("MUGS: cannot add or replace a real credential secret while the store is locked");
     }
-    // Metadata-only: keep the prior durable token; only the metadata fields change.
-    const cred = isMetadataOnly && prior ? { ...input, token: prior.token } : { ...input };
+    // Metadata-only: keep the prior durable token AND its keychain reference;
+    // only the metadata fields change. (A caller that omitted secretId must not
+    // orphan the keychain entry the prior credential pointed at.)
+    const cred = isMetadataOnly && prior ? { ...input, token: prior.token, secretId: prior.secretId } : { ...input };
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== cred.id);
     this.settings.credentials.push(cred);
     if (!isMetadataOnly) {
       // A real secret supersedes the runtime plaintext and clears an undecryptable marker.
       this.runtimeTokens.set(cred.id, cred.token);
       this.unreadableTokens.delete(cred.id);
-      // Prefer the OS keychain: move the secret out of data.json immediately.
-      if (this.secrets?.available() && cred.token && !isMasked(cred.token)) {
+      // Prefer the OS keychain — but only a VERIFIED write may blank the durable
+      // token. If the keychain silently drops the secret (Linux without a running
+      // keyring daemon) or rejects the write, the token stays in data.json (or
+      // encrypted under the passphrase) and any stale secretId is cleared so the
+      // credential never points at a keychain entry that does not hold the secret.
+      if (cred.token && !isMasked(cred.token)) {
         const sid = secretIdFor(cred.id);
-        try {
-          this.secrets.set(sid, cred.token);
+        if (this.tryStoreInKeychain(sid, cred.token)) {
           cred.secretId = sid;
           cred.token = "";
-        } catch {
-          // Keychain write failed — keep the existing storage path (below).
+        } else {
+          delete cred.secretId;
         }
       }
     }
@@ -524,6 +541,7 @@ export class MugsStore {
   removeCredential(id: string): void {
     this.settings.credentials = this.settings.credentials.filter((c) => c.id !== id);
     this.runtimeTokens.delete(id);
+    this.unreadableTokens.delete(id);
   }
 
   /** Add or replace a folder mapping, rejecting any that target .obsidian/ unless
@@ -704,11 +722,60 @@ export class MugsStore {
     return stored;
   }
 
+  /** Why a credential is (not) usable for auth right now. Pure state inspection —
+   *  never throws, never writes. Lets the UI tell "locked" apart from "the token
+   *  simply is not on this device" instead of lumping both into missing-token. */
+  getCredentialStatus(id: string): CredentialStatus {
+    const cred = this.settings.credentials.find((c) => c.id === id);
+    if (!cred) return "missing";
+    // A local repo needs no secret: it is ready iff it points at a repo path.
+    if (cred.kind === "local") return cred.baseUrl?.trim() ? "ready" : "missing";
+    if (this.getToken(id)) return "ready";
+    if (
+      this.unreadableTokens.has(id) ||
+      (this.isLocked() && cred.token && isStoredCipher(cred.token))
+    ) {
+      return "locked";
+    }
+    // Keychain-referenced with nothing durable in data.json and nothing readable
+    // in the keychain: the reference is orphaned on this device.
+    if (cred.secretId && !cred.token) return "missing-keychain";
+    return "missing";
+  }
+
+  /** Attempt a VERIFIED keychain write: the secret only counts as stored when an
+   *  immediate read-back returns exactly what was written. Obsidian's
+   *  SecretStorage can silently drop writes (Linux without a running keyring
+   *  daemon, e.g. COSMIC/Hyprland/Sway) or throw outright — both must resolve to
+   *  `false` so the caller keeps the token in data.json instead of wiping it and
+   *  losing the credential after the next reload. Never throws; warns once per
+   *  failed attempt. */
+  private tryStoreInKeychain(sid: string, secret: string): boolean {
+    if (!this.secrets?.available() || !secret || isMasked(secret)) return false;
+    try {
+      this.secrets.set(sid, secret);
+      if (this.secrets.get(sid) === secret) return true;
+      console.warn(
+        "MUGS: the OS keychain did not retain the secret on read-back — keeping the token in data.json instead.",
+      );
+      return false;
+    } catch (err) {
+      console.warn(
+        "MUGS: the OS keychain rejected the secret write — keeping the token in data.json instead.",
+        err,
+      );
+      return false;
+    }
+  }
+
   /**
    * Move every stored plaintext/ciphertext token into SecretStorage (the OS
    * keychain) and blank the durable field so data.json never holds a secret.
-   * Idempotent and lossless: a token is only dropped from settings AFTER the
-   * secret write succeeds; on any failure the stored form is kept for a retry.
+   * Idempotent and lossless: the durable token is dropped ONLY after a verified
+   * round-trip write (set + immediate read-back equality); on any failure the
+   * stored form is kept for a retry. Locked vaults migrate nothing naturally —
+   * their tokens have no readable plaintext — while unlocked passphrase-encrypted
+   * tokens keep migrating (keychain precedence when it is actually usable).
    * Returns the number of credentials migrated. No-op without a SecretStore.
    */
   async migrateTokensToSecretStorage(): Promise<number> {
@@ -721,9 +788,7 @@ export class MugsStore {
       const real = this.runtimeTokens.get(c.id) ?? (isStoredCipher(c.token) || isMasked(c.token) ? undefined : c.token);
       if (!real) continue;
       const sid = secretIdFor(c.id);
-      try {
-        this.secrets.set(sid, real);
-      } catch {
+      if (!this.tryStoreInKeychain(sid, real)) {
         continue; // keep the stored form; retry on the next load
       }
       c.secretId = sid;

@@ -68,6 +68,12 @@ export interface FolderMapping {
    *  keeping its own unique `id` for lastSync/conflicts/staging bookkeeping. Absent ->
    *  whole-repo mapping whose `id` is also the repo id (legacy behaviour). */
   repoRef?: string;
+  /** Optional canonical repository path (`owner/repo` / GitLab `pathWithNamespace`,
+   *  nested groups allowed). Repo ids differ across token scopes — a full-access token
+   *  enumerates numeric ids (`"58291"`) while a project-scoped token returns
+   *  `owner/repo` ids — so the canonical path is the stable cross-device/cross-token
+   *  match key (resolved by `resolveRepo` after `repoRef`). */
+  repoPath?: string;
   direction: SyncDirection;
   /** gitignore-style globs of paths WITHIN the scope that should sync.
    *  Empty or absent means "everything in scope". Composes with {@link excludes}. */

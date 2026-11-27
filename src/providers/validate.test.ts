@@ -12,6 +12,7 @@ import {
   validateRepoList,
   validateCredentialForm,
   hasBlockingProblem,
+  normalizeLocalBaseUrl,
 } from "./validate";
 
 describe("validateBaseUrl", () => {
@@ -59,6 +60,30 @@ describe("validateBaseUrl", () => {
     expect(validateBaseUrl("local", "file:///tmp/repo.git")).toBeNull();
     expect(validateBaseUrl("local", "")?.kind).toBe("required");
     expect(validateBaseUrl("local", "https://example.com/repo.git")?.level).toBe("error");
+  });
+
+  it("accepts a bare absolute Linux path for local repositories", () => {
+    expect(validateBaseUrl("local", "/home/user/repo.git")).toBeNull();
+    expect(validateBaseUrl("local", "/srv/git/repo")).toBeNull();
+  });
+
+  it("still rejects relative paths, empty input, and a bare file:// without a path", () => {
+    expect(validateBaseUrl("local", "home/user/repo")?.level).toBe("error");
+    expect(validateBaseUrl("local", "")?.kind).toBe("required");
+    expect(validateBaseUrl("local", "file://")?.level).toBe("error");
+  });
+});
+
+describe("normalizeLocalBaseUrl", () => {
+  it("converts a bare absolute Linux path to a file:// URL", () => {
+    expect(normalizeLocalBaseUrl("/home/user/repo.git")).toBe("file:///home/user/repo.git");
+    expect(normalizeLocalBaseUrl("/srv/git/repo")).toBe("file:///srv/git/repo");
+  });
+
+  it("trims whitespace and leaves file:// URLs and hosted endpoints untouched", () => {
+    expect(normalizeLocalBaseUrl("  /tmp/repo  ")).toBe("file:///tmp/repo");
+    expect(normalizeLocalBaseUrl("file:///tmp/repo.git")).toBe("file:///tmp/repo.git");
+    expect(normalizeLocalBaseUrl("https://gitlab.com/api/v4")).toBe("https://gitlab.com/api/v4");
   });
 });
 

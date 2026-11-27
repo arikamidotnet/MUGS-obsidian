@@ -119,23 +119,58 @@ export interface SyncDriverDeps {
   watcherUncertain?: boolean;
 }
 
+/** The mapping fields resolveRepo consults; only `id` is required so legacy callers
+ *  passing `{ id, repoRef }` (and whole-repo mappings carrying none of the rest) typecheck. */
+export type RepoResolvableMapping = Pick<FolderMapping, "id"> & Partial<Pick<FolderMapping, "repoRef" | "repoPath" | "label" | "remotePath">>;
+
 /**
  * Resolve the repo a mapping points at within the credential's visible repos.
  *
- * Match order: pinned `repoRef` (scoped links share one clone per repo), then the
- * legacy whole-repo form whose `id` IS the repo id, then — for legacy folder-scoped
- * links created before `repoRef` existed (random ids that match no repo id) — the
- * credential's single visible repo when exactly one is accessible. That fallback is
- * unambiguous: a credential scoped to one repo can only be pointing that mapping at
- * it. With several visible repos a legacy link stays unresolved rather than guessed.
+ * Deterministic match order (first hit wins):
+ * 1. pinned `repoRef` (scoped links share one clone per repo): by repo id, then
+ *    case-insensitively by `pathWithNamespace` (a scoped token returns `owner/repo`
+ *    ids where a full-access token returns numeric ids);
+ * 2. canonical `repoPath` (`owner/repo` / `pathWithNamespace`) case-insensitively —
+ *    the stable cross-token-scope key recorded at mapping creation;
+ * 3. legacy whole-repo form whose `id` IS the repo id, then `id` matched against
+ *    `pathWithNamespace` (mappings created before `repoRef`/`repoPath` existed);
+ * 4. legacy whole-repo label fallback (`remotePath === ""` and the label looks like
+ *    `owner/repo`);
+ * 5. for remaining legacy folder-scoped links (random ids that match no repo) — the
+ *    credential's single visible repo when exactly one is accessible. That fallback is
+ *    unambiguous: a credential scoped to one repo can only be pointing that mapping at
+ *    it. With several visible repos a legacy link stays unresolved rather than guessed.
  */
 export function resolveRepo(
   repos: RepoSummary[],
-  mapping: Pick<FolderMapping, "id" | "repoRef">,
+  mapping: RepoResolvableMapping,
 ): RepoSummary | undefined {
-  const direct = repos.find((r) => (mapping.repoRef ? r.id === mapping.repoRef : r.id === mapping.id));
-  if (direct) return direct;
-  if (!mapping.repoRef && repos.length === 1) return repos[0];
+  const byPath = (ref: string): RepoSummary | undefined =>
+    repos.find((r) => r.pathWithNamespace.toLowerCase() === ref.toLowerCase());
+  // 1. Pinned repoRef: id first, then pathWithNamespace (cross-token-scope ids).
+  if (mapping.repoRef) {
+    const direct = repos.find((r) => r.id === mapping.repoRef);
+    if (direct) return direct;
+    const viaRefPath = byPath(mapping.repoRef);
+    if (viaRefPath) return viaRefPath;
+  }
+  // 2. Canonical owner/repo path (stable across token scopes).
+  if (mapping.repoPath) {
+    const viaRepoPath = byPath(mapping.repoPath);
+    if (viaRepoPath) return viaRepoPath;
+  }
+  // 3. Legacy mapping.id: repo id, then pathWithNamespace.
+  const legacyDirect = repos.find((r) => r.id === mapping.id);
+  if (legacyDirect) return legacyDirect;
+  const legacyByPath = byPath(mapping.id);
+  if (legacyByPath) return legacyByPath;
+  // 4. Legacy whole-repo link whose label carries the owner/repo path.
+  if (mapping.remotePath === "" && mapping.label && mapping.label.includes("/")) {
+    const byLabel = byPath(mapping.label);
+    if (byLabel) return byLabel;
+  }
+  // 5. Unambiguous single-repo credential fallback.
+  if (!mapping.repoRef && !mapping.repoPath && repos.length === 1) return repos[0];
   return undefined;
 }
 
@@ -214,7 +249,16 @@ export async function syncAllMappings(deps: SyncDriverDeps, opts: SyncAllOptions
       ];
     } else {
       const token = deps.getToken(credential.id);
-      if (!token) { skip(mapping, "missing token"); continue; }
+      if (!token) {
+        // Distinguish a keychain reference that holds nothing on THIS device (an
+        // orphaned secretId — data.json copied/synced from another machine, or a
+        // Linux keyring that dropped the write) from a plain never-entered token:
+        // the repair path (re-enter the token on the existing account) differs.
+        skip(mapping, credential.secretId && !credential.token
+          ? "token missing on this device — open Settings → MUGS → Accounts to enter your token"
+          : "missing token");
+        continue;
+      }
       // Any non-empty username works for token auth; `oauth2` is the GitLab convention.
       auth = { username: credential.username ?? "oauth2", token };
 

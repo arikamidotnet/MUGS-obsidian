@@ -17,6 +17,7 @@
  */
 import type { MugsSettings, FolderMapping, Credential, SyncPolicy, Agent, StagedChange, FileConflict } from "../types";
 import { checkRelPath, segmentsOf } from "../git/safePath";
+import { normalizeLocalBaseUrl } from "../providers/validate";
 
 /** Minimal store surface the draft commits through (mirrors MugsStore's setters). */
 export interface SettingsDraftTarget {
@@ -176,8 +177,10 @@ export class SettingsDraft {
       const ref: DraftProblem["ref"] = { kind: "credential", id: c.id };
       if (!c.label) problems.push({ ref, message: `credential ${c.id}: label is required` });
       if (c.kind !== "local" && !c.token && !c.secretId) problems.push({ ref, message: `credential "${c.label || c.id}": token is required` });
-      if (c.kind === "local" && (!c.baseUrl || !c.baseUrl.startsWith("file://"))) {
-        problems.push({ ref, message: `credential "${c.label || c.id}": local repositories need a file:// URL in Base URL` });
+      // Local paths may be stored as bare absolute paths; normalize before the
+      // file:// shape check so /home/user/repo is accepted like its file:// form.
+      if (c.kind === "local" && !normalizeLocalBaseUrl(c.baseUrl ?? "").startsWith("file://")) {
+        problems.push({ ref, message: `credential "${c.label || c.id}": local repositories need an absolute path (e.g. /path/to/repo or file:///path/to/repo)` });
       }
     }
 

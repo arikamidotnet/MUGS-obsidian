@@ -51,6 +51,16 @@ describe("status reporting", () => {
     expect(r.message).toContain("unlock");
   });
 
+  it("'token missing on this device' is auth and names the Accounts + Security repair surfaces", () => {
+    const reason = "token missing on this device — open Settings → MUGS → Accounts to enter your token";
+    expect(classifySkipReason(reason)).toBe("auth");
+    const r = buildStatusReport({ outcomes: [{ mappingId: "a", label: "a", status: "skipped", reason }] });
+    expect(r.kind).toBe("auth");
+    expect(r.message).toContain("Settings → MUGS → Accounts");
+    expect(r.message).toContain("Security");
+    expect(r.message).toContain("unlock");
+  });
+
   it("a refused save is an ERROR — never reported as synced", () => {
     const r = buildStatusReport({
       outcomes: [ok("a", true)],
@@ -78,6 +88,8 @@ describe("status reporting", () => {
   it("skip reasons classify conservatively", () => {
     expect(classifySkipReason("could not reach provider")).toBe("offline");
     expect(classifySkipReason("missing token")).toBe("auth");
+    expect(classifySkipReason("missing token — open Settings → MUGS → Accounts")).toBe("auth");
+    expect(classifySkipReason("token missing on this device — open Settings → MUGS → Accounts to enter your token")).toBe("auth");
     expect(classifySkipReason("no credential")).toBe("auth");
     expect(classifySkipReason("repo not found or not accessible")).toBe("skipped");
     expect(classifySkipReason(undefined)).toBe("skipped");

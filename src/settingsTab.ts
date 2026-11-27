@@ -12,7 +12,7 @@ import type { Credential, SyncDirection, ObsidianScope, ObsidianEntryPolicy, Fol
 import type { KdfParams } from "./schema";
 import type { RepoSummary } from "./providers/types";
 import { buildProvider, PROVIDER_OPTIONS, providerOption, prefillBaseUrl } from "./providers/factory";
-import { validateBaseUrl, validateCredentialForm, type FieldProblem } from "./providers/validate";
+import { validateBaseUrl, validateCredentialForm, normalizeLocalBaseUrl, type FieldProblem } from "./providers/validate";
 import { INTERVAL_PRESETS, resolveIntervalSeconds, presetIdForSeconds } from "./sync/cadence";
 import { effectiveObsidianEntries } from "./sync/obsidianScope";
 import { categorizeObsidianEntries } from "./sync/obsidianCategories";
@@ -57,6 +57,10 @@ function maskToken(token: string): string {
   if (!token) return "not set";
   return `••••${token.slice(-4)}`;
 }
+
+/** Live token health of a credential. Mirrors MugsStore.getCredentialStatus
+ *  (declared locally so this file typechecks before the store ships the method). */
+type CredentialStatus = "ready" | "missing-keychain" | "locked" | "missing";
 
 /** Debounce for auto-applying settings after the last edit (ms). */
 const AUTO_APPLY_MS = 700;
@@ -234,8 +238,14 @@ export class MugsSettingTab extends PluginSettingTab {
     if (this.autoApplyTimer !== undefined) { clearTimeout(this.autoApplyTimer); this.autoApplyTimer = undefined; }
     const draft = this.draft;
     if (!draft) return;
-    // Resume/apply the scheduler immediately only when the sync policy changed.
-    const syncChanged = JSON.stringify(draft.base.sync) !== JSON.stringify(draft.view().sync);
+    // Resume/apply the scheduler immediately when sync-relevant state changed:
+    // the sync policy, the mappings (a newly connected folder), or the
+    // credentials (a repaired token) must start syncing NOW, not on the next
+    // 15s/30s poll.
+    const view = draft.view();
+    const syncChanged = JSON.stringify(draft.base.sync) !== JSON.stringify(view.sync);
+    const mappingsChanged = JSON.stringify(draft.base.mappings) !== JSON.stringify(view.mappings);
+    const credentialsChanged = JSON.stringify(draft.base.credentials) !== JSON.stringify(view.credentials);
     const target: SettingsDraftTarget = {
       getSettings: () => this.plugin.store.getSettings(),
       upsertCredential: (c) => this.plugin.store.upsertCredential(c),
@@ -266,11 +276,36 @@ export class MugsSettingTab extends PluginSettingTab {
     this.draft = null;
     this.unsavedChanges = false;
     if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; this.unsavedNoteEl = null; this.unsavedProblemsEl = null; }
-    if (syncChanged) this.plugin.automaticSyncSettingsChanged();
+    if (syncChanged || mappingsChanged || credentialsChanged) this.plugin.automaticSyncSettingsChanged();
     if (opts.explicit) {
       new Notice("MUGS: settings saved and now active.");
       this._renderAll();
     }
+  }
+
+  /** Immediate commit for explicit action buttons (Add account, Save token,
+   *  Connect, Delete): apply right away — no misleading "Apply settings to
+   *  save" limbo — then re-render. The success notice only fires when the
+   *  commit actually landed (a failed validation keeps the draft + banner). */
+  private async commitNow(successNotice?: string): Promise<void> {
+    await this.applySettings({ explicit: false });
+    if (successNotice && !this.draft) new Notice(successNotice);
+    this._renderAll();
+  }
+
+  /** Flush the live store after a direct security transaction (passphrase set /
+   *  disable-encryption) and drop any draft still holding the PRE-transaction
+   *  security block — applying that stale draft would wipe the fresh kdf state
+   *  (and re-commit plaintext credentials) via applySnapshot. */
+  private async commitSecurityTransaction(): Promise<void> {
+    const saved = await this.plugin.store.save();
+    if (saved && !saved.ok) {
+      new Notice("MUGS: the security change is active but could not be saved to disk yet — it is kept for the next successful save.", 8000);
+    }
+    this.draft = null;
+    this.unsavedChanges = false;
+    if (this.unsavedBannerEl) { this.unsavedBannerEl.remove(); this.unsavedBannerEl = null; this.unsavedNoteEl = null; this.unsavedProblemsEl = null; }
+    this._renderAll();
   }
 
   /** Discard the draft entirely — active settings never changed. */
@@ -320,7 +355,10 @@ export class MugsSettingTab extends PluginSettingTab {
           // Tag the row so a banner problem can jump to it (data-mugs-ref).
           const row = card.createDiv({ cls: "mugs-credential" });
           row.setAttribute("data-mugs-ref", `credential:${c.id}`);
-          const descParts = [`token: ${c.secretId ? "keychain" : maskToken(c.token)}`];
+          const status = this.credentialStatus(c);
+          const needsRepair = status === "missing-keychain" || status === "missing";
+          if (needsRepair) row.classList.add("mugs-cred-warning");
+          const descParts = [this.credentialStatusText(c, status)];
           if (c.username) descParts.push(`user: ${c.username}`);
           if (c.baseUrl) descParts.push(`url: ${c.baseUrl}`);
           new Setting(row)
@@ -329,9 +367,39 @@ export class MugsSettingTab extends PluginSettingTab {
             .addButton((b) =>
               b.setButtonText("Delete").onClick(() => {
                 this.edit((d) => d.removeCredential(c.id));
-                this._renderAll();
+                void this.commitNow();
               }),
             );
+
+          // In-place token repair (hosted only): paste a new token onto the
+          // EXISTING credential (id preserved) so every mapping stays linked.
+          // Auto-expanded when the token is known-missing; behind a small
+          // "Update token" toggle otherwise.
+          if (c.kind !== "local") {
+            let toggleBtn: HTMLElement | null = null;
+            if (!needsRepair) {
+              toggleBtn = row.createEl("button", { cls: "mugs-link-btn", text: "Update token" });
+              toggleBtn.setAttribute("type", "button");
+            }
+            const panel = row.createDiv({ cls: needsRepair ? "mugs-inline-repair" : "mugs-inline-repair is-collapsed" });
+            const input = document.createElement("input");
+            input.type = "password";
+            input.placeholder = needsRepair ? "Paste token to reconnect" : "New token";
+            input.setAttribute("aria-label", `Token for ${c.label}`);
+            const saveBtn = document.createElement("button");
+            saveBtn.type = "button";
+            saveBtn.textContent = "Save token";
+            saveBtn.addEventListener("click", () => void this.saveTokenInPlace(c.id, input));
+            panel.appendChild(input);
+            panel.appendChild(saveBtn);
+            if (toggleBtn) {
+              toggleBtn.setAttribute("aria-expanded", "false");
+              toggleBtn.addEventListener("click", () => {
+                const collapsed = panel.classList.toggle("is-collapsed");
+                toggleBtn!.setAttribute("aria-expanded", String(!collapsed));
+              });
+            }
+          }
         }
       }
 
@@ -378,12 +446,15 @@ export class MugsSettingTab extends PluginSettingTab {
                     this._renderAll();
                     return;
                   }
+                  // The store transaction already flipped encryptCredentials off;
+                  // flush to disk + drop any draft still holding the pre-
+                  // transaction security block (applying it would clobber kdf).
+                  await this.commitSecurityTransaction();
+                  return;
                 }
               }
               this.edit((d) => d.setSecurity({ encryptCredentials: v }));
-              // The claim must not fire before the save: data.json still holds the
-              // previous state until Apply.
-              new Notice(`MUGS credentials will be ${v ? "encrypted" : "stored as-is"} once you Apply settings.`);
+              new Notice(`MUGS credentials will be ${v ? "encrypted" : "stored as-is"} — saved automatically.`);
             }),
         );
 
@@ -441,19 +512,21 @@ export class MugsSettingTab extends PluginSettingTab {
               try {
                 await this.plugin.store.setEncryptionPassphrase(passphrase);
                 passphrase = "";
-                await this.markUnsaved();
+                // setEncryptionPassphrase mutated the LIVE store directly; flush
+                // + drop the stale draft (it holds the pre-passphrase security
+                // block and plaintext credentials — applying it would wipe kdf).
+                await this.commitSecurityTransaction();
                 new Notice(
-                  "MUGS: tokens re-encrypted — Apply settings to persist. The passphrase is not stored and cannot be recovered.",
+                  "MUGS: tokens re-encrypted and saved. The passphrase is not stored and cannot be recovered.",
                   8000,
                 );
-                this._renderAll();
               } catch (e) {
                 new Notice(`MUGS: could not set the passphrase — ${errorMessage(e)}`, 8000);
               }
             }),
           );
       }
-    });
+    }, { defaultCollapsed: !this.plugin.store.isLocked() });
 
     // --- Automatic conflict resolution (Area 3/4) -------------------------
     this.section(containerEl, "Conflicts", (card) => {
@@ -492,7 +565,7 @@ export class MugsSettingTab extends PluginSettingTab {
             this.edit((d) => d.setSync({ recencyWins: v }));
           });
     });
-    });
+    }, { defaultCollapsed: true });
 
     // --- Sync frequency + maintenance (Area 5/8) --------------------------
     this.section(containerEl, "Sync", (card) => {
@@ -515,11 +588,11 @@ export class MugsSettingTab extends PluginSettingTab {
 
       new Setting(card)
         .setName("Pause automatic sync")
-        .setDesc("Stop scheduled sync and file-change triggers. Apply to activate. Sync now remains available; resuming checks immediately.")
+        .setDesc("Stop scheduled sync and file-change triggers. Sync now remains available; resuming checks immediately.")
         .addToggle((t) => {
           t.setValue(sync.paused).onChange(async (v) => {
             this.edit((d2) => d2.setSync({ paused: v }));
-            new Notice(`MUGS sync will be ${v ? "paused" : "resumed"} once you Apply settings.`);
+            new Notice(`MUGS sync will be ${v ? "paused" : "resumed"} shortly — saved automatically.`);
           });
     });
 
@@ -553,6 +626,7 @@ export class MugsSettingTab extends PluginSettingTab {
     });
 
     // --- Obsidian config sync (Area 9) ------------------------------------
+    const obsEnabled = this.view().sync.obsidianConfig.enabled;
     this.section(containerEl, "Obsidian settings", (card) => {
       card.createEl("p", {
         cls: "mugs-desc",
@@ -566,7 +640,7 @@ export class MugsSettingTab extends PluginSettingTab {
         .addToggle((t) => {
           t.setValue(obs.enabled).onChange(async (v) => {
             this.edit((d) => d.setObsidianConfigEnabled(v));
-            new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"} once you Apply settings.`);
+            new Notice(`MUGS .obsidian/ sync ${v ? "enabled" : "disabled"} — saved automatically.`);
             this._renderAll();
           });
         });
@@ -574,7 +648,7 @@ export class MugsSettingTab extends PluginSettingTab {
       // Obsidian-Sync-style grouped toggles: each top-level .obsidian/ child gets a
       // personal/vault-wide scope so you can share all settings or only certain components.
       this.renderObsidianEntries(card, obs);
-    });
+    }, { defaultCollapsed: !obsEnabled });
 
     // --- About ------------------------------------------------------------
     containerEl.createEl("h2", { text: "About" });
@@ -592,10 +666,6 @@ export class MugsSettingTab extends PluginSettingTab {
   private gettingStarted(containerEl: HTMLElement): void {
     const card = containerEl.createDiv({ cls: "mugs-getting-started" });
     card.createEl("h3", { text: "Getting Started" });
-    card.createEl("p", {
-      cls: "mugs-gs-intro",
-      text: "Sync your folders with GitLab, GitHub, Bitbucket, Gitea/Forgejo, or a local repository.",
-    });
 
     const view = this.view();
     const lastSync = this.plugin.store.getSettings().lastSync;
@@ -604,6 +674,21 @@ export class MugsSettingTab extends PluginSettingTab {
     const hasSynced = Object.values(lastSync).some(
       (s) => s.status === "ok" || s.status === "up-to-date" || !!s.correspondenceSha,
     );
+
+    // Fully-configured vaults get a one-line summary instead of the checklist,
+    // keeping the top of Settings clean for configured users.
+    if (hasAccount && hasFolder && hasSynced) {
+      card.createEl("p", {
+        cls: "mugs-gs-intro",
+        text: "All set — account connected, folders linked, and sync has run. Manage everything below.",
+      });
+      return;
+    }
+
+    card.createEl("p", {
+      cls: "mugs-gs-intro",
+      text: "Sync your folders with GitLab, GitHub, Bitbucket, Gitea/Forgejo, or a local repository.",
+    });
     const steps: Array<{ done: boolean; text: string; section?: string; action?: string }> = [
       { done: hasAccount, text: "Add your account under Accounts — the API endpoint and label are filled in for you.", section: "Accounts", action: "Add account" },
       { done: hasFolder, text: "Connect folders and choose Both ways, Upload only, or Download only.", section: "Connected folders", action: "Connect a folder" },
@@ -638,7 +723,7 @@ export class MugsSettingTab extends PluginSettingTab {
    *  The title is rendered as the clickable header (with a chevron); body() receives
    *  the content area element. Toggling only flips an `is-collapsed` class, so live-
    *  preview re-renders never rebuild text inputs and steal focus. */
-  private section(containerEl: HTMLElement, title: string, body: (card: HTMLElement) => void): void {
+  private section(containerEl: HTMLElement, title: string, body: (card: HTMLElement) => void, opts: { defaultCollapsed?: boolean } = {}): void {
     // Build the card with Obsidian's native createDiv so it is guaranteed to expose
     // createEl/createDiv/etc. In Obsidian 1.14.x a raw document.createElement("div")
     // element does not reliably inherit those helpers, which left every section blank.
@@ -651,6 +736,13 @@ export class MugsSettingTab extends PluginSettingTab {
     header.setAttribute("role", "button");
     header.setAttribute("tabindex", "0");
     header.setAttribute("aria-expanded", "true");
+    // Progressive disclosure: secondary sections start collapsed until relevant
+    // (the caller decides — e.g. Security auto-expands while the vault is locked).
+    if (opts.defaultCollapsed) {
+      card.classList.add("is-collapsed");
+      chevron.textContent = "▸";
+      header.setAttribute("aria-expanded", "false");
+    }
     const toggle = () => {
       const collapsed = card.classList.toggle("is-collapsed");
       chevron.textContent = collapsed ? "▸" : "▾";
@@ -680,15 +772,60 @@ export class MugsSettingTab extends PluginSettingTab {
     }
   }
 
+  /** Live credential status, preferring the store's own getCredentialStatus and
+   *  falling back to inference from the runtime token + stored credential shape
+   *  (structural cast: the store may not ship the method yet). */
+  private credentialStatus(c: Credential): CredentialStatus {
+    const store = this.plugin.store as unknown as { getCredentialStatus?: (id: string) => CredentialStatus };
+    if (typeof store.getCredentialStatus === "function") return store.getCredentialStatus(c.id);
+    if (c.kind === "local") return "ready";
+    if (this.plugin.store.getToken(c.id)) return "ready";
+    if (this.plugin.store.isLocked() && (c.secretId || c.token)) return "locked";
+    if (c.secretId && !c.token) return "missing-keychain";
+    return "missing";
+  }
+
+  /** Honest per-status token description for an account row (never a bare
+   *  "keychain" claim when the keychain actually holds nothing). */
+  private credentialStatusText(c: Credential, status: CredentialStatus): string {
+    if (c.kind === "local") return `path: ${c.baseUrl ?? "not set"}`;
+    switch (status) {
+      case "ready": return c.secretId ? "token: saved in keychain" : `token: ${maskToken(c.token)}`;
+      case "missing-keychain": return "token missing on this device — paste token below";
+      case "locked": return "locked — unlock under Security";
+      case "missing": return "token not set — paste token below";
+    }
+  }
+
+  /** Paste a new token onto an EXISTING credential in place (id preserved so
+   *  all mappings stay linked), commit immediately, and re-render. */
+  private async saveTokenInPlace(id: string, input: { value: string }): Promise<void> {
+    const value = input.value.trim();
+    if (!value) { new Notice("MUGS: paste a token first."); return; }
+    const current = this.view().credentials.find((x) => x.id === id);
+    if (!current) { new Notice("MUGS: this account no longer exists."); return; }
+    this.edit((d) => d.upsertCredential({ ...current, token: value }));
+    await this.applySettings({ explicit: false });
+    if (!this.draft) new Notice(`MUGS: token updated for "${current.label}".`);
+    this._renderAll();
+  }
+
   /** Render each stored mapping as a card with native Setting rows, collapsible
    *  include/exclude managers. The whole-vault .trash/ toggle lives in the
    *  Sync Frequency & Maintenance section instead. */
   private renderMappings(card: HTMLElement, mappings: FolderMapping[]): void {
     const activeLastSync = this.plugin.store.getSettings().lastSync; // status dots read ACTIVE state, not the draft
+    const creds = this.view().credentials;
     for (const m of mappings) {
       const block = card.createDiv({ cls: "mugs-mapping" });
       // Tag the card so a banner problem can jump to it (data-mugs-ref).
       block.setAttribute("data-mugs-ref", `mapping:${m.id}`);
+
+      // Recovery: a mapping whose account was deleted (or copied here from
+      // another device) must never be stuck on "credential missing" — surface
+      // it and let the user re-bind to an existing account right on the card.
+      const credMissing = !creds.some((c) => c.id === m.providerId);
+      if (credMissing) block.classList.add("mugs-mapping-missing-cred");
 
       // Header row: status dot + label + delete button. Rendered manually so the
       // sync-status dot sits beside the name (native Setting has no leading icon slot).
@@ -699,7 +836,7 @@ export class MugsSettingTab extends PluginSettingTab {
       new Setting(header).addButton((b) =>
         b.setButtonText("Delete").onClick(() => {
           this.edit((d) => d.removeMapping(m.id));
-          this._renderAll();
+          void this.commitNow();
         }),
       );
 
@@ -707,6 +844,32 @@ export class MugsSettingTab extends PluginSettingTab {
         cls: "mugs-mapping-route",
         text: `${m.localFolder === "." ? "Vault root" : m.localFolder} → ${m.remotePath || "Repository root"}${m.branch ? ` · ${m.branch}` : ""}`,
       });
+
+      if (credMissing) {
+        block.createEl("p", { cls: "mugs-cred-warning", text: "Account missing — select an account to reconnect." });
+        // Exactly one account exists? One click rebinds and commits.
+        if (creds.length === 1) {
+          const rebind = block.createDiv({ cls: "mugs-rebind-row" });
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = `Use ${creds[0].label}`;
+          btn.addEventListener("click", () => void this.rebindMappingNow(m.id, creds[0].id));
+          rebind.appendChild(btn);
+        }
+      }
+      // With several accounts (or a missing one), expose the re-bind dropdown.
+      if (credMissing || creds.length > 1) {
+        new Setting(block)
+          .setName("Account")
+          .setDesc(credMissing ? "Choose the account to reconnect this folder." : "Move this connection to another account.")
+          .addDropdown((d) => {
+            for (const c of creds) d.addOption(c.id, c.label);
+            if (!credMissing) d.setValue(m.providerId);
+            d.onChange((v) => {
+              this.edit((d2) => d2.upsertMapping({ ...m, providerId: v }));
+            });
+          });
+      }
 
       // Editable direction for every card (scoped links and whole-repo alike).
       new Setting(block)
@@ -779,6 +942,16 @@ export class MugsSettingTab extends PluginSettingTab {
     return wrap;
   }
 
+  /** Re-point a mapping at an existing credential and commit immediately. */
+  private async rebindMappingNow(id: string, providerId: string): Promise<void> {
+    const current = this.view().mappings.find((x) => x.id === id);
+    if (!current) return;
+    this.edit((d) => d.upsertMapping({ ...current, providerId }));
+    await this.applySettings({ explicit: false });
+    if (!this.draft) new Notice("MUGS: connection re-pointed to the selected account.");
+    this._renderAll();
+  }
+
   /** Persist an editable include/exclude scope change on an existing mapping (draft). */
   private saveMappingScope(
     id: string,
@@ -845,27 +1018,32 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     addWrap.appendChild(addBtn);
   }
 
-  /** Add-account form using native Obsidian Setting rows. The provider choice
-   *  fills in the API endpoint automatically, values are checked inline as they
-   *  are typed, and an explicit "Test connection" probe can verify the account
-   *  before it is added. */
+  /** Add-account form using native Obsidian Setting rows. Hosted providers
+   *  lead with just Provider + Token; Base URL / Label / Username / repo filter
+   *  fold into an "Advanced options" disclosure (auto-opened for self-hosted-
+   *  only providers or when an advanced field has a problem). Local repositories
+   *  show a bare-absolute-path field (normalized to file:// on save) + Label.
+   *  Values are checked inline as they are typed, "Test connection" probes the
+   *  account live, and "Add account" commits immediately. */
   private addCredentialForm(card: HTMLElement): void {
     let kind: Credential["kind"] = PROVIDER_OPTIONS[0]?.kind ?? "gitlab";
     let label = providerOption(kind)?.label ?? kind; // auto-filled; editable
     let labelTouched = false;
-    let labelInputEl: HTMLInputElement | null = null;
     let username = "";
     let token = "";
     let baseUrl = prefillBaseUrl(kind);
     let repos: string[] = [];
     /** True once the user pressed "Add account" — required-field errors show only then. */
     let attempted = false;
-    let baseUrlInputEl: HTMLInputElement | null = null;
 
     // Inline problem list + test-connection status, updated in place so typing
     // never rebuilds the form inputs (which would steal focus/caret).
     const messagesEl = card.createDiv({ cls: "mugs-form-messages" });
     const testStatusEl = card.createDiv({ cls: "mugs-test-status" });
+
+    /** Form rows, rebuilt when the provider kind flips (hosted ↔ local layouts). */
+    let rowsEl: HTMLElement | null = null;
+    let advancedEl: HTMLDetailsElement | null = null;
 
     const currentProblems = (): FieldProblem[] =>
       validateCredentialForm({ kind, label, token, baseUrl, repos });
@@ -879,16 +1057,72 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           text: p.message,
         });
       }
+      // Auto-open the advanced disclosure when one of its fields has a problem.
+      if (advancedEl) {
+        const advancedProblem = currentProblems().some((p) => p.field === "baseUrl" || p.field === "label" || p.field === "repos");
+        if (advancedProblem) advancedEl.open = true;
+      }
     };
 
-    const setBaseUrlField = (value: string): void => {
-      baseUrl = value;
-      if (baseUrlInputEl) baseUrlInputEl.value = value;
-    };
-    /** The label defaults to the provider name until the user edits it. */
-    const setLabelField = (value: string): void => {
-      label = value;
-      if (labelInputEl) labelInputEl.value = value;
+    /** (Re)build the kind-specific rows: hosted shows Token + advanced options;
+     *  local shows a Repository path (bare /abs path or file:// URL) + Label. */
+    const buildRows = (): void => {
+      if (rowsEl) rowsEl.remove();
+      rowsEl = card.createDiv({ cls: "mugs-cred-form-rows" });
+      advancedEl = null;
+      if (kind === "local") {
+        new Setting(rowsEl)
+          .setName("Repository path")
+          .setDesc("Absolute path to the existing clone — /home/user/repo and file:///home/user/repo both work.")
+          .addText((t) => {
+            t.setPlaceholder("/absolute/path/to/repo");
+            t.setValue(baseUrl);
+            t.onChange((v) => { baseUrl = v.trim(); refreshValidation(); });
+          });
+        new Setting(rowsEl)
+          .setName("Label")
+          .setDesc("A name for this account — filled in for you; edit if you like.")
+          .addText((t) => {
+            t.setValue(label);
+            t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
+          });
+        return;
+      }
+      new Setting(rowsEl)
+        .setName("Token")
+        .setDesc("API token for this account — stored in this vault and never displayed.")
+        .addText((t) => {
+          t.setPlaceholder("Token").inputEl.type = "password";
+          t.onChange((v) => { token = v; refreshValidation(); });
+        });
+      const advanced = rowsEl.createEl("details", { cls: "mugs-advanced-details" });
+      advancedEl = advanced;
+      advanced.open = kind === "forgejo"; // self-hosted only: the URL is required
+      advanced.createEl("summary", { text: "Advanced options (self-hosted URL, label, repo filter)" });
+      const advBody = advanced.createDiv({ cls: "mugs-advanced-body" });
+      new Setting(advBody)
+        .setName("Base URL")
+        .setDesc("API endpoint, filled in for the provider. Change it only for a self-hosted instance.")
+        .addText((t) => {
+          t.setPlaceholder(providerOption(kind)?.endpointHint ?? "");
+          t.setValue(baseUrl);
+          t.onChange((v) => { baseUrl = v.trim(); refreshValidation(); });
+        });
+      new Setting(advBody)
+        .setName("Label")
+        .setDesc("A name for this account — filled in for you; edit if you like.")
+        .addText((t) => {
+          t.setValue(label);
+          t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
+        });
+      new Setting(advBody)
+        .setName("Username")
+        .setDesc("Optional username (GitLab shows the acting user).")
+        .addText((t) => t.setPlaceholder("Username (optional)").onChange((v) => { username = v.trim(); }));
+      new Setting(advBody)
+        .setName("Allowed repositories")
+        .setDesc("Optional owner/repo per line to restrict which repos this credential may access.")
+        .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); refreshValidation(); }));
     };
 
     new Setting(card)
@@ -898,51 +1132,18 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         for (const option of PROVIDER_OPTIONS) d.addOption(option.kind, option.label);
         d.setValue(kind).onChange((v) => {
           kind = v as Credential["kind"];
-          setBaseUrlField(prefillBaseUrl(kind));
-          if (!labelTouched) setLabelField(providerOption(kind)?.label ?? kind);
+          baseUrl = prefillBaseUrl(kind);
+          token = "";
+          if (!labelTouched) label = providerOption(kind)?.label ?? kind;
           testStatusEl.empty();
-          // No markUnsaved: nothing is stored yet — the old call showed the
-          // "Unsaved changes" banner on a form the user had not filled in.
+          buildRows(); // hosted ↔ local show different fields
+          // No markUnsaved: nothing is stored yet — showing the "Unsaved
+          // changes" banner on an unfilled form would be noise.
           refreshValidation();
         });
       });
 
-    new Setting(card)
-      .setName("Base URL")
-      .setDesc("API endpoint, filled in for the provider. Change it only for a self-hosted instance.")
-      .addText((t) => {
-        baseUrlInputEl = t.inputEl;
-        t.setPlaceholder(providerOption(kind)?.endpointHint ?? "");
-        t.setValue(baseUrl);
-        t.onChange((v) => { baseUrl = v.trim(); refreshValidation(); });
-      });
-
-    new Setting(card)
-      .setName("Label")
-      .setDesc("A name for this account — filled in for you; edit if you like.")
-      .addText((t) => {
-        labelInputEl = t.inputEl;
-        t.setValue(label);
-        t.setPlaceholder("Label").onChange((v) => { labelTouched = true; label = v.trim(); refreshValidation(); });
-      });
-
-    new Setting(card)
-      .setName("Username")
-      .setDesc("Optional username (GitLab shows the acting user).")
-      .addText((t) => t.setPlaceholder("Username (optional)").onChange((v) => { username = v.trim(); }));
-
-    new Setting(card)
-      .setName("Token")
-      .setDesc("Hosted account: API token. Local repository: leave empty.")
-      .addText((t) => {
-        t.setPlaceholder("Token").inputEl.type = "password";
-        t.onChange((v) => { token = v; refreshValidation(); });
-      });
-
-    new Setting(card)
-      .setName("Allowed repositories")
-      .setDesc("Optional owner/repo per line to restrict which repos this credential may access.")
-      .addTextArea((ta) => ta.setPlaceholder("owner/repo\nowner/other-repo").onChange((v) => { repos = parseGlobList(v); refreshValidation(); }));
+    buildRows();
 
     /** Explicit, opt-in live probe: build the provider from the in-form values and
      *  list repos, so the user finds out now whether the account works. */
@@ -1003,17 +1204,21 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
             return;
           }
           try {
+            // Local paths are normalized to file:// here so data.json always
+            // stores a valid URL (schema requires z.string().url()).
+            const storedBaseUrl = kind === "local" ? normalizeLocalBaseUrl(baseUrl) : baseUrl || undefined;
             this.edit((d) => d.upsertCredential({
               id: newId(),
               label,
               kind,
-              username: username || undefined,
-              token,
-              baseUrl: baseUrl || undefined,
+              username: kind === "local" ? undefined : (username || undefined),
+              token: kind === "local" ? "" : token,
+              baseUrl: storedBaseUrl || undefined,
               repos: repos.length ? repos : undefined,
             }));
-            new Notice(`MUGS: account "${label}" added. Apply settings to save.`);
-            this._renderAll();
+            // Commit immediately — no "Apply settings to save" limbo. Re-render
+            // also refreshes the Connect-folders form so repos load right away.
+            void this.commitNow(`MUGS: account "${label}" added.`);
           } catch (e) {
             new Notice(`MUGS: could not save credential — ${errorMessage(e)}`);
           }
@@ -1023,30 +1228,38 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
 
     refreshValidation();
   }
-  /** Staged assistant for adding mappings: pick a credential → pick (or sync) a repo →
-   *  check the matched top-level folders to link. Each checked folder becomes its own
-   *  individually-editable mapping card scoped to that repo via `repoRef` (they share one
-   *  clone); the whole-repo toggle adds a legacy whole-repo mapping whose id is the repo id.
-   */
+  /** Connect assistant: pick an account → pick a repo → choose whole-repo root
+   *  sync or specific folders (with a custom-pair escape hatch) → connect.
+   *  Whole-repo mappings get a fresh unique id plus repoRef/repoPath so they
+   *  resolve across token scopes; local repositories default to root sync so
+   *  connecting an existing clone works out of the box. Connecting commits
+   *  immediately and kicks the scheduler so the first sync starts at once. */
   private async addMappingForm(card: HTMLElement): Promise<void> {
-    // Draft creds: a credential just added (not yet applied) is selectable here —
-    // the whole point of the draft model is composing a first setup, then Apply once.
+    // Always read FRESH credentials from the draft view: an account added a
+    // moment ago (immediate commit + re-render) must be selectable here.
     const creds = this.view().credentials;
+    if (creds.length === 0) {
+      card.createEl("p", { cls: "mugs-muted", text: "Add an account above first to connect a repository." });
+      return;
+    }
     let providerId = creds[0]?.id ?? "";
     let direction: SyncDirection = "push-pull";
     let branch = "";
     let includesText = "";
     let excludesText = "";
-    // REST repo selection: repoRef (repo.id) is stored on scoped links so the driver +
-    // clone manager resolve them against one shared clone; whole-repo mappings keep id === repo.id.
+    // REST repo selection: repoRef (repo.id) + repoPath (owner/repo) are stored on
+    // mappings so the driver + clone manager resolve them against one shared clone
+    // across token scopes.
     let repoRef = "";
     let repoKey = "";
     let reposCache: RepoSummary[] = [];
-    let syncTrash = false; // whole-repo sub-option: include the repo's .trash folder in the sync
-    let wholeRepo = false;
+    let syncTrash = false; // whole-repo sub-option: include the repo's .trash folder (consistent default: off)
+    let mode: "folders" | "root" = creds[0]?.kind === "local" ? "root" : "folders";
     let selectedFolders = new Set<string>(); // matched remote paths the user checked to link
     let matches: FolderMatch[] = [];       // exact name matches (top-level only)
     let fuzzyMatches: Array<{ remotePath: string; localFolder: string; label: string; score: number }> = [];
+    let customVault = "";                  // custom folder-pair escape hatch (folder mode)
+    let customRepo = "";
 
     // Local folders already claimed by an existing mapping (draft view — a mapping
     // added earlier in THIS draft session already claims its folder). Matched folders
@@ -1056,36 +1269,40 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
       this.view().mappings.map((x) => x.localFolder),
     );
     const isRest = (): boolean => {
-      const cred = creds.find((c) => c.id === providerId);
+      const cred = this.view().credentials.find((c) => c.id === providerId);
       return !!cred && cred.kind !== "local";
     };
 
-    // --- Credential selector -------------------------------------------------
-    new Setting(card)
-      .setName("Provider")
-      .setDesc("Choose the account for these folders.")
-      .addDropdown((d) => {
-        for (const [value, text] of creds.map((c) => [c.id, c.label] as [string, string])) {
-          d.addOption(value, text);
-        }
-        d.setValue(providerId).onChange(async (v) => {
-          providerId = v; // CRITICAL: the assistant used to keep listing repos for —
-          // and saving mappings against — the FIRST credential, whatever was picked.
-          wholeRepo = false;
-          syncTrash = false;
-          selectedFolders.clear();
-          await refreshRepos();
+    // --- Account selector (only when there is a real choice to make) ---------
+    if (creds.length > 1) {
+      new Setting(card)
+        .setName("Account")
+        .setDesc("Choose the account for these folders.")
+        .addDropdown((d) => {
+          for (const c of creds) d.addOption(c.id, c.label);
+          d.setValue(providerId).onChange(async (v) => {
+            providerId = v; // CRITICAL: never list repos for — or save mappings against —
+            // anything but the account the user actually picked.
+            mode = this.view().credentials.find((c) => c.id === v)?.kind === "local" ? "root" : "folders";
+            selectedFolders.clear();
+            await refreshRepos();
+          });
         });
-      });
+    }
 
-    // --- Repository selector -------------------------------------------------
+    // --- Repository selector + refresh ---------------------------------------
     const repoSelWrap = card.createDiv({ cls: "mugs-repo-select-wrap" });
     const loadingEl = repoSelWrap.createDiv({ cls: "mugs-loading-row", text: "" });
     const spinner = loadingEl.createEl("span", { cls: "mugs-loading" });
     loadingEl.createEl("span", { text: "Loading repositories…" });
     loadingEl.style.display = "none";
-    const repoSel = card.createEl("select", { cls: "mugs-repo-select" });
+    const repoRow = card.createDiv({ cls: "mugs-repo-row" });
+    const repoSel = repoRow.createEl("select", { cls: "mugs-repo-select" });
     repoSel.setAttribute("aria-label", "Repository");
+    const refreshBtn = repoRow.createEl("button", { cls: "mugs-link-btn mugs-repo-refresh", text: "Refresh" });
+    refreshBtn.setAttribute("type", "button");
+    refreshBtn.setAttribute("aria-label", "Refresh repositories");
+    refreshBtn.addEventListener("click", () => void refreshRepos());
 
     const refreshRepos = async (): Promise<void> => {
       loadingEl.style.display = "";
@@ -1101,7 +1318,7 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           await refreshMatches();
           return;
         }
-        const cred = creds.find((c) => c.id === providerId);
+        const cred = this.view().credentials.find((c) => c.id === providerId);
         if (!cred) { repoSel.disabled = true; return; }
         // Runtime token first; fall back to the DRAFT credential (just-added, not yet applied).
         const token = this.plugin.store.getToken(providerId)
@@ -1143,12 +1360,10 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     // checkboxes below. Dotfolders (.obsidian/.trash) are filtered out here: .obsidian linking is
     // deprecated (handled by the Obsidian Config Sync section), and .trash is a whole-repo sub-option.
     const refreshMatches = async (): Promise<void> => {
-      wholeRepo = false;
-      syncTrash = true;
       selectedFolders.clear();
       fuzzyMatches = [];
       if (!isRest() || !repoKey) { matches = []; renderMatches(); return; }
-      const cred = creds.find((c) => c.id === providerId);
+      const cred = this.view().credentials.find((c) => c.id === providerId);
       if (!cred) { matches = []; renderMatches(); return; }
       try {
         const detectedDirs = await this.listDirectoriesFor(cred, repoKey, "");
@@ -1175,92 +1390,131 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
     repoSel.addEventListener("change", () => {
       const chosen = reposCache.find((r) => r.id === repoSel.value);
       if (!chosen) return;
-      wholeRepo = false;
-      syncTrash = false;
       selectedFolders.clear();
       repoRef = chosen.id;
       repoKey = chosen.pathWithNamespace;
       void refreshMatches();
     });
 
-    // --- Matched-folder checkboxes + whole-repo toggle -----------------------
+    // --- Mode choice: specific folders vs whole-repo root sync ----------------
+    const modeEl = card.createDiv({ cls: "mugs-mode-choice" });
+    const buildModeChoice = (): void => {
+      modeEl.empty();
+      const mk = (value: "folders" | "root", text: string): void => {
+        const opt = modeEl.createEl("label", { cls: "mugs-mode-option" });
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = "mugs-connect-mode";
+        input.checked = mode === value;
+        input.addEventListener("change", () => {
+          if (!input.checked) return;
+          mode = value;
+          renderMatches();
+        });
+        opt.appendChild(input);
+        opt.createEl("span", { text });
+      };
+      mk("folders", "Sync specific folders");
+      mk("root", "Sync entire repository to vault root");
+    };
+
+    // --- Matched-folder panel (content depends on the chosen mode) -----------
     const matchesEl = card.createDiv({ cls: "mugs-matches" });
     const renderMatches = (): void => {
       // Clear before re-rendering: every previous re-render APPENDED, stacking
-      // duplicate whole-repo/.trash rows and stale rows from the prior repo.
+      // duplicate rows and stale rows from the prior repo.
       matchesEl.empty();
-      if (isRest() && repoKey) {
-        // Whole-repo toggle: map the entire repository root to the vault root ('.').
-        const wholeRow = matchesEl.createEl("label", { cls: "mugs-match-whole" });
-        const wholeInput = document.createElement("input");
-        wholeInput.type = "checkbox";
-        wholeInput.checked = wholeRepo;
-        wholeInput.addEventListener("change", (e: Event) => { wholeRepo = (e.target as HTMLInputElement).checked; renderMatches(); });
-        // FIX: the checkbox was created but never appended — it rendered as an
-        // invisible ghost row you could not check. Insert it before the label.
-        wholeRow.appendChild(wholeInput);
-        wholeRow.createEl("span", { text: "Sync the entire repository to the vault root" });
-        const trashRow = matchesEl.createEl("label", { cls: "mugs-match-trash" });
-        trashRow.style.marginLeft = "24px";
-        const trashInput = document.createElement("input");
-        trashInput.type = "checkbox";
-        trashInput.checked = syncTrash;
-        trashInput.addEventListener("change", (e: Event) => { syncTrash = (e.target as HTMLInputElement).checked; });
-        trashRow.appendChild(trashInput);
-        trashRow.createEl("span", { text: "Include the repository's .trash/ folder" });
-      }
-      // --- Exact matches (checkboxes) -------------------------------------------
-      if (matches.length > 0) {
-        const head = matchesEl.createEl("div", { cls: "mugs-matches-head" });
-        head.textContent = wholeRepo ? "Or connect individual folders:" : "Choose folders to connect";
-        for (const m of matches) {
-          const row = matchesEl.createDiv({ cls: "mugs-match-row" });
-          const taken = usedLocalFolders.has(m.localFolder);
-          if (taken) row.classList.add("mugs-match-taken");
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = taken || selectedFolders.has(m.remotePath);
-          cb.disabled = taken;
-          cb.setAttribute("aria-label", `${m.remotePath} → ${m.localFolder}${taken ? " (already connected)" : ""}`);
-          cb.addEventListener("change", (e: Event) => {
-            if ((e.target as HTMLInputElement).checked) selectedFolders.add(m.remotePath);
-            else selectedFolders.delete(m.remotePath);
+      if (mode === "root") {
+        // Whole-repo root sync: folder checkboxes would only confuse (and
+        // overlap). Warn when anything else is already connected, since '.'
+        // overlaps every folder mapping.
+        if (this.view().mappings.length > 0) {
+          matchesEl.createEl("p", {
+            cls: "mugs-cred-warning",
+            text: "Heads up: existing connections already map this vault — syncing the entire repository to the vault root overlaps them.",
           });
-          row.appendChild(cb);
-          const label = row.createEl("span", { cls: "mugs-match-label" });
-          label.textContent = m.remotePath;
-          label.title = taken ? `${m.localFolder} is already mapped` : `${m.remotePath} → ${m.localFolder}`;
-          if (taken) row.createEl("span", { cls: "mugs-match-badge", text: "Connected" });
-          row.createEl("span", { cls: "mugs-match-arrow", text: "→" });
-          row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
-          matchesEl.appendChild(row);
         }
-      } else if (!wholeRepo && !fuzzyMatches.length) {
-        matchesEl.createEl("p", { cls: "mugs-muted", text: wholeRepo ? "" : "No folders matched between this repo and your vault yet." });
+        // .trash sub-option (hosted repos only; local mappings get the toggle
+        // on their card in the Sync section once connected).
+        if (isRest() && repoKey) {
+          const trashRow = matchesEl.createEl("label", { cls: "mugs-match-trash" });
+          const trashInput = document.createElement("input");
+          trashInput.type = "checkbox";
+          trashInput.checked = syncTrash;
+          trashInput.addEventListener("change", (e: Event) => { syncTrash = (e.target as HTMLInputElement).checked; });
+          trashRow.appendChild(trashInput);
+          trashRow.createEl("span", { text: "Include the repository's .trash/ folder" });
+        }
+      } else {
+        // --- Exact matches (checkboxes) -----------------------------------------
+        if (matches.length > 0) {
+          const head = matchesEl.createEl("div", { cls: "mugs-matches-head" });
+          head.textContent = "Choose folders to connect";
+          for (const m of matches) {
+            const row = matchesEl.createDiv({ cls: "mugs-match-row" });
+            const taken = usedLocalFolders.has(m.localFolder);
+            if (taken) row.classList.add("mugs-match-taken");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = taken || selectedFolders.has(m.remotePath);
+            cb.disabled = taken;
+            cb.setAttribute("aria-label", `${m.remotePath} → ${m.localFolder}${taken ? " (already connected)" : ""}`);
+            cb.addEventListener("change", (e: Event) => {
+              if ((e.target as HTMLInputElement).checked) selectedFolders.add(m.remotePath);
+              else selectedFolders.delete(m.remotePath);
+            });
+            row.appendChild(cb);
+            const label = row.createEl("span", { cls: "mugs-match-label" });
+            label.textContent = m.remotePath;
+            label.title = taken ? `${m.localFolder} is already mapped` : `${m.remotePath} → ${m.localFolder}`;
+            if (taken) row.createEl("span", { cls: "mugs-match-badge", text: "Connected" });
+            row.createEl("span", { cls: "mugs-match-arrow", text: "→" });
+            row.createEl("span", { cls: "mugs-match-local", text: m.localFolder });
+            matchesEl.appendChild(row);
+          }
+        } else if (!fuzzyMatches.length) {
+          matchesEl.createEl("p", { cls: "mugs-muted", text: "No folders matched between this repo and your vault yet." });
+        }
+
+        // --- Fuzzy suggestions (one-click auto-match chips) ---------------------
+        if (fuzzyMatches.length > 0) {
+          const head = matchesEl.createEl("div", { cls: "mugs-suggestions-head" });
+          head.textContent = "Did you mean?";
+          for (const fm of fuzzyMatches) {
+            // Only show suggestions where the vault folder isn't already mapped.
+            if (usedLocalFolders.has(fm.localFolder)) continue;
+            const chip = matchesEl.createEl("button", { type: "button", cls: "mugs-match-chip" });
+            chip.setAttribute("title", `Link "${fm.remotePath}" → "${fm.localFolder}" (${Math.round(fm.score * 100)}% match)`);
+            chip.textContent = `${fm.remotePath} → ${fm.localFolder}`;
+            chip.addEventListener("click", (e: MouseEvent) => {
+              e.preventDefault();
+              // Add the remote path to selectedFolders so it gets created as a mapping.
+              selectedFolders.add(fm.remotePath);
+              // Re-render to show it checked in the exact matches list below.
+              renderMatches();
+            });
+          }
+        }
+
+        // --- Custom folder pair escape hatch ------------------------------------
+        const pair = matchesEl.createEl("details", { cls: "mugs-advanced-details mugs-custom-pair" });
+        pair.createEl("summary", { text: "Map a custom folder pair" });
+        const pairBody = pair.createDiv({ cls: "mugs-custom-pair-body" });
+        new Setting(pairBody)
+          .setName("Vault folder")
+          .setDesc("Vault folder to fill, e.g. Notes.")
+          .addText((t) => t.setPlaceholder("Vault folder (e.g. Notes)").onChange((v) => { customVault = v.trim(); }));
+        new Setting(pairBody)
+          .setName("Repository folder")
+          .setDesc("Repository folder to sync from; leave empty for the repository root.")
+          .addText((t) => t.setPlaceholder("Repository folder (empty = root)").onChange((v) => { customRepo = v.trim().replace(/^\/+|\/+$/g, ""); }));
       }
 
-      // --- Fuzzy suggestions (one-click auto-match chips) -----------------------
-      if (!wholeRepo && fuzzyMatches.length > 0) {
-        const head = matchesEl.createEl("div", { cls: "mugs-suggestions-head" });
-        head.textContent = "Did you mean?";
-        for (const fm of fuzzyMatches) {
-          // Only show suggestions where the vault folder isn't already mapped.
-          if (usedLocalFolders.has(fm.localFolder)) continue;
-          const chip = matchesEl.createEl("button", { type: "button", cls: "mugs-match-chip" });
-          chip.setAttribute("title", `Link "${fm.remotePath}" → "${fm.localFolder}" (${Math.round(fm.score * 100)}% match)`);
-          chip.textContent = `${fm.remotePath} → ${fm.localFolder}`;
-          chip.addEventListener("click", (e: MouseEvent) => {
-            e.preventDefault();
-            // Add the remote path to selectedFolders so it gets created as a mapping.
-            selectedFolders.add(fm.remotePath);
-            // Re-render to show it checked in the exact matches list below.
-            renderMatches();
-          });
-        }
-      }
+      // Dynamic CTA: the label tracks the chosen mode.
+      connectBtn.textContent = mode === "root" ? "Connect vault root" : "Connect selected folders";
     };
 
-    // --- Direction + branch + include/exclude --------------------------------
+    // --- Direction + advanced (branch, file filters) --------------------------
     new Setting(card)
       .setName("Direction")
       .setDesc("Upload, download, or sync both ways.")
@@ -1271,73 +1525,101 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
         d.setValue(direction).onChange((v) => { direction = v as SyncDirection; });
       });
 
-    new Setting(card)
+    const advanced = card.createEl("details", { cls: "mugs-advanced-details" });
+    advanced.createEl("summary", { text: "Advanced (branch, file filters)" });
+    const advBody = advanced.createDiv({ cls: "mugs-advanced-body" });
+    new Setting(advBody)
       .setName("Branch")
       .setDesc("Optional branch to sync. Leave empty for the default branch.")
       .addText((t) => t.setPlaceholder("Branch (optional)").onChange((v) => { branch = v.trim(); }));
+    advBody.appendChild(this.managePanel("Only sync matching files", includesText, (v) => { includesText = v; }, "Optional patterns, one per line (e.g. *.md). Leave empty for all files."));
+    advBody.appendChild(this.managePanel("Skip matching files", excludesText, (v) => { excludesText = v; }, "Patterns to skip, one per line (e.g. drafts/**). Uses .gitignore syntax."));
 
-    card.appendChild(this.managePanel("Only sync matching files", includesText, (v) => { includesText = v; }, "Optional patterns, one per line (e.g. *.md). Leave empty for all files."));
-    card.appendChild(this.managePanel("Skip matching files", excludesText, (v) => { excludesText = v; }, "Patterns to skip, one per line (e.g. drafts/**). Uses .gitignore syntax."));
+    // --- Connect (commits immediately) ----------------------------------------
+    const actionsWrap = card.createDiv({ cls: "mugs-actions" });
+    const connectBtn = document.createElement("button");
+    connectBtn.type = "button";
+    connectBtn.className = "mod-cta";
+    connectBtn.addEventListener("click", () => void connect());
+    actionsWrap.appendChild(connectBtn);
+    card.appendChild(actionsWrap);
 
-    // --- Save ----------------------------------------------------------------
-    card.appendChild(this.actions([
-      {
-        text: "Connect selected folders",
-        cta: true,
-        disabled: creds.length === 0,
-        onClick: async () => {
-          const cred = creds.find((c) => c.id === providerId);
-          if (!providerId) { new Notice("MUGS: choose a credential/provider."); return; }
-          if (cred && cred.kind !== "local" && !repoRef) { new Notice("MUGS: choose a repository."); return; }
-          try {
-            const scope = { includes: parseGlobList(includesText), excludes: parseGlobList(excludesText) };
-            // Whole-repo mapping: id === repo.id so the driver matches it (legacy behaviour).
-            if (wholeRepo) {
-              this.edit((d) => d.upsertMapping({
-                id: repoRef, label: repoKey, remotePath: "", localFolder: ".", providerId,
-                branch: branch || undefined, direction, ...scope,
-                syncTrashFolder: syncTrash ? undefined : false,
-              }));
-              new Notice(`MUGS: "${repoKey}" connected. Apply settings to save.`);
-            } else if (selectedFolders.size === 0) {
-              new Notice("MUGS: check at least one folder to link."); return;
-            } else {
-              // Each checked folder becomes its own scoped card sharing the repo's
-              // clone via repoRef. FIX: lookups check EXACT matches AND fuzzy
-              // suggestions — a fuzzy pick used to be added to selectedFolders and
-              // then silently dropped here because it was only found in `matches`.
-              let count = 0;
-              for (const remotePath of selectedFolders) {
-                const match = matches.find((m) => m.remotePath === remotePath)
-                  ?? fuzzyMatches.find((m) => m.remotePath === remotePath);
-                if (!match) continue;
-                this.edit((d) => d.upsertMapping({
-                  id: newId(), label: match.label, remotePath, localFolder: match.localFolder,
-                  providerId, branch: branch || undefined, direction, repoRef, ...scope,
-                }));
-                count += 1;
-              }
-              if (count === 0) { new Notice("MUGS: no selected folder still matches this repository — refresh and choose again."); return; }
-              new Notice(`MUGS: ${count} folder${count === 1 ? "" : "s"} connected. Apply settings to save.`);
-            }
-            // Surface direction/first-sync consequences BEFORE activation.
-            const consequence = direction === "pull-only"
-              ? "Download only: repository files update this vault; your edits aren't uploaded."
-              : direction === "push-only"
-                ? "Upload only: your files update the repository; repository changes aren't downloaded."
-                : "Both ways: upload and download changes. Conflicts need your review.";
-            const first = this.view().sync.firstSyncDirection === "push"
-              ? "first sync starts by UPLOADING this device's eligible text files; unknown repository files stay for Review."
-              : "first sync starts by DOWNLOADING eligible repository text files; conflicts or unknown deletions need review.";
-            new Notice(`MUGS — what happens next:\n· ${consequence}\n· ${first}`, 12000);
-            this._renderAll();
-          } catch (e) {
-            new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);
+    const connect = async (): Promise<void> => {
+      try {
+        const cred = this.view().credentials.find((c) => c.id === providerId);
+        if (!providerId || !cred) { new Notice("MUGS: choose an account first."); return; }
+        if (cred.kind !== "local" && !repoRef) { new Notice("MUGS: choose a repository."); return; }
+        const scope = { includes: parseGlobList(includesText), excludes: parseGlobList(excludesText) };
+        let count = 0;
+        if (mode === "root") {
+          // Whole-repo root sync: a FRESH unique id (never the repo id — that
+          // breaks resolveRepo across token scopes) + repoRef/repoPath so the
+          // mapping resolves no matter which token lists the repo.
+          this.edit((d) => d.upsertMapping({
+            id: newId(),
+            label: repoKey || cred.label || "Vault root",
+            remotePath: "",
+            localFolder: ".",
+            providerId,
+            repoRef: repoRef || undefined,
+            // Structural cast: FolderMapping may not carry repoPath yet in this
+            // worktree (the root-sync branch adds it); harmless either way.
+            ...(repoKey ? { repoPath: repoKey } : {}),
+            branch: branch || undefined,
+            direction,
+            ...scope,
+            syncTrashFolder: syncTrash ? undefined : false,
+          } as FolderMapping));
+          count = 1;
+        } else {
+          // Each checked folder becomes its own scoped card sharing the repo's
+          // clone via repoRef. Lookups check EXACT matches AND fuzzy
+          // suggestions — a fuzzy pick must not be silently dropped.
+          for (const remotePath of selectedFolders) {
+            const match = matches.find((m) => m.remotePath === remotePath)
+              ?? fuzzyMatches.find((m) => m.remotePath === remotePath);
+            if (!match) continue;
+            this.edit((d) => d.upsertMapping({
+              id: newId(), label: match.label, remotePath, localFolder: match.localFolder,
+              providerId, branch: branch || undefined, direction, repoRef,
+              ...(repoKey ? { repoPath: repoKey } : {}), ...scope,
+            } as FolderMapping));
+            count += 1;
           }
-        },
-      },
-    ]));
+          // Custom pair escape hatch: connect folders even when their names
+          // don't already exist on both sides.
+          if (customVault) {
+            this.edit((d) => d.upsertMapping({
+              id: newId(), label: customVault, remotePath: customRepo, localFolder: customVault,
+              providerId, branch: branch || undefined, direction, repoRef,
+              ...(repoKey ? { repoPath: repoKey } : {}), ...scope,
+            } as FolderMapping));
+            count += 1;
+          }
+          if (count === 0) { new Notice("MUGS: check at least one folder to link, or map a custom folder pair."); return; }
+        }
+        // Surface direction/first-sync consequences as the pass kicks off.
+        const consequence = direction === "pull-only"
+          ? "Download only: repository files update this vault; your edits aren't uploaded."
+          : direction === "push-only"
+            ? "Upload only: your files update the repository; repository changes aren't downloaded."
+            : "Both ways: upload and download changes. Conflicts need your review.";
+        const first = this.view().sync.firstSyncDirection === "push"
+          ? "first sync starts by UPLOADING this device's eligible text files; unknown repository files stay for Review."
+          : "first sync starts by DOWNLOADING eligible repository text files; conflicts or unknown deletions need review.";
+        // Commit immediately — the scheduler is kicked inside applySettings, so
+        // the first sync starts right away instead of on the next poll.
+        await this.commitNow(mode === "root"
+          ? `MUGS: "${repoKey || cred.label}" connected to the vault root.`
+          : `MUGS: ${count} folder${count === 1 ? "" : "s"} connected.`);
+        new Notice(`MUGS — what happens next:\n· ${consequence}\n· ${first}`, 12000);
+      } catch (e) {
+        new Notice(`MUGS: could not save mapping — ${errorMessage(e)}`);
+      }
+    };
 
+    buildModeChoice();
+    renderMatches();
     void refreshRepos();
   }
   /** List child directories of `repoKey` at `path` for a credential's provider. */

@@ -53,6 +53,31 @@ export function isUnderObsidianRoot(vaultPath: string): boolean {
   return norm === ".obsidian" || norm.startsWith(".obsidian/");
 }
 
+/** The plugin's own persisted settings, relative to the vault/config root. Compared
+ *  case-insensitively so a differently-cased vault dir can never sneak past. */
+const MUGS_DATA_JSON = ".obsidian/plugins/mugs-obsidian/data.json";
+
+/**
+ * True when a path is MUGS's own internal runtime state and must NEVER sync — in
+ * either direction, under any user configuration:
+ * - `.mugs-clones/` — the per-mapping git clone store;
+ * - `.git/` — git metadata (a root-synced vault that IS a repo);
+ * - `.obsidian/plugins/mugs-obsidian/data.json` — the plugin's settings, which carry
+ *   keychain references (`secretId`), encrypted tokens and lastSync state. Syncing it
+ *   to teammates would hand them dead credential references (or resurrect another
+ *   machine's sync state); pulling it would clobber the local user's credentials.
+ * - any `.mugs-sync.lock` path — per-clone advisory lockfiles.
+ * Pure and prefix-independent (segment-based), so it guards repo-relative paths, paths
+ * under a mapping's localFolder, and any deeper nesting alike.
+ */
+export function isProtectedMugsPath(path: string): boolean {
+  const norm = normalizePath(path).toLowerCase();
+  if (norm === MUGS_DATA_JSON || norm.endsWith(`/${MUGS_DATA_JSON}`)) return true;
+  const segs = norm.split("/");
+  if (segs.includes(".mugs-clones") || segs.includes(".git")) return true;
+  return segs.some((s) => s.endsWith(".mugs-sync.lock"));
+}
+
 /** The top-level `.obsidian/` child that `vaultPath` lives under (or itself). */
 export function obsidianTopLevel(vaultPath: string): string {
   const norm = normalizePath(vaultPath);
@@ -78,8 +103,12 @@ export function classifyObsidianEntry(
  * vault-wide, and it is not excluded by that entry's gitignore rules (personal
  * entries and user-excluded paths are local-only). When disabled, nothing under
  * `.obsidian/` syncs — preserving the historical "reject .obsidian" behavior.
+ * MUGS's own runtime state ({@link isProtectedMugsPath}, notably the plugin's own
+ * data.json) ALWAYS stays local — even a user entry that shares `plugins` with no
+ * `data.json` excludes can never leak it.
  */
 export function shouldSyncObsidianPath(vaultPath: string, config: ObsidianConfigPolicy): boolean {
+  if (isProtectedMugsPath(vaultPath)) return false;
   if (!config.enabled) return false;
   const norm = normalizePath(vaultPath);
   if (norm !== ".obsidian" && !norm.startsWith(".obsidian/")) return false;

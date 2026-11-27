@@ -197,6 +197,23 @@ describe("StoreMapDataSource.getRows — honest skip reasons + conflict counts",
     expect(rows[0].status).toBe("pending");
   });
 
+  it("flags a hosted credential whose token is missing on this device (orphaned keychain reference)", async () => {
+    // data.json copied/synced from another machine: secretId points at a keychain
+    // entry holding nothing HERE — the Map row names the repair path immediately,
+    // without waiting for the next sync pass to skip the mapping.
+    const store = storeWith([mapping()]);
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "", secretId: "mugs-c1" });
+    const rows = await new StoreMapDataSource(store, ".mugs-clones", makeRunner()).getRows();
+    expect(rows[0].skipReason).toBe("token missing on this device — open Settings → MUGS → Accounts to enter your token");
+  });
+
+  it("flags a hosted credential with no token at all", async () => {
+    const store = storeWith([mapping()]);
+    store.upsertCredential({ id: "c1", label: "work", kind: "gitlab", token: "" });
+    const rows = await new StoreMapDataSource(store, ".mugs-clones", makeRunner()).getRows();
+    expect(rows[0].skipReason).toBe("missing token — open Settings → MUGS → Accounts");
+  });
+
   it("counts only UNresolved conflicts so the Map card can say \"needs merge (n files)\"", async () => {
     const store = storeWith([mapping()], { m1: { mappingId: "m1", status: "conflict" } });
     store.setConflicts("m1", [

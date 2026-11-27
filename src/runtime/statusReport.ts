@@ -53,6 +53,8 @@ export function classifySkipReason(reason: string | undefined): ReportKind {
   if (/(api|github|gitlab) (401|403)\b/.test(r)) return "auth";
   if (/(api|github|gitlab) (429|5\d\d)\b/.test(r)) return "offline";
   if (r.includes("reach provider") || r.includes("network") || r.includes("offline") || r.includes("timeout") || r.includes("fetch failed")) return "offline";
+  // Covers "missing token", "token missing on this device — …" and "no credential":
+  // every device-local token gap is an auth problem, never a network one.
   if (r.includes("token") || r.includes("credential") || r.includes("auth") || r.includes("locked")) return "auth";
   return "skipped";
 }
@@ -115,7 +117,9 @@ export function buildStatusReport(opts: {
     return {
       kind: "auth",
       counts,
-      message: parts([`${authN} mapping${authN === 1 ? "" : "s"} skipped — unlock credentials or add the missing token (Settings → MUGS)`, countText(counts)]),
+      // Two distinct repairs, named surfaces: re-enter a missing token on the
+      // existing account (Accounts) vs. unlock passphrase-encrypted tokens (Security).
+      message: parts([`${authN} mapping${authN === 1 ? "" : "s"} skipped — token missing: unlock credentials, or re-enter the token in Settings → MUGS → Accounts (locked tokens unlock under Security)`, countText(counts)]),
     };
   }
   if (offlineN > 0) {

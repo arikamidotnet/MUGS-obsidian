@@ -62,19 +62,35 @@ const problem = (field: CredentialField, level: ProblemLevel, kind: ProblemKind,
 });
 
 /**
+ * Normalize a local repository path to a `file://` URL: a bare absolute Linux
+ * path (e.g. `/home/user/repo.git`) becomes `file:///home/user/repo.git`, so
+ * data.json always stores a valid URL. Values that already carry a scheme (or
+ * anything else) are returned trimmed and unchanged.
+ */
+export function normalizeLocalBaseUrl(raw: string): string {
+  const value = raw.trim();
+  if (value.startsWith("/")) return `file://${value}`;
+  return value;
+}
+
+/**
  * Validate a provider's API base URL (or the local `file://` repository path).
  * Returns `null` when the value is acceptable — including an empty hosted value,
  * which falls back to the provider's default endpoint in `buildProvider`.
+ * Local repositories accept both `file:///abs/path` and a bare absolute path
+ * `/abs/path` (normalized upstream by {@link normalizeLocalBaseUrl}).
  */
 export function validateBaseUrl(kind: ProviderKind, raw: string): FieldProblem | null {
   const value = raw.trim();
 
   if (kind === "local") {
     if (!value) {
-      return problem("localPath", "error", "required", "Enter the repository path as file:///absolute/path/to/repo.git.");
+      return problem("localPath", "error", "required", "Enter the repository path as /absolute/path/to/repo.git or file:///absolute/path/to/repo.git.");
     }
-    if (!/^file:\/\//i.test(value)) {
-      return problem("localPath", "error", "format", "Local repositories need a file:// URL, e.g. file:///absolute/path/to/repo.git.");
+    const looksFileUrl = /^file:\/\//i.test(value);
+    const looksAbsPath = value.startsWith("/");
+    if (!looksFileUrl && !looksAbsPath) {
+      return problem("localPath", "error", "format", "Local repositories need an absolute path, e.g. /absolute/path/to/repo.git or file:///absolute/path/to/repo.git.");
     }
     const path = value.replace(/^file:\/\//i, "").replace(/\/+$/, "");
     if (!path || path === ".") {
