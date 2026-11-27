@@ -21,9 +21,11 @@ locked; use `npm ci` for repeatable installs.
 - [Set up a GitHub account and repository](docs/github.md)
 - [Roll out to a team safely: steady-state behavior, the review workflow and the Obsidian Sync comparison](docs/rollout.md)
 
-BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases),
-**not** from this GitLab source repository or an unpublished local candidate.
-Back up the vault and plugin state before upgrading or making a first connection.
+BRAT installs from the [published GitHub release assets](https://github.com/arikamidotnet/MUGS-obsidian/releases)
+on this repository. Keep BRAT tracking **Latest** and run **BRAT: Update
+plugins** after a new release; a version freeze (optional) silently stops all
+update prompts. Back up the vault and plugin state before upgrading or making
+a first connection.
 
 ## Releases
 
@@ -38,11 +40,15 @@ the installable assets.
   GitLab gets first-class v4 API support, and GitHub/Gitea/Forgejo/Bitbucket/local adapters ship today.
 - **Fine-grained folder sync.** Each mapping ties a remote path to a vault folder, so different
   users can share one repo while syncing only the folders relevant to them.
-- **Tokens live in the OS keychain**, not in `data.json`. On Obsidian 1.11.4+ the
-  plugin stores account tokens in the built-in SecretStorage (device-local,
-  OS-keychain-backed) and keeps only a reference in `data.json`; optional
-  passphrase encryption remains for the inline fallback on builds without it.
-  Secrets are device-local, so a second device must re-enter them.
+- **Tokens live in the OS keychain when it actually works.** On Obsidian 1.11.4+
+  the plugin stores account tokens in the built-in SecretStorage — but only
+  after a verified write-read round-trip; on Linux systems without a keyring
+  daemon (or older builds) tokens fall back to `data.json` with optional
+  passphrase encryption instead of being silently dropped. Secrets are
+  device-local: a second device re-enters them via **Update token → Test &
+  Save** (or **Reconnect** for OAuth) on the existing account, so connected
+  folders are never broken. GitLab accounts can also sign in with OAuth 2.0
+  (PKCE, least-privilege scopes, auto-refresh).
   Configuration-directory sync is not fully implemented; an opt-in control is not
   a guarantee that `.obsidian/` files are synchronized. Credential-bearing plugin
   data must stay excluded.

@@ -2,9 +2,8 @@
 
 MUGS synchronizes eligible **text files** between a desktop Obsidian vault and
 Git over HTTPS. The quickest path is: install a published release, back up your
-vault, add a Git account, connect matching folders, inspect the mapping, then
-resume automatic sync. Once configured, local edits trigger a background pass;
-the periodic check discovers remote edits in directions that permit downloads.
+vault, add a Git account, and connect matching folders — sync then runs
+automatically in the background; there is no separate "resume" step.
 
 **Before you start:** use desktop Obsidian **1.11.4 or newer** (required for
 keychain token storage), install a working
@@ -28,14 +27,22 @@ version number or a GitLab tag as proof that BRAT can install it.
 2. Open **Settings → BRAT** and choose **Add Beta plugin** (or run BRAT's
    **Add a beta plugin for testing** command). Enter
    `https://github.com/arikamidotnet/MUGS-obsidian` or
-   `arikamidotnet/MUGS-obsidian`. Choose a **frozen** version matching the
-   specific published release approved for your team, rather than tracking
-   Latest on a production vault. Confirm the installation; if it initially
-   tracks Latest, use the plugin's **edit** control in BRAT's beta-plugin list
-   to freeze it to that release before accepting updates.
-3. In **Settings → Community plugins**, enable **MUGS — Multi-User Git Sync**
+   `arikamidotnet/MUGS-obsidian`, and confirm the installation.
+3. Keep BRAT tracking **Latest** (the default) so releases appear normally.
+   Freezing a version is an optional team-pinning feature — if a previous
+   operator froze MUGS to an old release, BRAT will silently never offer
+   updates: open **Settings → BRAT → Beta plugin list → MUGS → edit** and
+   remove the freeze (or set it to the current release).
+4. New releases do not auto-install mid-session: run the command palette →
+   **BRAT: Update plugins** (or *Check for updates to all beta plugins*), then
+   reload Obsidian.
+5. In **Settings → Community plugins**, enable **MUGS — Multi-User Git Sync**
    if BRAT did not enable it. Open **Settings → MUGS** and confirm the About
    version matches the release you selected.
+
+**Not seeing the latest release in BRAT?** It is almost always one of the two
+BRAT-side causes above (a frozen version, or a cached update check) — run
+**BRAT: Update plugins** and check the freeze state before anything else.
 
 BRAT's optional **GitHub download token** is only needed for a *private plugin
 distribution repository* or GitHub API rate limits. It is distinct from the
@@ -49,10 +56,10 @@ explains release selection, frozen versions and private distributions.
 Use this when BRAT is unavailable or when an operator is validating an
 unpublished candidate. Back up **the full vault**, including
 `.obsidian/plugins/mugs-obsidian/data.json` and `.mugs-clones/`, before an
-upgrade; plugin state may contain plaintext access tokens. Keep that backup
-private. In MUGS **Settings → Sync**, enable **Pause automatic sync** and click
-**Apply settings**. Wait for any running pass to finish, then disable MUGS under
-Community plugins before replacing files. Do not delete or reset a clone.
+upgrade; keep that backup private. Optionally enable **Pause automatic sync**
+in MUGS **Settings → Sync** (saved automatically), wait for any running pass to
+finish, then disable MUGS under Community plugins before replacing files. Do
+not delete or reset a clone.
 
 Download `main.js`, `manifest.json`, `styles.css` and `checksums.txt` from the
 *same* [GitHub release](https://github.com/arikamidotnet/MUGS-obsidian/releases).
@@ -81,12 +88,15 @@ inspect dirty/unpushed clones before any recovery; never force-push.
    repository, branch and which top-level folder belongs to which person.
    If both sides already contain files, compare them **before** connecting.
 2. In **Settings → MUGS → Accounts → Add another account**, select GitLab or
-   GitHub and paste your **Token** (the **Base URL** and **Label** are filled in
+   GitHub. For GitLab you can either **Sign in with GitLab (OAuth)** (paste your
+   OAuth **Application ID**; MUGS handles the rest with auto-refreshing tokens)
+   or paste an **access token** — use the **Create token in GitLab ↗** link for
+   a prefilled least-privilege token. **Base URL** and **Label** are filled in
    automatically under **Advanced options**, where you can also set a self-hosted
-   endpoint, username, or **Allowed repositories** for a project-scoped token).
+   endpoint, username, or **Allowed repositories** to pin MUGS to a single repo.
    For a **Local** repository, enter its directory path (plain `/path/to/repo`
    or `file:///path/to/repo`). **Test connection** probes the account before
-   saving; press **Add account** to save immediately.
+   saving; press **Add account** (or **Sign in with GitLab**) to save immediately.
 3. Under **Connected folders → Connect another folder**, choose your repository
    and pick either **Sync specific folders** (check matching top-level folders,
    fuzzy suggestions, or map a custom folder pair) or **Sync entire repository
@@ -141,8 +151,17 @@ conflicts can postpone completion; keep a separate backup and check status.
   both sides. Check spelling/case, create the intended directories if needed,
   then reopen the mapping form. Do not select the whole-vault checkbox simply
   to work around missing folder suggestions.
-- **403/404 or push rejected:** check token approval, repository role, branch
-  protections/rulesets and that the target branch exists. See the host guide.
+- **403/404, push rejected, or "HTTP Basic: Access denied":** the token was
+  rejected by the remote — it is expired, revoked, or (for project/fine-grained
+  tokens) missing the `read_repository`/`write_repository` scopes. Fix it in
+  place: **Settings → MUGS → Accounts → Update token → Test & Save**, or
+  **Reconnect** for OAuth accounts — connected folders are never broken by a
+  token update. Then check repository role, branch protections/rulesets and
+  that the target branch exists.
+- **Credentials locked or missing on this device:** passphrase-encrypted tokens
+  unlock under **Security**; a vault copied from another machine shows
+  "token missing on this device" — paste the token (or reconnect OAuth) on the
+  existing account card and every connected folder comes back.
 - **Not syncing:** check the status bar and Overview. Automatic sync runs by
   default (near real-time); if **Pause automatic sync** is on, turn it off.
   **Sync now** always works, even while paused.

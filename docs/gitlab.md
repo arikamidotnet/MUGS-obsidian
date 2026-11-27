@@ -36,18 +36,22 @@ alongside manual access tokens, with automatic background token refresh:
 
 ## Create a GitLab token (PAT / Project token)
 
-1. In GitLab, open your avatar → **Edit profile → Access → Personal access
-   tokens**. Choose a legacy personal token if using the scope-based setup
-   described here. Name it for this device, set an expiry and record the
-   rotation date. GitLab shows the value once; store it privately.
-2. Choose **`api`** for this MUGS account: the GitLab v4 adapter uses REST
-   discovery and directory/branch endpoints, and personal-token `api` also
-   permits Git over HTTPS, subject to your repository role. `write_repository`
-   by itself does **not** authenticate GitLab REST API calls. For a narrower
-   token, consult your GitLab version's [scope matrix][scopes] and verify both
-   API **and** Git-over-HTTPS read/write permissions with the intended project
-   before relying on it.
-3. In **Settings → MUGS → Accounts → Add another account**, select
+Prefer the least-privilege token that works — **not** the full `api` scope:
+
+1. **Best: a project access token** (self-managed any tier; GitLab.com
+   Premium/Ultimate) or a fine-grained personal token scoped to the *one*
+   project you are syncing. Grant **`read_api` + `write_repository`** — REST
+   discovery plus Git-over-HTTPS push/pull, nothing else (no issues, MRs, CI or
+   settings access).
+2. Otherwise, in GitLab open your avatar → **Edit profile → Access → Personal
+   access tokens** (or just use the **Create token in GitLab ↗** link inside
+   MUGS's add-account form, which prefills exactly these scopes). Name it for
+   this device, set an expiry, and record the rotation date. GitLab shows the
+   value once; store it privately.
+3. Avoid the full **`api`** scope unless you specifically need it: it grants
+   read/write to every project, group, registry and CI setting your account can
+   reach, which turns a leaked token into a much bigger incident.
+4. In **Settings → MUGS → Accounts → Add another account**, select
    **GitLab**, paste the token into **Token** (the **Label** is filled in for
    you; edit it if you like) and optionally supply your GitLab **Username**. The token is not
    your GitLab login password. **Base URL** is filled in automatically as
@@ -55,12 +59,12 @@ alongside manual access tokens, with automatic background token refresh:
    `https://your-gitlab-host.example/api/v4`. Do not enter a project page or a
    Git clone URL in Base URL — MUGS flags a website URL inline and suggests the
    API endpoint. Use **Test connection** to confirm the account before adding it.
-4. Optionally enter `group/project` (or `group/subgroup/project`) in
-   **Allowed repositories**, one per line. This limits MUGS's repository
-   picker, **not** the host token's actual privileges. It is particularly
-   useful for a token restricted to one project, where global project
-   enumeration may not work. Press **Add account** — settings save automatically,
-   so you can go straight on to connecting a folder.
+5. Optionally enter `group/project` (or `group/subgroup/project`) in
+   **Allowed repositories**, one per line. This pins MUGS to that single
+   repository (the picker lists only it) and works with OAuth accounts too —
+   particularly useful for a project-scoped token, where global enumeration
+   may not work. Press **Add account** — settings save automatically, so you
+   can go straight on to connecting a folder.
 
 GitLab personal tokens expire and must be rotated. To rotate or fix a token
 without breaking connected folders, open **Settings → MUGS → Accounts**, click
