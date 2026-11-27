@@ -1312,9 +1312,11 @@ b.setButtonText("Remove").setClass("mugs-link-btn").onClick(() => {
           a.rel = "noopener noreferrer";
           a.textContent = "Create token in GitLab ↗";
           linkRow.appendChild(a);
-          linkRow.createEl("span", {
+          // Own line below the link — a leading "·" separator read as a stray
+          // dash whenever the link wrapped onto its own row.
+          linkRow.createEl("div", {
             cls: "mugs-muted",
-            text: " · For single-repo access, use a fine-grained or project token with read_api + write_repository and set Allowed repositories below.",
+            text: "For single-repo access, use a fine-grained or project token with read_api + write_repository and set Allowed repositories below.",
           });
         }
       }

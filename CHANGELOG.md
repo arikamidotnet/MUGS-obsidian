@@ -2,6 +2,15 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.27 highlights
+
+- **UI polish from a full settings/views audit.** Non-destructive link buttons
+  (Refresh, Copy URI, Update token, Manage, Cancel) now highlight with the
+  accent color on hover instead of error red; the single-repo hint under
+  **Create token in GitLab ↗** sits on its own line (no stray separator glyph
+  when the link wraps); and consecutive account cards in Settings are visually
+  separated by a subtle divider.
+
 ## 0.4.26 highlights
 
 - **Fix: stretched radio buttons in the GitLab auth-mode and connect-mode toggles.**

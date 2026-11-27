@@ -468,6 +468,11 @@
 
 /* --- Settings: mapping cards ---------------------------------------------- */
 
+/* Account cards: the inline repair panel sits outside the setting-item border,
+ * so separate consecutive accounts with their own divider. */
+.mugs-settings .mugs-credential { border-bottom: 1px solid var(--background-modifier-border); padding-bottom: 12px; margin-bottom: 12px; }
+.mugs-settings .mugs-credential:last-child { border-bottom: 0; padding-bottom: 0; margin-bottom: 0; }
+
 .mugs-mapping-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .mugs-mapping-name   { font-weight: 600; font-size: var(--font-ui-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 
@@ -542,7 +547,9 @@
 /* --- Link-style buttons ---------------------------------------------------- */
 
 .mugs-link-btn { font-size: var(--font-ui-smaller); padding: 3px 9px; border-radius: 5px; border: 1px solid var(--background-modifier-border); background: var(--background-modifier-form-field); color: var(--text-normal); cursor: pointer; }
-.mugs-link-btn:hover { border-color: var(--text-error, #f85149); color: var(--text-error, #f85149); }
+/* These buttons (Refresh, Copy URI, Update token, Manage, Cancel) are not
+ * destructive — hover must not paint them in error red. */
+.mugs-link-btn:hover { border-color: var(--interactive-accent); color: var(--text-accent); }
 
 /* --- Overview and navigation --------------------------------------------- */
 .mugs-navigation { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid var(--background-modifier-border); }
