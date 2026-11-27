@@ -2,6 +2,15 @@
 
 Version highlights for each published GitHub release, newest first. Installable assets live on the [Releases page](https://github.com/arikamidotnet/MUGS-obsidian/releases).
 
+## 0.4.26 highlights
+
+- **Fix: stretched radio buttons in the GitLab auth-mode and connect-mode toggles.**
+  The settings form's width rule set every input to 100% and excluded only
+  checkboxes, so the native radio buttons in "Access token / Sign in with
+  GitLab" and "Sync specific folders / Sync entire repository" rendered as
+  giant oval shapes in several themes. Radios are now excluded from that rule
+  and pinned to their native 14px size with the theme accent color.
+
 ## 0.4.25 highlights
 
 - **GitLab OAuth 2.0 (PKCE + auto-refresh), additive alongside manual tokens.**

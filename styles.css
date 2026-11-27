@@ -723,7 +723,7 @@
 .mugs-settings .mugs-settings-add > summary { cursor: pointer; font-size: var(--font-ui-small); font-weight: 600; line-height: 1.5; }
 .mugs-settings .mugs-settings-form { margin-top: 12px; }
 .mugs-settings .mugs-settings-form .setting-item-control { flex-basis: 50%; }
-.mugs-settings .mugs-settings-form input:not([type="checkbox"]), .mugs-settings .mugs-settings-form textarea { width: 100%; }
+.mugs-settings .mugs-settings-form input:not([type="checkbox"]):not([type="radio"]), .mugs-settings .mugs-settings-form textarea { width: 100%; }
 .mugs-settings .mugs-matches { margin: 12px 0; background: var(--background-primary); padding: 12px; }
 .mugs-settings .mugs-match-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto minmax(0, 1fr); gap: 10px; padding: 10px 0; }
 .mugs-settings .mugs-match-row:not(.mugs-match-taken) { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); }
@@ -850,7 +850,8 @@
 .mugs-mapping-missing-cred > .mugs-cred-warning { font-weight: 500; }
 .mugs-rebind-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 
-/* Connect form: mode choice (specific folders vs whole-repo root) + repo row. */
+/* Connect form: mode choice (specific folders vs whole-repo root) + repo row.
+   Also used for the GitLab auth-mode toggle (token vs OAuth). */
 .mugs-mode-choice { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 8px 0; }
 .mugs-mode-option {
   display: flex;
@@ -859,6 +860,18 @@
   font-size: var(--font-ui-smaller);
   color: var(--text-normal);
   cursor: pointer;
+}
+/* Radios must stay native-sized: the form-wide input width rule above would
+ * otherwise stretch them into ovals in several themes. */
+.mugs-mode-option input[type="radio"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--interactive-accent);
 }
 .mugs-oauth-hint {
   display: flex;
